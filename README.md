@@ -91,10 +91,13 @@ harness resume TASK_ID           # clear pause and execute in this terminal
 ```
 
 Both views show **only tasks and sessions registered in the selected harness state store**.
-The mission view presents intake, planning, execution, application, verification and completion,
-with recorded stages highlighted. Cards show the engine, available model evidence, check counts,
-completed AI calls and cumulative response time. Click a card for the plan, evidence, sessions,
-conversation, timeline and interventions. These are observed workflow stages, not percentage estimates.
+The engine-room view maps managed sessions to selectable isometric execution modules connected
+to a shared state core. A module ring shows measured context relative to its handoff threshold;
+unknown context remains unfilled. Status lights and execution signals follow observed runtime state.
+Drag to rotate the view, or use the numbered session buttons. Click a module for the task plan,
+evidence, model identity, context, conversations, timeline and interventions. Eight modules are
+shown per page, with explicit navigation for the remaining sessions. Native task states, not
+percentage estimates, determine activity. Idle and completed sessions are not animated as busy.
 They do not scan unrelated terminals or attach to external sessions. The browser shows goals,
 session bindings, verification evidence, consultation messages and recent state changes.
 An active recorded state without its executor lock is marked as executor absent. Completed
@@ -328,6 +331,6 @@ translate or overwrite user-provided task content.
 
 ## UI status
 
-The installed browser interface is the live mission-card view. The separate
-[engine-room prototype](docs/design/README.md) explores a mechanical session view with illustrative
-data. It is not connected to live sessions and is not presented as a finished runtime feature.
+The installed browser interface is a live isometric engine-room view backed by the selected task
+store. The earlier [design prototype](docs/design/README.md) is retained separately as a historical
+concept with illustrative data. It is not the installed runtime UI.
