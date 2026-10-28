@@ -27,6 +27,18 @@ class Engine:
         self.store, self.model, self.timeout = store, model, timeout
         self.notify = notify or (lambda *_: None)
 
+    def _routing_boundary(self, task):
+        request = self.store.routing(task['id'])
+        if not request or task['data']['pending'] is not None:
+            return
+        old = {'provider': task['provider'], 'model': task['data'].get('options', {}).get('model')}
+        task['provider'] = request['provider']
+        task['data'].setdefault('options', {})['model'] = request['model']
+        task['data']['sessions'].pop(request['provider'], None)
+        task['data'].setdefault('session_metadata', {}).pop(request['provider'], None)
+        task['data'].get('context_tokens', {}).pop(request['provider'], None)
+        self.store.save(task, task['status'], 'routing_applied', {'from': old, 'to': request}, routing_id=request['id'])
+
     def _feedback_boundary(self, task):
         messages = self.store.inbox(task['id'])
         if not messages or task['data']['pending']:
@@ -62,6 +74,7 @@ class Engine:
         answer, metadata = adapter.call(task['id'], prompt, schema, session)
         data = task['data']
         data['sessions'][key] = metadata['session']
+        data.setdefault('session_metadata', {})[key] = metadata
         usage = metadata.get('usage', {})
         tokens = usage.get('input_tokens', 0)
         if task['provider'] == 'claude':
@@ -143,6 +156,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                                              if m['status'] in ('answered', 'consumed')],
                             'last_verification': data['evidence'], 'attempt': data['attempt'] + 1}, ensure_ascii=False)
         answer = self._call(task, 'running', prompt, providers.EXECUTE)
+        task['data']['last_summary'] = answer.get('summary', '')
         for message in self.store.messages(task['id'], task['data'].get('consultation_scope', task['data']['contract_hash'])):
             if message['status'] == 'answered':
                 self.store.message_state(message, 'consumed')
@@ -202,6 +216,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                 if answer.get('accepted') is not True or not isinstance(answer.get('reply'), str) or not answer['reply'].strip():
                     raise ValueError('Peer did not accept and answer the request')
                 task['data']['sessions'][key] = metadata['session']
+                task['data'].setdefault('session_metadata', {})[key] = metadata
                 self.store.save(task, 'waiting_peer', 'peer_response_received', dict(metadata, message_id=message['id']))
                 self.store.message_state(message, 'answered', reply=answer['reply'])
             except Exception as error:
@@ -236,6 +251,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                 if task['status'] == 'paused':
                     self.store.save(task, task['data'].pop('resume_status', 'ready'), 'continued')
                 self._feedback_boundary(task)
+                self._routing_boundary(task)
                 if task['status'] in ('completed', 'already_satisfied'):
                     # A later external edit must not keep a historical PASS current.
                     previous_status = task['status']
@@ -255,6 +271,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                 while task['status'] not in ('completed', 'already_satisfied', 'blocked', 'needs_input'):
                     if self._pause_boundary(task):
                         break
+                    self._routing_boundary(task)
                     if task['data']['contract'] and not task['data']['pending']:
                         outstanding = [m for m in self.store.messages(task['id'], task['data'].get('consultation_scope', task['data']['contract_hash']))
                                        if m['status'] not in ('answered', 'consumed')]

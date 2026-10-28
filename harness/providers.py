@@ -102,6 +102,7 @@ class Provider:
             raise RuntimeError('Selected CLI failed (exit %s). Inspect %s and %s' %
                                (process.returncode, log_path, error_path))
         usage = {}
+        reported_models = []
         if self.name == 'claude':
             envelope = json.loads(log_path.read_text(encoding='utf-8'))
             if envelope.get('is_error'):
@@ -111,6 +112,7 @@ class Provider:
             if answer is None:
                 answer = json.loads(envelope.get('result', '{}'))
             usage = envelope.get('usage', {})
+            reported_models = list(envelope.get('modelUsage', {}))
         else:
             answer = json.loads(output_path.read_text(encoding='utf-8'))
             for line in log_path.read_text(encoding='utf-8').splitlines():
@@ -122,8 +124,11 @@ class Provider:
                     session = event.get('thread_id', session)
                 if event.get('type') == 'turn.completed':
                     usage = event.get('usage', {})
+                if isinstance(event.get('model'), str) and event['model'] not in reported_models:
+                    reported_models.append(event['model'])
         if not isinstance(answer, dict):
             raise ValueError('Provider response must be a structured object')
         return answer, {'session': session, 'provider': self.name,
+                        'requested_model': self.model, 'reported_models': reported_models,
                         'seconds': round(time.monotonic() - started, 3),
                         'usage': usage, 'log': str(log_path), 'invocation': str(invocation)}

@@ -25,11 +25,15 @@ def show(task):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Persistent, provider-neutral local task runtime (pilot)')
     parser.add_argument('--home', help='Private task store (default: ~/.local/share/local-harness)')
-    sub = parser.add_subparsers(dest='command', required=True)
+    sub = parser.add_subparsers(dest='command')
     sub.add_parser('doctor', help='Show installed CLIs; never installs or changes provider settings')
     sub.add_parser('list', help='Read current tasks without a model call')
     config = sub.add_parser('config', help='Choose a default provider once; task-level overrides remain possible')
     config.add_argument('--provider', choices=('codex', 'claude'))
+    switch = sub.add_parser('switch', help='Queue engine/model selection at the next safe boundary')
+    switch.add_argument('id')
+    switch.add_argument('--provider', required=True, choices=('codex', 'claude'))
+    switch.add_argument('--model', help='Model ID; omit to use the selected CLI default')
     start = sub.add_parser('start', help='Interpret an ordinary request and run a local artifact task')
     start.add_argument('prompt', help='Ordinary user request, or - to read stdin')
     start.add_argument('--workspace', default='.')
@@ -70,6 +74,9 @@ def main(argv=None):
     dashboard.add_argument('--no-open', action='store_true')
     dashboard.add_argument('--lang', choices=('en', 'ko'), default='en')
     args = parser.parse_args(argv)
+    if args.command is None:
+        from .launcher import launch
+        return launch(args.home)
     if args.command == 'doctor':
         print(json.dumps(doctor(), ensure_ascii=False, indent=2))
         return 0
@@ -86,6 +93,9 @@ def main(argv=None):
             from .observer import serve
             serve(store.home, args.port, not args.no_open, args.lang)
             return 0
+        elif args.command == 'switch':
+            result = {'queued': store.route(args.id, args.provider, args.model),
+                      'note': 'Worker or resume applies this selection at a safe boundary. Model availability is checked by the CLI on its next call.'}
         elif args.command == 'start':
             root = Path(args.workspace).expanduser().resolve()
             if not root.is_dir():
@@ -176,7 +186,7 @@ def main(argv=None):
                             continue
                         if item['status'] == 'interrupted' and store.get(item['id'])['data']['pending'] is not None:
                             continue  # A conflicted batch needs explicit resume or recovery.
-                        if store.inbox(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'repairing', 'waiting_peer', 'paused'):
+                        if store.inbox(item['id']) or store.routing(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'repairing', 'waiting_peer', 'paused'):
                             try:
                                 result = engine.run(item['id'])
                                 if result['revision'] != item['revision']:

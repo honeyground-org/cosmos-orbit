@@ -33,6 +33,8 @@ class Store:
             kind TEXT NOT NULL, payload TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS controls (task_id TEXT PRIMARY KEY, paused INTEGER NOT NULL);
+          CREATE TABLE IF NOT EXISTS routing (task_id TEXT PRIMARY KEY, id TEXT NOT NULL,
+            provider TEXT NOT NULL, model TEXT, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS inbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, text TEXT NOT NULL,
             provider TEXT, at TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
@@ -72,7 +74,7 @@ class Store:
         self.db.execute('INSERT INTO events(task_id,kind,payload,at) VALUES(?,?,?,?)',
                         (task_id, kind, json.dumps(payload, ensure_ascii=False), now()))
 
-    def save(self, task, status, kind, payload=None, consumed=()):
+    def save(self, task, status, kind, payload=None, consumed=(), routing_id=None):
         with self.db:
             changed = self.db.execute(
                 'UPDATE tasks SET status=?,revision=revision+1,data=?,provider=?,updated=? WHERE id=? AND revision=?',
@@ -83,6 +85,8 @@ class Store:
             self._event(task['id'], kind, payload or {})
             for item_id in consumed:
                 self.db.execute('UPDATE inbox SET consumed=1 WHERE id=? AND task_id=?', (item_id, task['id']))
+            if routing_id:
+                self.db.execute('DELETE FROM routing WHERE task_id=? AND id=?', (task['id'], routing_id))
         task.update(self.get(task['id']))
 
     def events(self, task_id):
@@ -100,6 +104,25 @@ class Store:
 
     def inbox(self, task_id):
         return [dict(r) for r in self.db.execute('SELECT * FROM inbox WHERE task_id=? AND consumed=0 ORDER BY id', (task_id,))]
+
+    def route(self, task_id, provider, model=None):
+        import shutil
+        self.get(task_id)
+        if provider not in ('codex', 'claude') or not shutil.which(provider):
+            raise ValueError('Selected CLI is not installed: ' + str(provider))
+        if model is not None and (not isinstance(model, str) or not model.strip() or len(model) > 200
+                                  or any(c.isspace() for c in model) or model.startswith('-')):
+            raise ValueError('Provide a model identifier or leave it empty for the CLI default')
+        request = {'id': uuid.uuid4().hex, 'provider': provider, 'model': model, 'at': now()}
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO routing VALUES(?,?,?,?,?)',
+                            (task_id, request['id'], provider, model, request['at']))
+            self._event(task_id, 'routing_requested', request)
+        return request
+
+    def routing(self, task_id):
+        row = self.db.execute('SELECT * FROM routing WHERE task_id=?', (task_id,)).fetchone()
+        return dict(row) if row else None
 
     def send(self, task, target, question):
         scope = task['data'].get('consultation_scope', task['data']['contract_hash'])

@@ -103,11 +103,44 @@ def snapshot(store, task_id=None):
                 session_state = 'running' if in_flight and busy else 'idle' if session_id else 'unbound'
                 sessions.append({'name': name, 'provider': provider, 'id': session_id, 'peer': peer,
                                  'state': session_state, 'managed': True,
+                                 'requested_model': data.get('session_metadata', {}).get(alias, {}).get('requested_model',
+                                     data.get('peers', {}).get(name, {}).get('model') if peer else
+                                     data.get('options', {}).get('model') if alias == task['provider'] else None),
+                                 'reported_models': data.get('session_metadata', {}).get(alias, {}).get('reported_models', []),
                                  'context_tokens': data.get('context_tokens', {}).get(alias)})
             rows = store.db.execute('SELECT * FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 24', (task['id'],)).fetchall()
             events = [event_view(r) for r in rows]
             contract = data.get('contract') or {}
+            call_rows = store.db.execute("SELECT payload FROM events WHERE task_id=? AND kind IN ('model_finished','peer_response_received')", (task['id'],)).fetchall()
+            calls = [json.loads(r['payload']) for r in call_rows]
+            kinds = {r[0] for r in store.db.execute('SELECT DISTINCT kind FROM events WHERE task_id=?', (task['id'],))}
+            visited = [0]
+            if 'contract_created' in kinds:
+                visited.append(1)
+            if any(c.get('phase') == 'running' for c in calls):
+                visited.append(2)
+            if 'action_applied' in kinds:
+                visited.append(3)
+            if 'verified' in kinds:
+                visited.append(4)
+            usage_input = sum(c.get('usage', {}).get('input_tokens', 0) for c in calls)
+            usage_output = sum(c.get('usage', {}).get('output_tokens', 0) for c in calls)
+            stage = {'received': 0, 'planning': 1, 'ready': 2, 'running': 2, 'waiting_peer': 2,
+                     'applying': 3, 'verifying': 4, 'repairing': 2, 'completed': 5,
+                     'already_satisfied': 5, 'stale': 4}.get(task['status'], 1 if not contract else 2)
+            if state == 'stale':
+                stage = 4
+            if data.get('pending'):
+                stage = 3
+            started = datetime.datetime.fromisoformat(task['created'])
+            ended = datetime.datetime.now(datetime.timezone.utc) if busy else datetime.datetime.fromisoformat(task['updated'])
             tasks.append({'id': task['id'], 'provider': task['provider'], 'status': state,
+                          'stage': stage, 'visited': visited, 'requested_model': data.get('options', {}).get('model'),
+                          'routing': store.routing(task['id']), 'last_summary': data.get('last_summary', ''),
+                          'files': contract.get('files', []),
+                          'metrics': {'calls': len(calls), 'model_seconds': round(sum(c.get('seconds', 0) for c in calls), 1),
+                                      'input_tokens': usage_input, 'output_tokens': usage_output,
+                                      'elapsed_seconds': max(0, round((ended-started).total_seconds()))},
                           'recorded_status': task['status'], 'revision': task['revision'],
                           'goal': contract.get('goal') or task['prompt'], 'request': task['prompt'],
                           'workspace': task['workspace'], 'updated': task['updated'],
@@ -164,6 +197,10 @@ def terminal(data, lang='en', width=110):
         for session in task['sessions']:
             rows.append('    ' + fit(session['name'], 18) + fit(t[session['state']], 12)
                         + clean(session['id'] or '—'))
+            rows.append('      ' + clean(session['provider']) + ' | requested: ' + clean(session['requested_model'] or 'CLI default')
+                        + ' | reported: ' + clean(', '.join(session['reported_models']) or ('미확인' if lang == 'ko' else 'unreported')))
+        if task['routing']:
+            rows.append('    → ' + clean(task['routing']['provider']) + ' / ' + clean(task['routing']['model'] or 'CLI default'))
         if task['feedback']:
             rows.append('    %s: %d' % (t['pending'], len(task['feedback'])))
     if not data['tasks']:
@@ -246,7 +283,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
             if self.headers.get('Host') != authority or self.headers.get('Origin') != origin or not self.valid_token():
                 self.respond(403, '{}')
                 return
-            if self.path not in ('/feedback', '/pause', '/continue'):
+            if self.path not in ('/feedback', '/pause', '/continue', '/switch'):
                 self.respond(404, '{}')
                 return
             store = Store(home)
@@ -270,6 +307,9 @@ def serve(home, port=0, open_browser=True, lang='en'):
                         raise ValueError('Nonempty feedback required')
                     message_id = store.enqueue(task_id, text, None)
                     self.respond(200, json.dumps({'queued': message_id, 'worker_running': store.locked('worker')}))
+                elif self.path == '/switch':
+                    request = store.route(task_id, body.get('provider'), body.get('model') or None)
+                    self.respond(200, json.dumps({'queued': request, 'worker_running': store.locked('worker')}))
                 else:
                     store.set_paused(task_id, self.path == '/pause')
                     self.respond(200, json.dumps({'saved': True, 'worker_running': store.locked('worker')}))

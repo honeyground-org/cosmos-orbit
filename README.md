@@ -12,6 +12,13 @@ a deterministic feedback loop. It is not a skill bundle or a workflow document i
 
 Requirements: macOS or Linux, Python 3.9+, and one installed/authenticated CLI.
 
+Run `bin/harness` (or `harness` when on PATH) without a subcommand for the interactive launcher.
+Choose a new task, browser dashboard, terminal monitor, worker, or an existing task's engine/model
+selection. Task setup asks for an installed CLI, CLI-default or explicit model ID, workspace,
+ordinary-language request, and immediate execution or queueing. The launcher prints the state-store
+location. `--home PATH` works with the launcher too. Noninteractive callers use explicit subcommands.
+The model selector currently accepts an ID; it does not yet discover account-specific model lists.
+
 ```sh
 bin/harness doctor
 bin/harness config --provider codex  # optional: choose once; a single installed CLI is auto-selected
@@ -56,6 +63,10 @@ bin/harness resume TASK_ID           # clear pause and execute in this terminal
 ```
 
 Both views show **only tasks and sessions registered in the selected harness state store**.
+The mission view presents intake, planning, execution, application, verification and completion,
+with recorded stages highlighted. Cards show the engine, available model evidence, check counts,
+completed AI calls and cumulative response time. Click a card for the plan, evidence, sessions,
+conversation, timeline and interventions. These are observed workflow stages, not percentage estimates.
 They do not scan unrelated terminals or attach to external sessions. The browser shows goals,
 session bindings, verification evidence, consultation messages and recent state changes.
 An active recorded state without its executor lock is marked as executor absent. Completed
@@ -70,6 +81,25 @@ independent tasks running. Use the same `--home PATH` for the worker and both vi
 The browser listens only on `127.0.0.1`, with host validation, a per-launch request token and
 same-origin mutation checks. It is a local single-user observer, not a remotely hosted service
 or a multi-user authentication boundary. Do not expose its port through a public proxy.
+
+## Switch engine or model
+
+```sh
+bin/harness switch TASK_ID --provider claude --model MODEL_ID
+bin/harness switch TASK_ID --provider codex  # reset to this CLI's default selection
+```
+
+The launcher and mission detail panel offer the same controls. Selection requests are durable;
+the latest unconsumed request replaces the preceding one. The worker or `resume` applies a selection
+at a safe boundary, after any pending file batch is reconciled. Paused work remains paused.
+The fixed goal, acceptance checks, feedback, attempt budget and history are retained. A fresh
+target-provider session receives the durable task context. Completed tasks are not reopened simply
+to change a selection, and conflicted pending writes still require explicit recovery.
+
+Requested models and models reported by the CLI are separate fields. Historical calls and CLI
+outputs without model identity are marked unreported, never inferred from a default. The next
+CLI invocation checks model availability; unsupported selections interrupt the task without
+silently falling back. This control currently applies to the task executor, not its named advisers.
 
 ## Distribution direction
 
@@ -212,5 +242,8 @@ Validated with installed Codex CLI 0.164.0 and Claude Code 2.1.312:
   host/origin/token validation, revision conflicts, queued feedback and pause/continue controls.
   A delayed executor probe paused before applying its pending proposal and continued without
   another model call. Browser rendering was inspected against real pilot task/session records.
+- Interactive terminal setup was exercised through engine/model selection and durable queueing.
+  An isolated controlled-provider probe switched engines during execution, reconciled the pending
+  artifact, retained the fixed contract and repaired it with the selected provider/model.
 
 These are pilot checks, not evidence of lower cost or better outcomes across real development work.
