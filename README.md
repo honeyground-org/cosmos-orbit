@@ -172,13 +172,51 @@ at the next safe boundary, discarding an un-applied model proposal when supersed
 already being applied is reconciled before the new instruction; feedback does not automatically
 undo completed writes. `status` exposes corrections still queued.
 
-`handoff` clears runtime-owned session bindings. The next model call reconstructs its context
-from the durable goal, constraints, current files and verification results. It does not replay
-the entire conversation. Otherwise each task reuses one session per selected provider across
-planning, execution and repair. `--context-budget` sets a checkpoint trigger based on the CLI's
-reported input tokens (including cached input); the default 64,000 is a configurable guardrail,
-not a measured optimum or an exact live context-window reading. It never attaches a second writer
-to an existing user-owned live session.
+## Automatic context handoff
+
+The runtime checks each owned executor/adviser session after a call and before its next call.
+When its measured context reaches the threshold, it saves a durable handoff, starts a fresh native
+CLI session, injects the handoff and continues automatically. File application is reconciled before
+handoff; completed tasks do not create unnecessary new sessions.
+
+- **Claude default: 500,000 tokens.** Read the latest assistant request's input tokens, including
+  cache creation and cache reads. The final result's aggregate usage is not current context.
+- **Codex default: min(500,000, 80% of its reported effective context window).** Read
+  `last_token_usage.total_tokens` from the owned session's current native token-count event, never
+  `total_token_usage`. If the window is unavailable, the configured default is 500,000.
+- An explicit `--context-budget NUMBER` overrides the default for that task. Existing explicit
+  budgets remain unchanged. The interactive launcher also asks for an optional threshold.
+- Measurements are taken at call boundaries, not continuously during a generation. Claude reports
+  the latest request input; Codex reports the latest request total. These scopes are labelled and
+  are not presented as identical billing metrics. Unsupported/missing measurements remain unknown;
+  the runtime does not fabricate a percentage or fall back to cumulative usage.
+
+```sh
+bin/harness start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
+bin/harness resume TASK_ID --context-budget 500000
+bin/harness handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
+```
+
+The handoff preserves the fixed contract (goal, constraints and checks), current verification,
+application attempts, recent corrections, last execution summary and next phase. Current files and
+peer replies are supplied by the next call. Full feedback, previous sessions and event history remain
+in private storage; only the latest eight corrections are copied into the compact handoff packet.
+The original full request and correction history remain available to the planning phase. Model prose
+in a handoff is historical context, not new authority. Handoffs are journalled before clearing session
+bindings; retries reuse the saved handoff rather than losing it or incrementing the handoff count again.
+`status`, `watch` and browser session details expose measured tokens, threshold and handoff count.
+
+Native CLI compaction remains enabled. Compaction and resuming an existing session are not the same
+operation as this fresh-session handoff. The installed project handoff guide was inspected: it prepares
+notes and asks a human to clear/start another chat, so it cannot perform this unattended runtime path.
+The runtime adds only durable task-state transfer and native new-session creation; it does not install
+or change user skills, copy personal memory paths, or require Local Brain. This applies to owned sessions,
+not arbitrary external CLI terminals. Codex rollout metadata is version-sensitive; missing or changed
+formats are shown as unknown instead of being mistaken for zero.
+
+References: [Claude usage scopes](https://code.claude.com/docs/en/agent-sdk/cost-tracking),
+[Claude CLI session/streaming interfaces](https://code.claude.com/docs/en/cli-reference),
+[Codex developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
 
 ## State and recovery
 
@@ -247,3 +285,9 @@ Validated with installed Codex CLI 0.164.0 and Claude Code 2.1.312:
   artifact, retained the fixed contract and repaired it with the selected provider/model.
 
 These are pilot checks, not evidence of lower cost or better outcomes across real development work.
+
+Automatic handoff verification: real Codex and Claude runs each crossed a deliberately reduced
+1,000-token threshold, saved a handoff, obtained a different session ID and completed the fixed
+artifact checks. Isolated probes covered the exact 500,000-token boundary, cache accounting,
+aggregate-usage rejection, adviser sessions and retry after a fresh-session failure. No 500,000-token
+live workload was generated solely for testing.

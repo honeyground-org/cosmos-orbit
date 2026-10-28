@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import time
 
-from . import providers, workspace
+from . import providers, workspace, context
 
 
 BASE = '''You are the reasoning component of a local task runtime. Return only the requested JSON.
@@ -37,6 +37,7 @@ class Engine:
         task['data']['sessions'].pop(request['provider'], None)
         task['data'].setdefault('session_metadata', {}).pop(request['provider'], None)
         task['data'].get('context_tokens', {}).pop(request['provider'], None)
+        task['data'].get('context_measurements', {}).pop(request['provider'], None)
         self.store.save(task, task['status'], 'routing_applied', {'from': old, 'to': request}, routing_id=request['id'])
 
     def _feedback_boundary(self, task):
@@ -51,6 +52,7 @@ class Engine:
                 task['data'].setdefault('options', {})['model'] = None
                 # Returning to an older provider must not revive its pre-handoff context.
                 task['data']['sessions'].pop(message['provider'], None)
+                task['data'].get('context_measurements', {}).pop(message['provider'], None)
                 task['provider'] = message['provider']
         task['data']['contract'] = None
         task['data']['reason'] = ''
@@ -64,22 +66,16 @@ class Engine:
         options = data.get('options', {})
         adapter = providers.Provider(task['provider'], self.store.home,
                                      self.model or options.get('model'), options.get('timeout', self.timeout))
-        session = data['sessions'].get(key)
-        context_limit = options.get('context_budget', 64000)
-        if session and data.get('context_tokens', {}).get(key, 0) >= context_limit:
-            data['sessions'].pop(key, None)
-            session = None
-            self.store.save(task, phase, 'automatic_checkpoint', {'provider': key, 'context_budget': context_limit})
+        session, prompt = context.prepare(self.store, task, key, phase, task['provider'], prompt)
         self.store.save(task, phase, 'model_started', {'phase': phase, 'session': session})
         answer, metadata = adapter.call(task['id'], prompt, schema, session)
         data = task['data']
         data['sessions'][key] = metadata['session']
         data.setdefault('session_metadata', {})[key] = metadata
-        usage = metadata.get('usage', {})
-        tokens = usage.get('input_tokens', 0)
-        if task['provider'] == 'claude':
-            tokens += usage.get('cache_creation_input_tokens', 0) + usage.get('cache_read_input_tokens', 0)
-        data.setdefault('context_tokens', {})[key] = tokens
+        context.record(task, key, metadata)
+        handoff = context.resumed(task, key, metadata)
+        if handoff:
+            metadata['handoff'] = handoff
         self.store.save(task, phase, 'model_finished', dict(metadata, phase=phase))
         return answer
 
@@ -212,11 +208,16 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
             try:
                 adapter = providers.Provider(peer['provider'], self.store.home, peer.get('model'),
                                              task['data'].get('options', {}).get('timeout', self.timeout))
-                answer, metadata = adapter.call(task['id'], prompt, providers.REPLY, task['data']['sessions'].get(key))
+                session, prompt = context.prepare(self.store, task, key, 'consulting', peer['provider'], prompt)
+                answer, metadata = adapter.call(task['id'], prompt, providers.REPLY, session)
                 if answer.get('accepted') is not True or not isinstance(answer.get('reply'), str) or not answer['reply'].strip():
                     raise ValueError('Peer did not accept and answer the request')
                 task['data']['sessions'][key] = metadata['session']
                 task['data'].setdefault('session_metadata', {})[key] = metadata
+                context.record(task, key, metadata)
+                handoff = context.resumed(task, key, metadata)
+                if handoff:
+                    metadata['handoff'] = handoff
                 self.store.save(task, 'waiting_peer', 'peer_response_received', dict(metadata, message_id=message['id']))
                 self.store.message_state(message, 'answered', reply=answer['reply'])
             except Exception as error:
@@ -344,9 +345,8 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         task = self.store.get(task_id)
         with self.store.lock('task:' + task_id):
             task = self.store.get(task_id)
-            task['data']['sessions'] = {}
-            self.store.save(task, task['status'], 'session_checkpoint',
-                            {'reason': 'Next model call reconstructs from the durable contract, files and evidence'})
+            for key in list(task['data']['sessions']):
+                context.checkpoint(self.store, task, key, task['status'], reason='manual')
         return task
 
     def recover(self, task_id):

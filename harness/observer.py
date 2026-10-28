@@ -10,6 +10,7 @@ import unicodedata
 import webbrowser
 
 from .store import Store, now
+from .context import limit_for
 from .workspace import verify
 
 ACTIVE = {'planning', 'running', 'applying', 'verifying', 'repairing'}
@@ -107,7 +108,10 @@ def snapshot(store, task_id=None):
                                      data.get('peers', {}).get(name, {}).get('model') if peer else
                                      data.get('options', {}).get('model') if alias == task['provider'] else None),
                                  'reported_models': data.get('session_metadata', {}).get(alias, {}).get('reported_models', []),
-                                 'context_tokens': data.get('context_tokens', {}).get(alias)})
+                                 'context_tokens': data.get('context_measurements', {}).get(alias, {}).get('tokens'),
+                                 'context_limit': limit_for(data, alias, provider),
+                                 'context_source': data.get('context_measurements', {}).get(alias, {}).get('source', 'unavailable'),
+                                 'handoff_count': data.get('handoff_counts', {}).get(alias, 0)})
             rows = store.db.execute('SELECT * FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 24', (task['id'],)).fetchall()
             events = [event_view(r) for r in rows]
             contract = data.get('contract') or {}
@@ -199,6 +203,8 @@ def terminal(data, lang='en', width=110):
                         + clean(session['id'] or '—'))
             rows.append('      ' + clean(session['provider']) + ' | requested: ' + clean(session['requested_model'] or 'CLI default')
                         + ' | reported: ' + clean(', '.join(session['reported_models']) or ('미확인' if lang == 'ko' else 'unreported')))
+            rows.append('      context: ' + str(session['context_tokens'] if session['context_tokens'] is not None else '?')
+                        + ' / ' + str(session['context_limit']) + ' | handoffs: ' + str(session['handoff_count']))
         if task['routing']:
             rows.append('    → ' + clean(task['routing']['provider']) + ' / ' + clean(task['routing']['model'] or 'CLI default'))
         if task['feedback']:

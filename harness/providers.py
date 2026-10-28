@@ -8,6 +8,8 @@ import subprocess
 import time
 import uuid
 
+from .context import claude_measurement, codex_measurement
+
 
 def obj(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
@@ -56,7 +58,7 @@ class Provider:
         os.chmod(schema_path, 0o600)
         if self.name == 'claude':
             command = ['claude', '-p', '--tools', '', '--strict-mcp-config', '--setting-sources', '',
-                       '--output-format', 'json', '--json-schema', json.dumps(schema)]
+                       '--output-format', 'stream-json', '--verbose', '--json-schema', json.dumps(schema)]
             if session:
                 command += ['--resume', session]
             else:
@@ -78,6 +80,7 @@ class Provider:
             else:
                 command += ['--model', self.model]
         started = time.monotonic()
+        started_wall = time.time()
         invocation = directory / (call_id + '.invocation.json')
         version = subprocess.run([self.name, '--version'], capture_output=True, text=True, timeout=10)
         invocation.write_text(json.dumps({'argv': command, 'version': version.stdout.strip()}, indent=2), encoding='utf-8')
@@ -104,7 +107,11 @@ class Provider:
         usage = {}
         reported_models = []
         if self.name == 'claude':
-            envelope = json.loads(log_path.read_text(encoding='utf-8'))
+            events = [json.loads(line) for line in log_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+            envelope = next((e for e in reversed(events) if e.get('type') == 'result'), {})
+            if not envelope:
+                raise ValueError('Claude stream has no result envelope')
+            context = claude_measurement(events)
             if envelope.get('is_error'):
                 raise RuntimeError('Claude did not complete the call; inspect ' + str(log_path))
             session = envelope.get('session_id', session)
@@ -126,9 +133,10 @@ class Provider:
                     usage = event.get('usage', {})
                 if isinstance(event.get('model'), str) and event['model'] not in reported_models:
                     reported_models.append(event['model'])
+            context = codex_measurement(session, started_wall)
         if not isinstance(answer, dict):
             raise ValueError('Provider response must be a structured object')
         return answer, {'session': session, 'provider': self.name,
-                        'requested_model': self.model, 'reported_models': reported_models,
+                        'requested_model': self.model, 'reported_models': reported_models, 'context': context,
                         'seconds': round(time.monotonic() - started, 3),
                         'usage': usage, 'log': str(log_path), 'invocation': str(invocation)}

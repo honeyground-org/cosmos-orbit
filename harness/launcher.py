@@ -71,6 +71,12 @@ def launch(home=None):
         provider, model = engine_model()
         if action == 'switch':
             return main(prefix + ['switch', task_id, '--provider', provider] + (['--model', model] if model else []))
+        budget_text = input('자동 인계 토큰 기준 / Handoff tokens [auto]: ').strip()
+        budget = None
+        if budget_text:
+            if not budget_text.isdigit() or int(budget_text) < 1000:
+                raise ValueError('Handoff threshold must be at least 1000 tokens')
+            budget = int(budget_text)
         while True:
             workspace = Path(input('작업 폴더 / Workspace [.]: ').strip() or '.').expanduser().resolve()
             if workspace.is_dir():
@@ -85,6 +91,8 @@ def launch(home=None):
         command = prefix + ['start', '--provider', provider, '--workspace', str(workspace)]
         if model:
             command += ['--model', model]
+        if budget is not None:
+            command += ['--context-budget', str(budget)]
         if mode == 'queue':
             command += ['--queue']
         result = main(command + ['--', prompt])

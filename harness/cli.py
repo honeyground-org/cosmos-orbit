@@ -7,6 +7,7 @@ import sys
 import time
 
 from .engine import Engine
+from .context import limit_for
 from .providers import doctor
 from .store import Store
 from .workspace import verify
@@ -19,7 +20,11 @@ def show(task):
             'request': task['prompt'], 'contract': data['contract'],
             'attempts': data['attempt'], 'evidence': data['evidence'],
             'reason': data['reason'], 'feedback': data['feedback'],
-            'sessions': data['sessions'], 'updated': task['updated']}
+            'sessions': data['sessions'], 'context': data.get('context_measurements', {}),
+            'context_limits': {key: limit_for(data, key, data.get('peers', {}).get(key[5:], {}).get('provider')
+                                             if key.startswith('peer:') else key.split(':')[0])
+                               for key in set(data['sessions']) | set(data.get('handoffs', {}))},
+            'handoffs': data.get('handoff_counts', {}), 'updated': task['updated']}
 
 
 def main(argv=None):
@@ -54,7 +59,7 @@ def main(argv=None):
         command.add_argument('--model', help='Optional model on the selected CLI; no cross-provider fallback')
         command.add_argument('--timeout', type=int)
         command.add_argument('--context-budget', type=int,
-                             help='Checkpoint before the next call when reported input context reaches this limit')
+                             help='Handoff before the next call at this measured context size; default Claude 500k, Codex min(500k, 80% window)')
     for name in ('status', 'events', 'messages', 'handoff', 'pause'):
         child = sub.add_parser(name)
         child.add_argument('id')
@@ -103,9 +108,9 @@ def main(argv=None):
             prompt = sys.stdin.read() if args.prompt == '-' else args.prompt
             if not prompt.strip() or len(prompt) > 24000:
                 raise ValueError('Request must be nonempty and at most 24000 characters')
-            initial_options = dict(model=None, timeout=180, max_attempts=3, context_budget=64000)
+            initial_options = dict(model=None, timeout=180, max_attempts=3, context_budget=None)
             initial_options.update({k: v for k, v in options.items() if v is not None})
-            if not 1 <= initial_options['max_attempts'] <= 10 or not 1 <= initial_options['timeout'] <= 3600 or initial_options['context_budget'] < 1000:
+            if not 1 <= initial_options['max_attempts'] <= 10 or not 1 <= initial_options['timeout'] <= 3600 or (initial_options['context_budget'] is not None and initial_options['context_budget'] < 1000):
                 raise ValueError('Invalid attempt, timeout or context budget')
             provider = args.provider or store.preference('provider')
             if provider is None:
