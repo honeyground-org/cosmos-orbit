@@ -11,6 +11,7 @@ import unicodedata
 import webbrowser
 
 from .store import Store, now
+from .commands import browser_guide
 from .context import limit_for
 from .workspace import verify
 
@@ -294,7 +295,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 self.respond(403, '{}')
                 return
             if self.path == '/':
-                self.respond(200, template.replace('__TOKEN__', token).replace('__LANG__', lang), 'text/html')
+                self.respond(200, template.replace('__TOKEN__', token).replace('__LANG__', lang).replace('__COMMAND_GUIDE__', browser_guide()), 'text/html')
             elif self.path == '/state' and self.valid_token():
                 store = Store(home)
                 try:

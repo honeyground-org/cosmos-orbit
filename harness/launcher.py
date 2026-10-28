@@ -53,10 +53,11 @@ def launch(home=None):
             ('Run worker', 'worker'),
             ('Switch engine and model', 'switch'),
             ('Continue from a handoff', 'import'),
+            ('Command reference', 'commands'),
             ('Exit', 'exit')])
         if action == 'exit':
             return 0
-        if action in ('dashboard', 'watch'):
+        if action in ('dashboard', 'watch', 'commands'):
             return main(prefix + [action])
         if action == 'worker':
             return main(prefix + ['worker'])

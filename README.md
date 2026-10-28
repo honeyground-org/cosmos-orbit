@@ -16,7 +16,8 @@ Windows is not currently supported because the runtime uses POSIX file locks.
 From a downloaded or cloned source checkout:
 
 ```sh
-./install.sh
+./install.sh --launch  # install and immediately open the interactive launcher
+# On later runs:
 harness doctor
 harness
 ```
@@ -39,6 +40,9 @@ launcher and the `local-harness-app` installation directory. Private task data u
 absolute installation paths. An unrelated existing launcher is never overwritten.
 
 ## Start using it
+
+Run `harness commands` for a grouped command reference. It is also available as **Command reference**
+in the launcher and **Commands** in the browser header. Viewing help makes no model calls.
 
 Run `harness` without a subcommand for the interactive launcher.
 Choose a new task, browser dashboard, terminal monitor, worker, or an existing task's engine/model

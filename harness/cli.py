@@ -31,6 +31,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Persistent, provider-neutral local task runtime (pilot)')
     parser.add_argument('--home', help='Private task store (default: ~/.local/share/local-harness)')
     sub = parser.add_subparsers(dest='command')
+    sub.add_parser('commands', help='Show the quick command reference without starting services or models')
     sub.add_parser('doctor', help='Show installed CLIs; never installs or changes provider settings')
     sub.add_parser('list', help='Read current tasks without a model call')
     config = sub.add_parser('config', help='Choose a default provider once; task-level overrides remain possible')
@@ -85,6 +86,10 @@ def main(argv=None):
     if args.command is None:
         from .launcher import launch
         return launch(args.home)
+    if args.command == 'commands':
+        from .commands import terminal_guide
+        print(terminal_guide())
+        return 0
     if args.command == 'doctor':
         print(json.dumps(doctor(), ensure_ascii=False, indent=2))
         return 0

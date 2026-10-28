@@ -1,6 +1,8 @@
 #!/bin/sh
 # Install a private virtual environment and a launcher without changing shell configuration.
 set -eu
+LAUNCH=0
+case "${1:-}" in "") ;; --launch) LAUNCH=1 ;; *) echo "Usage: ./install.sh [--launch]" >&2; exit 2 ;; esac
 SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON=${PYTHON:-python3}
 INSTALL_DIR=${HARNESS_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/local-harness-app}
@@ -24,3 +26,7 @@ ln -sfn "$INSTALL_DIR/venv/bin/harness" "$BIN_DIR/harness"
 printf '\nInstalled Local Harness. Run: %s/harness\n' "$BIN_DIR"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) printf 'Add this directory to your PATH: %s\n' "$BIN_DIR" ;; esac
 printf 'Next: harness doctor\nNo worker, model call, or background service was started.\n'
+
+if [ "$LAUNCH" = 1 ]; then
+  exec "$BIN_DIR/harness"
+fi
