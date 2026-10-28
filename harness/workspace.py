@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 MAX_FILE = 100_000
@@ -25,6 +26,19 @@ def within(target, ancestor):
 
 def digest(content):
     return hashlib.sha256(content).hexdigest()
+
+
+def strict_json(text):
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError('Duplicate JSON key: ' + key)
+            value[key] = item
+        return value
+    def constant(value):
+        raise ValueError('Non-JSON numeric constant: ' + value)
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
 
 
 def path_for(root, relative):
@@ -205,15 +219,19 @@ def verify(root, contract):
                 elif kind == 'equals':
                     passed = expected == text
                 elif kind == 'json_equals':
-                    value = json.loads(text)
+                    value = strict_json(text)
                     pointer = check['pointer']
                     if pointer and not pointer.startswith('/'):
                         raise ValueError('Invalid JSON pointer')
                     for part in pointer.split('/')[1:] if pointer else []:
+                        if re.search(r'~(?![01])', part):
+                            raise ValueError('Invalid JSON pointer escape')
                         part = part.replace('~1', '/').replace('~0', '~')
+                        if isinstance(value, list) and (not part.isascii() or not part.isdigit() or (len(part) > 1 and part.startswith('0'))):
+                            raise ValueError('Invalid JSON array index')
                         value = value[int(part)] if isinstance(value, list) else value[part]
                     passed = json.dumps(value, sort_keys=True, ensure_ascii=False) == json.dumps(
-                        json.loads(expected), sort_keys=True, ensure_ascii=False)
+                        strict_json(expected), sort_keys=True, ensure_ascii=False)
             results.append(dict(check, passed=passed, sha=digest(raw) if raw is not None else None))
         except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
             results.append(dict(check, passed=False, error=str(error)))
