@@ -1,0 +1,10 @@
+# Engine-room design prototype
+
+Open [engine-room.html](engine-room.html) in a browser. This is a standalone, interactive design
+prototype with illustrative data, not a live view of your sessions. Its processing, failed-check,
+context-handoff and completion controls demonstrate the proposed visual language.
+
+The installed `harness dashboard` currently provides the working mission-card view. The proposed
+engine-room view has not been wired to the runtime. Planned mappings are session modules for
+providers, connections for messages, a context exchanger for handoffs and a verification gate for
+completion evidence. Observed events, rather than arbitrary decorative activity, should drive motion.

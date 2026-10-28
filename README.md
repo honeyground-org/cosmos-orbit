@@ -1,4 +1,4 @@
-# Local Harness — executable pilot
+# Local Harness
 
 A local task runtime for ordinary-language requests. Use **Codex alone or Claude alone**;
 neither provider has a fixed role and the other subscription is not required. Existing CLI
@@ -8,11 +8,39 @@ This first vertical slice performs bounded UTF-8 text/JSON artifact work. It is 
 program with SQLite state, a serial queue worker, provider adapters, file reconciliation and
 a deterministic feedback loop. It is not a skill bundle or a workflow document interpreter.
 
-## Run
+## Install
 
-Requirements: macOS or Linux, Python 3.9+, and one installed/authenticated CLI.
+Requires **macOS or Linux, Python 3.9+, and an installed/authenticated Codex CLI or Claude Code**.
+Windows is not currently supported because the runtime uses POSIX file locks.
 
-Run `bin/harness` (or `harness` when on PATH) without a subcommand for the interactive launcher.
+From a downloaded or cloned source checkout:
+
+```sh
+./install.sh
+harness doctor
+harness
+```
+
+The installer creates a dedicated virtual environment at `~/.local/share/local-harness-app/venv`
+and a launcher at `~/.local/bin/harness`. It installs the browser asset, starts no services and does
+not alter provider credentials or shell configuration. If needed, add `~/.local/bin` to your PATH.
+Python packaging tools may be downloaded during installation; runtime Python dependencies are empty.
+If your Linux distribution ships `venv` separately, install its Python venv package first.
+
+Alternatively, use an existing pipx installation:
+
+```sh
+pipx install .
+```
+
+To update, obtain the newer source and rerun `./install.sh`. To uninstall, remove the installed
+launcher and the `local-harness-app` installation directory. Private task data under
+`~/.local/share/local-harness` is retained. Use `HARNESS_INSTALL_DIR` and `HARNESS_BIN_DIR` to choose
+absolute installation paths. An unrelated existing launcher is never overwritten.
+
+## Start using it
+
+Run `harness` without a subcommand for the interactive launcher.
 Choose a new task, browser dashboard, terminal monitor, worker, or an existing task's engine/model
 selection. Task setup asks for an installed CLI, CLI-default or explicit model ID, workspace,
 ordinary-language request, and immediate execution or queueing. The launcher prints the state-store
@@ -20,17 +48,17 @@ location. `--home PATH` works with the launcher too. Noninteractive callers use 
 The model selector currently accepts an ID; it does not yet discover account-specific model lists.
 
 ```sh
-bin/harness doctor
-bin/harness config --provider codex  # optional: choose once; a single installed CLI is auto-selected
-bin/harness start --provider codex --workspace /path/to/workspace \
-  'Create settings.json with language set to ko and retries set to 3.'
+harness doctor
+harness config --provider codex  # optional: choose once; a single installed CLI is auto-selected
+harness start --provider codex --workspace /path/to/workspace \
+  'Create settings.json with language set to en and retries set to 3.'
 # Or use --provider claude. No second provider is called automatically.
-bin/harness status TASK_ID
-bin/harness feedback TASK_ID 'Change retries to 5; keep the language unchanged.'
-bin/harness handoff TASK_ID
-bin/harness resume TASK_ID
-bin/harness events TASK_ID
-bin/harness recover TASK_ID --keep-current-files  # only for a conflicted pending action
+harness status TASK_ID
+harness feedback TASK_ID 'Change retries to 5; keep the language unchanged.'
+harness handoff TASK_ID
+harness resume TASK_ID
+harness events TASK_ID
+harness recover TASK_ID --keep-current-files  # only for a conflicted pending action
 ```
 
 After configuring a default provider, omit `--provider` from ordinary requests.
@@ -40,11 +68,11 @@ The configured role split is not prescribed. A feedback turn can specify `--prov
 switch provider while retaining the original request, corrections and contract history.
 
 ```sh
-bin/harness start --provider claude --workspace /path/to/workspace --queue \
+harness start --provider claude --workspace /path/to/workspace --queue \
   'Create a short onboarding checklist in onboarding.md.'
-bin/harness worker                 # continue queued work, Ctrl-C to stop the worker
-bin/harness worker --once          # process the current queue once
-bin/harness list                   # no model call
+harness worker                 # continue queued work, Ctrl-C to stop the worker
+harness worker --once          # process the current queue once
+harness list                   # no model call
 ```
 
 The worker is an ordinary foreground process that can be supervised by the user's service
@@ -53,13 +81,13 @@ manager. No service is installed automatically. An idle worker makes no model ca
 ## Observe and intervene
 
 ```sh
-bin/harness watch --lang ko          # live terminal view; en is also available
-bin/harness watch --once             # plain snapshot, suitable for redirected output
-bin/harness watch --task TASK_ID
-bin/harness dashboard --lang ko      # loopback browser UI, opens automatically
-bin/harness dashboard --no-open      # print URL without opening a browser
-bin/harness pause TASK_ID            # request pause at a safe boundary
-bin/harness resume TASK_ID           # clear pause and execute in this terminal
+harness watch --lang en          # live terminal view
+harness watch --once             # plain snapshot, suitable for redirected output
+harness watch --task TASK_ID
+harness dashboard --lang en      # loopback browser UI, opens automatically
+harness dashboard --no-open      # print URL without opening a browser
+harness pause TASK_ID            # request pause at a safe boundary
+harness resume TASK_ID           # clear pause and execute in this terminal
 ```
 
 Both views show **only tasks and sessions registered in the selected harness state store**.
@@ -85,8 +113,8 @@ or a multi-user authentication boundary. Do not expose its port through a public
 ## Switch engine or model
 
 ```sh
-bin/harness switch TASK_ID --provider claude --model MODEL_ID
-bin/harness switch TASK_ID --provider codex  # reset to this CLI's default selection
+harness switch TASK_ID --provider claude --model MODEL_ID
+harness switch TASK_ID --provider codex  # reset to this CLI's default selection
 ```
 
 The launcher and mission detail panel offer the same controls. Selection requests are durable;
@@ -134,9 +162,9 @@ Optionally bind named advisers to a task. Names are user-selected, not fixed pro
 both sessions can use the same provider, or different providers when available.
 
 ```sh
-bin/harness start --provider codex --peer reviewer=claude --workspace /path/to/workspace \
-  'Ask reviewer how to verify the JSON types, then create settings.json with enabled true and language ko.'
-bin/harness messages TASK_ID
+harness start --provider codex --peer reviewer=claude --workspace /path/to/workspace \
+  'Ask reviewer how to verify the JSON types, then create settings.json with enabled true and language en.'
+harness messages TASK_ID
 ```
 
 When the executing model requests a consultation, the runtime persists the question, wakes its
@@ -192,9 +220,9 @@ handoff; completed tasks do not create unnecessary new sessions.
   the runtime does not fabricate a percentage or fall back to cumulative usage.
 
 ```sh
-bin/harness start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
-bin/harness resume TASK_ID --context-budget 500000
-bin/harness handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
+harness start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
+harness resume TASK_ID --context-budget 500000
+harness handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
 ```
 
 The handoff preserves the fixed contract (goal, constraints and checks), current verification,
@@ -291,3 +319,15 @@ Automatic handoff verification: real Codex and Claude runs each crossed a delibe
 artifact checks. Isolated probes covered the exact 500,000-token boundary, cache accounting,
 aggregate-usage rejection, adviser sessions and retry after a fresh-session failure. No 500,000-token
 live workload was generated solely for testing.
+
+## Project files
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and verification guidance, and
+[SECURITY.md](SECURITY.md) for local data boundaries. The English-only product interface does not
+translate or overwrite user-provided task content.
+
+## UI status
+
+The installed browser interface is the live mission-card view. The separate
+[engine-room prototype](docs/design/README.md) explores a mechanical session view with illustrative
+data. It is not connected to live sessions and is not presented as a finished runtime feature.

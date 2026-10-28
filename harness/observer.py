@@ -28,18 +28,7 @@ LABELS = {
            'empty': 'No tasks in this store. Start a task with harness start.',
            'changes': 'RECENT CHANGES', 'stop': 'Ctrl-C closes the monitor; tasks keep running',
            'pending': 'Queued feedback', 'sessions': 'SESSIONS', 'reason': 'Reason'},
-    'ko': {'received': '접수·대기', 'ready': '실행 준비', 'planning': '계획 중', 'running': '작업 중',
-           'applying': '변경 적용', 'verifying': '검증 중', 'repairing': '수정 중',
-           'waiting_peer': '상대 답변 대기', 'completed': '검증 완료', 'already_satisfied': '기존 조건 충족',
-           'needs_input': '입력 필요', 'blocked': '막힘', 'interrupted': '중단됨',
-           'stale': '검증 근거 변경', 'paused': '일시정지', 'pause_pending': '정지 요청됨',
-           'unattended': '실행기 없음', 'idle': '대기', 'unbound': '시작 전',
-           'title': 'HARNESS / OBSERVER', 'scope': '하네스 관리 세션만 표시 · 외부 세션은 조회하지 않음',
-           'worker': '워커', 'on': '실행 중', 'off': '미실행', 'task': '작업', 'state': '상태',
-           'provider': 'AI', 'goal': '목적', 'attention': '개입 필요', 'active': '실행 중',
-           'empty': '이 저장소에는 작업이 없습니다. harness start로 시작하세요.',
-           'changes': '최근 상태 변화', 'stop': 'Ctrl-C: 관찰 화면만 종료 · 실행 중인 작업은 유지',
-           'pending': '피드백 대기', 'sessions': '세션', 'reason': '이유'},
+
 }
 
 
@@ -202,7 +191,7 @@ def terminal(data, lang='en', width=110):
             rows.append('    ' + fit(session['name'], 18) + fit(t[session['state']], 12)
                         + clean(session['id'] or '—'))
             rows.append('      ' + clean(session['provider']) + ' | requested: ' + clean(session['requested_model'] or 'CLI default')
-                        + ' | reported: ' + clean(', '.join(session['reported_models']) or ('미확인' if lang == 'ko' else 'unreported')))
+                        + ' | reported: ' + clean(', '.join(session['reported_models']) or 'unreported'))
             rows.append('      context: ' + str(session['context_tokens'] if session['context_tokens'] is not None else '?')
                         + ' / ' + str(session['context_limit']) + ' | handoffs: ' + str(session['handoff_count']))
         if task['routing']:

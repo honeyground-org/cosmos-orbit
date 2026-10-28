@@ -73,11 +73,11 @@ def main(argv=None):
     watch.add_argument('--once', action='store_true')
     watch.add_argument('--task')
     watch.add_argument('--interval', type=float, default=2)
-    watch.add_argument('--lang', choices=('en', 'ko'), default='en')
+    watch.add_argument('--lang', choices=('en',), default='en')
     dashboard = sub.add_parser('dashboard', help='Local session monitor and task interventions')
     dashboard.add_argument('--port', type=int, default=0)
     dashboard.add_argument('--no-open', action='store_true')
-    dashboard.add_argument('--lang', choices=('en', 'ko'), default='en')
+    dashboard.add_argument('--lang', choices=('en',), default='en')
     args = parser.parse_args(argv)
     if args.command is None:
         from .launcher import launch
