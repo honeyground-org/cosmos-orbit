@@ -32,3 +32,11 @@ provider transcripts, credentials, personal paths, or screenshots containing pri
 Before proposing a change, run syntax checks and exercise the affected command with an isolated state
 store. Document the procedure and result in the pull request. Installation must include the browser
 asset and work from outside the source checkout. Do not add personal CLI configuration or auth files.
+
+## Interactive preview
+
+After changing `harness/observer.html` or the command reference, run
+`python3 scripts/build_demo.py` and commit `docs/index.html`. Use
+`python3 scripts/build_demo.py --check` to detect drift. GitHub Pages publishes `main:/docs`.
+The builder reads only the UI template and the static command reference. Never add private
+state, native model caches, real tasks, credentials or runtime network requests to the demo.

@@ -4,6 +4,16 @@
 
 [Source](https://github.com/honeyground-org/cosmos-orbit) · [Apache-2.0 licence](LICENSE)
 
+### [Launch the interactive engine room →](https://honeyground-org.github.io/cosmos-orbit/)
+
+**Rotate it. Zoom in. Inspect an engine. Watch signals travel through Orbit.**
+
+Explore 12 synthetic sessions, animated context and verification layers, model selection, and
+session details directly in your browser. No installation, account or AI calls required.
+This is an interactive preview of the real UI, not a recording. GitHub README pages cannot run
+JavaScript, so the preview opens on GitHub Pages.
+
+
 A local task runtime for ordinary-language requests. Use **Codex alone or Claude alone**;
 neither provider has a fixed role and the other subscription is not required. Existing CLI
 authentication is reused. The runtime does not install hooks or modify host configuration.
@@ -344,6 +354,8 @@ translate or overwrite user-provided task content.
 The installed browser interface is a live isometric engine-room view backed by the selected task
 store. The earlier [design prototype](docs/design/README.md) is retained separately as a historical
 concept with illustrative data. It is not the installed runtime UI.
+The [public interactive demo](https://honeyground-org.github.io/cosmos-orbit/) is generated from the
+current runtime UI with synthetic fixtures using `python3 scripts/build_demo.py`.
 
 The engine room uses translucent layers for purpose/control, execution/exchange, context/continuity, and verification. Active sessions have rotating rings and a subtle heat-like glow (execution activity, not measured temperature). Completed sessions stay still. Hover for the full task and model identity; select a module for context and verification meters, session selection, and recorded request/response logs. Unknown context remains unmeasured. Reduced-motion preferences disable continuous animation.
 
