@@ -342,3 +342,30 @@ Each page presents eight floating session cores. Six orbit nodes map to Intake, 
 Each engine has an independent connection to the Harness control tower. Transport pulses indicate newly observed model request/response events or targeted peer message transitions, not continuous traffic. Ambiguous session attribution suppresses the pulse. The initial snapshot does not replay old traffic. Peer exchanges remain routed through Harness; no direct engine-to-engine connection is implied. Page arrows appear at either edge on hover or keyboard focus and remain visible on touch devices; the footer controls remain available.
 
 Zoom the engine view with the mouse wheel or trackpad over the canvas, or use the + / − controls (55–200%). Reset restores 100% zoom and the original rotation. Zoom is retained during polling and page navigation; scrolling outside the canvas still scrolls the page.
+
+Lower layers briefly illuminate on newly observed activity: blue for control/feedback, violet for measured-context updates and checkpoints, and green for verification events. Edge lights and a vertical access path connect each pulse to the relevant layer. These indicate event delivery, not verification success or hardware activity. Initial snapshots stay quiet, repeated polls do not replay events, and reduced-motion mode uses a static highlight.
+
+The browser model picker offers CLI default, visible Codex entries from the local CLI cache, Claude family aliases, and models recorded in managed sessions. Each suggestion identifies its source; none guarantees current account access. Changing provider resets the selection. Custom IDs remain available as an explicit option. Cache parsing is bounded and optional; missing or malformed caches leave default/history/custom choices usable. Claude aliases follow the [official model configuration](https://code.claude.com/docs/en/model-config).
+
+## Continue existing CLI work
+
+Choose **Continue from a handoff** in `harness`, then select an engine/model and workspace.
+Supply a UTF-8 handoff document (Markdown, plain text or JSON) or paste text ending with `.END`.
+Add the current continuation request and choose Run now, Queue for worker, or Plan and inspect first.
+
+```sh
+harness start --provider codex --workspace /path/to/project \
+  --handoff-file /path/to/HANDOFF.md --plan-only 'Continue the remaining artifact work.'
+harness start --provider claude --workspace /path/to/project \
+  --handoff-text 'Goal: ... Completed: ... Remaining: ... Checks: ...' --queue
+```
+
+The original handoff content is retained in the private task request, with a source reference and
+SHA-256 recorded in `status`. Editing or deleting the original document does not change the import.
+A fresh managed session establishes a remaining-work contract and inspects current workspace evidence;
+historical completion claims and permissions are not imported as verified facts or new authority.
+This does not attach to, stop, or resume an arbitrary existing native CLI process or session ID.
+Avoid running the old session against the same files while the managed task writes to them.
+Handoffs are limited to 16,000 characters; continuation requests to 6,000. No silent truncation occurs.
+Existing pilot limits still apply: bounded text/JSON artifacts and supported checks, not arbitrary
+shell execution, test suites, deployment or unrestricted repository development.

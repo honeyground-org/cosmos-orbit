@@ -22,9 +22,12 @@ def engine_model():
     if not choices:
         raise ValueError('Install and authenticate Codex CLI or Claude Code first.')
     provider = choose('Engine', choices)
-    mode = choose('Model', [('CLI default', 'default'),
-                                  ('Enter model ID', 'custom')])
-    model = None
+    from .observer import model_options
+    suggestions = model_options().get(provider, [])
+    mode = choose('Model (suggestions; the CLI checks account access)', [('CLI default', 'default')] +
+                  [(item['label'] + ' · ' + item['source'], item['id']) for item in suggestions] +
+                  [('Enter model ID', 'custom')])
+    model = None if mode in ('default', 'custom') else mode
     if mode == 'custom':
         while not model:
             model = input('Model ID: ').strip()
@@ -49,6 +52,7 @@ def launch(home=None):
             ('Watch tasks', 'watch'),
             ('Run worker', 'worker'),
             ('Switch engine and model', 'switch'),
+            ('Continue from a handoff', 'import'),
             ('Exit', 'exit')])
         if action == 'exit':
             return 0
@@ -81,17 +85,44 @@ def launch(home=None):
             if workspace.is_dir():
                 break
             print('Enter an existing directory.')
-        prompt = ''
-        while not prompt:
-            prompt = input('Task: ').strip()
+        handoff_args = []
+        if action == 'import':
+            from .intake import read_handoff, validate_handoff
+            source = choose('Handoff source', [('Document path', 'file'), ('Paste handoff text', 'paste')])
+            if source == 'file':
+                path = str(Path(input('Handoff document: ').strip()).expanduser().resolve())
+                read_handoff(path)
+                handoff_args = ['--handoff-file', path]
+            else:
+                print('Paste the handoff. Finish with a line containing only .END')
+                lines = []
+                length = 0
+                while True:
+                    line = input()
+                    if line == '.END':
+                        break
+                    lines.append(line)
+                    length += len(line) + 1
+                    if length > 16001:
+                        raise ValueError('Handoff must be at most 16000 characters')
+                handoff_args = ['--handoff-text', validate_handoff('\n'.join(lines))]
+            prompt = input('What should continue? [remaining work]: ').strip() or 'Continue the remaining work described in the handoff within this workspace.'
+            print('A new managed session will inspect current files and re-establish acceptance checks. The existing CLI session is not attached.')
+        else:
+            prompt = ''
+            while not prompt:
+                prompt = input('Task: ').strip()
         mode = choose('Run mode', [('Run now', 'now'),
-                                               ('Queue for worker', 'queue')])
+                                               ('Queue for worker', 'queue'), ('Plan and inspect first', 'plan')])
         print('\n%s / %s\n%s\n%s' % (provider, model or 'CLI default', workspace, prompt))
         command = prefix + ['start', '--provider', provider, '--workspace', str(workspace)]
         if model:
             command += ['--model', model]
         if budget is not None:
             command += ['--context-budget', str(budget)]
+        command += handoff_args
+        if mode == 'plan':
+            command += ['--plan-only']
         if mode == 'queue':
             command += ['--queue']
         result = main(command + ['--', prompt])

@@ -93,7 +93,8 @@ If the goal cannot be established with these check types, put the missing verifi
 Every file must have a positive check. Declare only files you need to change.
 Do not ask for confirmation of an already explicit file-edit request. If clarification is essential,
 include a concise question. A truncated snapshot is not evidence that omitted files do not exist.
-Payload:\n''' + json.dumps({'request': task['prompt'], 'feedback': task['data']['feedback'],
+Payload:\n''' + json.dumps({'request': task['data'].get('imported_handoff', {}).get('current_request', task['prompt']),
+                            'imported_handoff_context': task['prompt'] if task['data'].get('imported_handoff') else None, 'feedback': task['data']['feedback'],
                             'previous_contract': task['data']['contract_history'][-1: ],
                             'configured_peers': task['data'].get('peers', {}),
                             'recovery_context': task['data'].get('recovery_context', []),
@@ -104,12 +105,13 @@ Payload:\n''' + json.dumps({'request': task['prompt'], 'feedback': task['data'][
             target = workspace.path_for(task['workspace'], relative)
             if workspace.within(target, self.store.home):
                 raise ValueError('Task state is outside the editable scope')
-        text = '\n'.join([task['prompt']] + [f['text'] for f in task['data']['feedback']])
+        current_request = task['data'].get('imported_handoff', {}).get('current_request', task['prompt'])
+        text = '\n'.join([current_request] + [f['text'] for f in task['data']['feedback']])
         if contract['local_write'] and (not contract['permission_basis'].strip()
                                         or contract['permission_basis'] not in text):
             raise ValueError('Write intent lacks a quote from the actual request')
         quote = contract['permission_basis'].strip()
-        sources = [task['prompt']] + [f['text'] for f in task['data']['feedback']]
+        sources = [current_request] + [f['text'] for f in task['data']['feedback']]
         if contract['local_write'] and len(''.join(quote.split())) < 8 and quote not in [s.strip() for s in sources]:
             raise ValueError('Write-intent provenance must quote meaningful user text, not a fragment')
         task['data']['contract'] = contract

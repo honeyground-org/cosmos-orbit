@@ -1,6 +1,7 @@
 """Model-free projections of runtime-owned tasks and sessions."""
 import datetime
 import json
+import os
 from pathlib import Path
 import secrets
 import shutil
@@ -49,6 +50,35 @@ def event_view(row):
         note = '%d / %d' % (sum(bool(c.get('passed')) for c in checks), len(checks))
     return {'seq': row['seq'], 'task_id': row['task_id'], 'kind': row['kind'], 'at': row['at'],
             'note': str(note)[:600], 'age': age_seconds(row['at'])}
+
+
+def model_options():
+    """Read display-only suggestions without auth, network requests or model execution."""
+    choices = {'codex': [], 'claude': [
+        {'id': 'sonnet', 'label': 'Sonnet — everyday coding', 'source': 'CLI alias'},
+        {'id': 'opus', 'label': 'Opus — complex reasoning', 'source': 'CLI alias'},
+        {'id': 'haiku', 'label': 'Haiku — lightweight tasks', 'source': 'CLI alias'}]}
+    cache = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')) / 'models_cache.json'
+    try:
+        with cache.open(encoding='utf-8') as handle:
+            raw = handle.read(2_000_001)
+        if len(raw) > 2_000_000:
+            return choices
+        payload = json.loads(raw)
+        models = payload.get('models', []) if isinstance(payload, dict) else []
+        if not isinstance(models, list):
+            return choices
+        for model in models[:100]:
+            if not isinstance(model, dict) or model.get('visibility') != 'list':
+                continue
+            name = model.get('slug')
+            if isinstance(name, str) and 0 < len(name) <= 200:
+                title = model.get('display_name')
+                choices['codex'].append({'id': name, 'label': title[:200] if isinstance(title, str) else name,
+                                         'source': 'Local CLI cache'})
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return choices
 
 
 def snapshot(store, task_id=None):
@@ -154,7 +184,7 @@ def snapshot(store, task_id=None):
     tasks.sort(key=lambda t: (not t['attention'], not t['busy']))
     return {'at': now(), 'scope': 'managed', 'home': str(store.home), 'cursor': cursor,
             'worker_running': store.locked('worker'), 'tasks': tasks, 'total': len(summaries),
-            'events': global_events, 'labels': LABELS}
+            'events': global_events, 'labels': LABELS, 'model_options': model_options()}
 
 
 def clean(text):

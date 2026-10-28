@@ -24,7 +24,7 @@ def show(task):
             'context_limits': {key: limit_for(data, key, data.get('peers', {}).get(key[5:], {}).get('provider')
                                              if key.startswith('peer:') else key.split(':')[0])
                                for key in set(data['sessions']) | set(data.get('handoffs', {}))},
-            'handoffs': data.get('handoff_counts', {}), 'updated': task['updated']}
+            'handoffs': data.get('handoff_counts', {}), 'imported_handoff': data.get('imported_handoff'), 'updated': task['updated']}
 
 
 def main(argv=None):
@@ -40,7 +40,10 @@ def main(argv=None):
     switch.add_argument('--provider', required=True, choices=('codex', 'claude'))
     switch.add_argument('--model', help='Model ID; omit to use the selected CLI default')
     start = sub.add_parser('start', help='Interpret an ordinary request and run a local artifact task')
-    start.add_argument('prompt', help='Ordinary user request, or - to read stdin')
+    start.add_argument('prompt', nargs='?', help='Ordinary user request, or - to read stdin; optional with a handoff')
+    handoff_input = start.add_mutually_exclusive_group()
+    handoff_input.add_argument('--handoff-file', help='Import an explicit UTF-8 handoff document into a new managed task')
+    handoff_input.add_argument('--handoff-text', help='Import pasted handoff context into a new managed task')
     start.add_argument('--workspace', default='.')
     start.add_argument('--provider', choices=('codex', 'claude'))
     start.add_argument('--peer', action='append', default=[], metavar='NAME=PROVIDER',
@@ -105,7 +108,13 @@ def main(argv=None):
             root = Path(args.workspace).expanduser().resolve()
             if not root.is_dir():
                 raise ValueError('Workspace must already exist')
-            prompt = sys.stdin.read() if args.prompt == '-' else args.prompt
+            prompt = sys.stdin.read(24001) if args.prompt == '-' else args.prompt
+            imported = None
+            if args.handoff_file is not None or args.handoff_text is not None:
+                from .intake import read_handoff, import_request
+                text = read_handoff(args.handoff_file) if args.handoff_file is not None else args.handoff_text
+                prompt, imported = import_request(prompt, text, str(Path(args.handoff_file).expanduser().resolve()) if args.handoff_file else 'pasted text')
+            prompt = prompt or ''
             if not prompt.strip() or len(prompt) > 24000:
                 raise ValueError('Request must be nonempty and at most 24000 characters')
             initial_options = dict(model=None, timeout=180, max_attempts=3, context_budget=None)
@@ -128,6 +137,8 @@ def main(argv=None):
             task = store.create(root, provider, prompt)
             task['data']['options'] = initial_options
             task['data']['peers'] = peers
+            if imported:
+                task['data']['imported_handoff'] = imported
             store.save(task, 'received', 'options_recorded', task['data']['options'])
             print('task ' + task['id'], file=sys.stderr, flush=True)
             if not args.queue:
