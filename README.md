@@ -334,3 +334,7 @@ translate or overwrite user-provided task content.
 The installed browser interface is a live isometric engine-room view backed by the selected task
 store. The earlier [design prototype](docs/design/README.md) is retained separately as a historical
 concept with illustrative data. It is not the installed runtime UI.
+
+The engine room uses translucent layers for purpose/control, execution/exchange, context/continuity, and verification. Active sessions have bidirectional circuit signals, rotating rings, and a subtle heat-like glow (execution activity, not measured temperature). Completed sessions stay still. Hover for the full task and model identity; select a module for context and verification meters, session selection, and recorded request/response logs. Unknown context remains unmeasured. Reduced-motion preferences disable continuous animation.
+
+Each page presents four floating session cores. Six orbit nodes map to Intake, Plan, Execute, Apply, Verify, and Done; the highlighted node is the current task stage. The cap ring represents measured context against the handoff threshold, and the core body shows passing checks. Session state and task stage are distinct: an idle adviser can belong to a completed task.
