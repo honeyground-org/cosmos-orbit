@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import time
 import uuid
 
 
@@ -31,6 +32,7 @@ class Store:
             seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
             kind TEXT NOT NULL, payload TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS controls (task_id TEXT PRIMARY KEY, paused INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS inbox (
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, text TEXT NOT NULL,
             provider TEXT, at TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
@@ -126,21 +128,50 @@ class Store:
             self._event(message['task_id'], 'message_' + status, {'id': message['id'], 'target': message['target'], 'error': error})
 
     @contextlib.contextmanager
-    def lock(self, key):
+    def lock(self, key, timeout=0.2):
         name = hashlib.sha256(key.encode()).hexdigest()
         path = self.home / (name + '.lock')
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('Another harness process owns this task or workspace')
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Another harness process owns this task or workspace')
+                    time.sleep(0.01)
             yield
         finally:
             os.close(fd)
 
     def close(self):
         self.db.close()
+
+    def paused(self, task_id):
+        row = self.db.execute('SELECT paused FROM controls WHERE task_id=?', (task_id,)).fetchone()
+        return bool(row and row[0])
+
+    def set_paused(self, task_id, paused):
+        self.get(task_id)
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO controls VALUES(?,?)', (task_id, int(paused)))
+            self._event(task_id, 'pause_requested' if paused else 'continue_requested', {})
+
+    def locked(self, key):
+        path = self.home / (hashlib.sha256(key.encode()).hexdigest() + '.lock')
+        if not path.exists():
+            return False
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return False
+            except BlockingIOError:
+                return True
+        finally:
+            os.close(fd)
 
     def preference(self, key, value=None):
         if value is not None:

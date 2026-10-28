@@ -110,6 +110,7 @@ Payload:\n''' + json.dumps({'request': task['prompt'], 'feedback': task['data'][
         task['data']['evidence'] = []
         task['data']['reason'] = ''
         task['data']['peer_rounds'] = 0
+        task['data'].pop('recovery_context', None)
         status = 'needs_input' if contract['questions'] or not contract['local_write'] else 'ready'
         if not contract['local_write']:
             task['data']['reason'] = 'No local file-write request was identified'
@@ -210,7 +211,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         self.store.save(task, 'ready', 'consultation_returned')
         return True
 
-    def _verify(self, task):
+    def _verify(self, task, pass_status='completed'):
         contract = task['data']['contract']
         if contract_hash(contract) != task['data']['contract_hash']:
             raise ValueError('Fixed acceptance contract changed during execution')
@@ -218,7 +219,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         task['data']['evidence'] = checks
         task['data']['pending'] = None
         passed = bool(checks) and all(c['passed'] for c in checks)
-        self.store.save(task, 'completed' if passed else 'repairing', 'verified',
+        self.store.save(task, pass_status if passed else 'repairing', 'verified',
                         {'contract_hash': task['data']['contract_hash'], 'checks': checks, 'passed': passed})
 
     def run(self, task_id, max_attempts=None, plan_only=False):
@@ -230,14 +231,16 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         with self.store.lock('task:' + task_id), self.store.lock('workspace:' + initial['workspace']):
             task = self.store.get(task_id)
             try:
+                if self._pause_boundary(task):
+                    return task
+                if task['status'] == 'paused':
+                    self.store.save(task, task['data'].pop('resume_status', 'ready'), 'continued')
                 self._feedback_boundary(task)
                 if task['status'] in ('completed', 'already_satisfied'):
                     # A later external edit must not keep a historical PASS current.
                     previous_status = task['status']
-                    self._verify(task)
-                    if task['status'] == 'completed':
-                        if previous_status == 'already_satisfied':
-                            self.store.save(task, 'already_satisfied', 'no_change_rechecked')
+                    self._verify(task, pass_status=previous_status)
+                    if task['status'] in ('completed', 'already_satisfied'):
                         return task
                     task['data']['reason'] = 'Completed evidence changed externally; provide feedback before editing again'
                     self.store.save(task, 'stale', 'external_change_detected')
@@ -250,6 +253,8 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                 if plan_only or task['status'] == 'needs_input':
                     return task
                 while task['status'] not in ('completed', 'already_satisfied', 'blocked', 'needs_input'):
+                    if self._pause_boundary(task):
+                        break
                     if task['data']['contract'] and not task['data']['pending']:
                         outstanding = [m for m in self.store.messages(task['id'], task['data'].get('consultation_scope', task['data']['contract_hash']))
                                        if m['status'] not in ('answered', 'consumed')]
@@ -261,7 +266,7 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                         continue
                     if task['data']['pending'] is not None:
                         self.notify('applying', task_id)
-                        with self.store.lock('filesystem-apply'):
+                        with self.store.lock('filesystem-apply', timeout=10):
                             workspace.apply(task['workspace'], task['data']['pending'])
                         self.store.save(task, 'verifying', 'action_applied')
                         self._verify(task)
@@ -283,10 +288,9 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                     # Detect already-satisfied tasks without rewriting their files.
                     checks = workspace.verify(task['workspace'], task['data']['contract'])
                     if checks and all(c['passed'] for c in checks):
-                        self._verify(task)
                         if task['data']['attempt'] == 0:
                             task['data']['reason'] = 'The interpreted checks already hold; no changes were made. Review the contract if this misses your goal.'
-                            self.store.save(task, 'already_satisfied', 'no_change_needed')
+                        self._verify(task, pass_status='already_satisfied' if task['data']['attempt'] == 0 else 'completed')
                         continue
                     self.notify('running', task_id)
                     self._execute(task)
@@ -297,6 +301,14 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                 if isinstance(error, KeyboardInterrupt):
                     raise
             return task
+
+    def _pause_boundary(self, task):
+        if not self.store.paused(task['id']):
+            return False
+        if task['status'] != 'paused':
+            task['data']['resume_status'] = task['status']
+            self.store.save(task, 'paused', 'paused_at_boundary')
+        return True
 
     def feedback(self, task_id, text, provider=None):
         if not text.strip() or len(text) > 24000:

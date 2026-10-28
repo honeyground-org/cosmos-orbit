@@ -51,7 +51,7 @@ def main(argv=None):
         command.add_argument('--timeout', type=int)
         command.add_argument('--context-budget', type=int,
                              help='Checkpoint before the next call when reported input context reaches this limit')
-    for name in ('status', 'events', 'messages', 'handoff'):
+    for name in ('status', 'events', 'messages', 'handoff', 'pause'):
         child = sub.add_parser(name)
         child.add_argument('id')
     recovery = sub.add_parser('recover', help='Abandon a pending proposal while preserving all current files')
@@ -60,6 +60,15 @@ def main(argv=None):
     worker = sub.add_parser('worker', help='Run queued tasks without requiring another user prompt')
     worker.add_argument('--once', action='store_true')
     worker.add_argument('--interval', type=float, default=3)
+    watch = sub.add_parser('watch', help='Live, model-free terminal monitor')
+    watch.add_argument('--once', action='store_true')
+    watch.add_argument('--task')
+    watch.add_argument('--interval', type=float, default=2)
+    watch.add_argument('--lang', choices=('en', 'ko'), default='en')
+    dashboard = sub.add_parser('dashboard', help='Local session monitor and task interventions')
+    dashboard.add_argument('--port', type=int, default=0)
+    dashboard.add_argument('--no-open', action='store_true')
+    dashboard.add_argument('--lang', choices=('en', 'ko'), default='en')
     args = parser.parse_args(argv)
     if args.command == 'doctor':
         print(json.dumps(doctor(), ensure_ascii=False, indent=2))
@@ -69,7 +78,15 @@ def main(argv=None):
     engine = Engine(store, notify=notify)
     options = {key: getattr(args, key, None) for key in ('model', 'timeout', 'max_attempts', 'context_budget')}
     try:
-        if args.command == 'start':
+        if args.command == 'watch':
+            from .observer import watch as observe
+            observe(store, args.interval, args.once, args.task, args.lang)
+            return 0
+        elif args.command == 'dashboard':
+            from .observer import serve
+            serve(store.home, args.port, not args.no_open, args.lang)
+            return 0
+        elif args.command == 'start':
             root = Path(args.workspace).expanduser().resolve()
             if not root.is_dir():
                 raise ValueError('Workspace must already exist')
@@ -102,6 +119,7 @@ def main(argv=None):
                 task = engine.run(task['id'], plan_only=args.plan_only)
             result = show(task)
         elif args.command == 'resume':
+            store.set_paused(args.id, False)
             engine.configure(args.id, options)
             task = engine.run(args.id)
             result = show(task)
@@ -138,6 +156,10 @@ def main(argv=None):
             result = store.messages(args.id)
         elif args.command == 'handoff':
             result = show(engine.handoff(args.id))
+        elif args.command == 'pause':
+            store.set_paused(args.id, True)
+            result = {'id': args.id, 'pause_requested': True,
+                      'note': 'The executor stops at its next safe boundary; an in-flight model call may finish.'}
         elif args.command == 'recover':
             result = show(engine.recover(args.id))
         elif args.command == 'list':
@@ -150,7 +172,11 @@ def main(argv=None):
             with store.lock('worker'):
                 while True:
                     for item in store.list():
-                        if store.inbox(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'repairing', 'waiting_peer'):
+                        if store.paused(item['id']):
+                            continue
+                        if item['status'] == 'interrupted' and store.get(item['id'])['data']['pending'] is not None:
+                            continue  # A conflicted batch needs explicit resume or recovery.
+                        if store.inbox(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'repairing', 'waiting_peer', 'paused'):
                             try:
                                 result = engine.run(item['id'])
                                 if result['revision'] != item['revision']:

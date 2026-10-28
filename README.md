@@ -43,6 +43,61 @@ bin/harness list                   # no model call
 The worker is an ordinary foreground process that can be supervised by the user's service
 manager. No service is installed automatically. An idle worker makes no model calls.
 
+## Observe and intervene
+
+```sh
+bin/harness watch --lang ko          # live terminal view; en is also available
+bin/harness watch --once             # plain snapshot, suitable for redirected output
+bin/harness watch --task TASK_ID
+bin/harness dashboard --lang ko      # loopback browser UI, opens automatically
+bin/harness dashboard --no-open      # print URL without opening a browser
+bin/harness pause TASK_ID            # request pause at a safe boundary
+bin/harness resume TASK_ID           # clear pause and execute in this terminal
+```
+
+Both views show **only tasks and sessions registered in the selected harness state store**.
+They do not scan unrelated terminals or attach to external sessions. The browser shows goals,
+session bindings, verification evidence, consultation messages and recent state changes.
+An active recorded state without its executor lock is marked as executor absent. Completed
+artifacts are rechecked without modifying them; changed evidence is displayed as stale.
+
+Browser feedback is queued durably. Pause waits for the current model call or file application
+to reach a safe boundary; it does not kill the provider midway. Continue clears the pause request.
+A running `harness worker` processes queued work; otherwise the UI explicitly reports that the
+request is waiting for a worker. Opening a monitor never starts model work. Closing it leaves
+independent tasks running. Use the same `--home PATH` for the worker and both views.
+
+The browser listens only on `127.0.0.1`, with host validation, a per-launch request token and
+same-origin mutation checks. It is a local single-user observer, not a remotely hosted service
+or a multi-user authentication boundary. Do not expose its port through a public proxy.
+
+## Distribution direction
+
+Local Harness is being developed as a standalone service intended for future open-source
+publication. Provider adapters, durable state, execution and observation are separate modules;
+no personal paths, organisation services, Brain installation or fixed AI role split are required.
+Local Brain integration will be optional. Currently supported providers are Codex and Claude;
+additional adapters and automatic service installation are not implemented yet.
+
+### Memory independence
+
+The default is standalone operation, with **no Local Brain dependency or calls**. Harness-owned
+memory is the durable task contract, progress, feedback, verification evidence and checkpoints
+in its own SQLite store. Provider sessions supply conversational continuity. Losing or omitting
+an external memory service must not erase task ownership, permissions or completion evidence.
+
+Optional memory integrations may enrich context; they must not become the source of task state
+or grant execution authority. Local Brain is one possible integration, not the required backend.
+No external-memory adapter is implemented in this pilot yet. Host CLI personal-memory discovery
+is also not claimed: calls run in isolated directories with tools and host configuration disabled
+where supported. The verified standalone path uses harness state and resumed provider sessions.
+
+Source code and private runtime data must remain separate. Do not commit state databases,
+provider logs, task exports or credentials. Example commands use disposable workspaces.
+This checkout is an unpublished pilot: a public repository, release process and open-source
+licence have not yet been established. Public distribution requires an explicit licence choice;
+the intention to publish is not itself a licence grant.
+
 ## Automatic communication between sessions
 
 Optionally bind named advisers to a task. Names are user-selected, not fixed product roles;
@@ -133,7 +188,7 @@ Attempt, timeout and context-budget options are persisted per task. Explicit opt
   and runtime directories are rejected. This is not a security sandbox against hostile local users.
 - No shell execution, file deletion, PR/merge/deploy, CI watcher or infrastructure apply is provided
   by the task executor in this pilot. A request requiring them must remain unresolved.
-- Brain retrieval, workflow plugins, a visual UI, durable external-job watchers and evaluated
+- Brain retrieval, workflow plugins, durable external-job watchers and evaluated
   policy promotion are subsequent integrations. Feedback is persisted and affects the current
   task; there is no claim of automatic cross-task learning yet.
 - Existing CLI feature support varies. `doctor` reports installed versions; an unsupported CLI
@@ -153,5 +208,9 @@ Validated with installed Codex CLI 0.164.0 and Claude Code 2.1.312:
   the artifact without manual message relay.
 - Private isolated fault probes checked wrong-result rejection, repair with fixed checks,
   concurrency, interrupted batches, conflicting external edits, queued feedback and strict JSON types.
+- Observer probes checked managed-only projection, model-free stale-evidence detection, HTTP
+  host/origin/token validation, revision conflicts, queued feedback and pause/continue controls.
+  A delayed executor probe paused before applying its pending proposal and continued without
+  another model call. Browser rendering was inspected against real pilot task/session records.
 
 These are pilot checks, not evidence of lower cost or better outcomes across real development work.
