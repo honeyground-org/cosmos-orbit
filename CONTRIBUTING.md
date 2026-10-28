@@ -1,6 +1,6 @@
 # Contributing
 
-Local Harness is an early executable pilot. Keep changes small and describe the observable
+Cosmos Orbit is an early executable pilot. Keep changes small and describe the observable
 behavior, verification performed, and remaining limitations.
 
 ## Development
@@ -10,8 +10,8 @@ Use Python 3.9+ on macOS or Linux. No runtime Python dependencies are required.
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
-.venv/bin/harness --help
-.venv/bin/harness doctor
+.venv/bin/cosmos-orbit --help
+.venv/bin/cosmos-orbit doctor
 ```
 
 Use a disposable workspace and a dedicated `--home` for verification. Real CLI calls can consume

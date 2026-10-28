@@ -1,4 +1,8 @@
-# Local Harness
+# Cosmos Orbit
+
+**Keep your AI work in orbit.** Part of the Cosmos family: Cosmos AIOS, Cosmos Brain and Cosmos Orbit.
+
+[Source](https://github.com/honeyground-org/cosmos-orbit) · [Apache-2.0 licence](LICENSE)
 
 A local task runtime for ordinary-language requests. Use **Codex alone or Claude alone**;
 neither provider has a fixed role and the other subscription is not required. Existing CLI
@@ -13,17 +17,19 @@ a deterministic feedback loop. It is not a skill bundle or a workflow document i
 Requires **macOS or Linux, Python 3.9+, and an installed/authenticated Codex CLI or Claude Code**.
 Windows is not currently supported because the runtime uses POSIX file locks.
 
-From a downloaded or cloned source checkout:
+Install and launch from source:
 
 ```sh
+git clone https://github.com/honeyground-org/cosmos-orbit.git
+cd cosmos-orbit
 ./install.sh --launch  # install and immediately open the interactive launcher
 # On later runs:
-harness doctor
-harness
+cosmos-orbit doctor
+cosmos-orbit
 ```
 
 The installer creates a dedicated virtual environment at `~/.local/share/local-harness-app/venv`
-and a launcher at `~/.local/bin/harness`. It installs the browser asset, starts no services and does
+and launchers at `~/.local/bin/cosmos-orbit` and `~/.local/bin/harness`. It installs the browser asset, starts no services and does
 not alter provider credentials or shell configuration. If needed, add `~/.local/bin` to your PATH.
 Python packaging tools may be downloaded during installation; runtime Python dependencies are empty.
 If your Linux distribution ships `venv` separately, install its Python venv package first.
@@ -31,7 +37,8 @@ If your Linux distribution ships `venv` separately, install its Python venv pack
 Alternatively, use an existing pipx installation:
 
 ```sh
-pipx install .
+pipx install git+https://github.com/honeyground-org/cosmos-orbit.git
+cosmos-orbit
 ```
 
 To update, obtain the newer source and rerun `./install.sh`. To uninstall, remove the installed
@@ -41,10 +48,10 @@ absolute installation paths. An unrelated existing launcher is never overwritten
 
 ## Start using it
 
-Run `harness commands` for a grouped command reference. It is also available as **Command reference**
+Run `cosmos-orbit commands` for a grouped command reference. It is also available as **Command reference**
 in the launcher and **Commands** in the browser header. Viewing help makes no model calls.
 
-Run `harness` without a subcommand for the interactive launcher.
+Run `cosmos-orbit` without a subcommand for the interactive launcher.
 Choose a new task, browser dashboard, terminal monitor, worker, or an existing task's engine/model
 selection. Task setup asks for an installed CLI, CLI-default or explicit model ID, workspace,
 ordinary-language request, and immediate execution or queueing. The launcher prints the state-store
@@ -52,17 +59,17 @@ location. `--home PATH` works with the launcher too. Noninteractive callers use 
 The model selector currently accepts an ID; it does not yet discover account-specific model lists.
 
 ```sh
-harness doctor
-harness config --provider codex  # optional: choose once; a single installed CLI is auto-selected
-harness start --provider codex --workspace /path/to/workspace \
+cosmos-orbit doctor
+cosmos-orbit config --provider codex  # optional: choose once; a single installed CLI is auto-selected
+cosmos-orbit start --provider codex --workspace /path/to/workspace \
   'Create settings.json with language set to en and retries set to 3.'
 # Or use --provider claude. No second provider is called automatically.
-harness status TASK_ID
-harness feedback TASK_ID 'Change retries to 5; keep the language unchanged.'
-harness handoff TASK_ID
-harness resume TASK_ID
-harness events TASK_ID
-harness recover TASK_ID --keep-current-files  # only for a conflicted pending action
+cosmos-orbit status TASK_ID
+cosmos-orbit feedback TASK_ID 'Change retries to 5; keep the language unchanged.'
+cosmos-orbit handoff TASK_ID
+cosmos-orbit resume TASK_ID
+cosmos-orbit events TASK_ID
+cosmos-orbit recover TASK_ID --keep-current-files  # only for a conflicted pending action
 ```
 
 After configuring a default provider, omit `--provider` from ordinary requests.
@@ -72,11 +79,11 @@ The configured role split is not prescribed. A feedback turn can specify `--prov
 switch provider while retaining the original request, corrections and contract history.
 
 ```sh
-harness start --provider claude --workspace /path/to/workspace --queue \
+cosmos-orbit start --provider claude --workspace /path/to/workspace --queue \
   'Create a short onboarding checklist in onboarding.md.'
-harness worker                 # continue queued work, Ctrl-C to stop the worker
-harness worker --once          # process the current queue once
-harness list                   # no model call
+cosmos-orbit worker                 # continue queued work, Ctrl-C to stop the worker
+cosmos-orbit worker --once          # process the current queue once
+cosmos-orbit list                   # no model call
 ```
 
 The worker is an ordinary foreground process that can be supervised by the user's service
@@ -85,13 +92,13 @@ manager. No service is installed automatically. An idle worker makes no model ca
 ## Observe and intervene
 
 ```sh
-harness watch --lang en          # live terminal view
-harness watch --once             # plain snapshot, suitable for redirected output
-harness watch --task TASK_ID
-harness dashboard --lang en      # loopback browser UI, opens automatically
-harness dashboard --no-open      # print URL without opening a browser
-harness pause TASK_ID            # request pause at a safe boundary
-harness resume TASK_ID           # clear pause and execute in this terminal
+cosmos-orbit watch --lang en          # live terminal view
+cosmos-orbit watch --once             # plain snapshot, suitable for redirected output
+cosmos-orbit watch --task TASK_ID
+cosmos-orbit dashboard --lang en      # loopback browser UI, opens automatically
+cosmos-orbit dashboard --no-open      # print URL without opening a browser
+cosmos-orbit pause TASK_ID            # request pause at a safe boundary
+cosmos-orbit resume TASK_ID           # clear pause and execute in this terminal
 ```
 
 Both views show **only tasks and sessions registered in the selected harness state store**.
@@ -109,7 +116,7 @@ artifacts are rechecked without modifying them; changed evidence is displayed as
 
 Browser feedback is queued durably. Pause waits for the current model call or file application
 to reach a safe boundary; it does not kill the provider midway. Continue clears the pause request.
-A running `harness worker` processes queued work; otherwise the UI explicitly reports that the
+A running `cosmos-orbit worker` processes queued work; otherwise the UI explicitly reports that the
 request is waiting for a worker. Opening a monitor never starts model work. Closing it leaves
 independent tasks running. Use the same `--home PATH` for the worker and both views.
 
@@ -120,8 +127,8 @@ or a multi-user authentication boundary. Do not expose its port through a public
 ## Switch engine or model
 
 ```sh
-harness switch TASK_ID --provider claude --model MODEL_ID
-harness switch TASK_ID --provider codex  # reset to this CLI's default selection
+cosmos-orbit switch TASK_ID --provider claude --model MODEL_ID
+cosmos-orbit switch TASK_ID --provider codex  # reset to this CLI's default selection
 ```
 
 The launcher and mission detail panel offer the same controls. Selection requests are durable;
@@ -138,8 +145,8 @@ silently falling back. This control currently applies to the task executor, not 
 
 ## Distribution direction
 
-Local Harness is being developed as a standalone service intended for future open-source
-publication. Provider adapters, durable state, execution and observation are separate modules;
+Cosmos Orbit is a standalone open-source runtime maintained at
+[honeyground-org/cosmos-orbit](https://github.com/honeyground-org/cosmos-orbit). Provider adapters, durable state, execution and observation are separate modules;
 no personal paths, organisation services, Brain installation or fixed AI role split are required.
 Local Brain integration will be optional. Currently supported providers are Codex and Claude;
 additional adapters and automatic service installation are not implemented yet.
@@ -159,9 +166,8 @@ where supported. The verified standalone path uses harness state and resumed pro
 
 Source code and private runtime data must remain separate. Do not commit state databases,
 provider logs, task exports or credentials. Example commands use disposable workspaces.
-This checkout is an unpublished pilot: a public repository, release process and open-source
-licence have not yet been established. Public distribution requires an explicit licence choice;
-the intention to publish is not itself a licence grant.
+The source is licensed under Apache-2.0. This is an early pilot; package-registry publication
+and native desktop installers are not available yet.
 
 ## Automatic communication between sessions
 
@@ -169,9 +175,9 @@ Optionally bind named advisers to a task. Names are user-selected, not fixed pro
 both sessions can use the same provider, or different providers when available.
 
 ```sh
-harness start --provider codex --peer reviewer=claude --workspace /path/to/workspace \
+cosmos-orbit start --provider codex --peer reviewer=claude --workspace /path/to/workspace \
   'Ask reviewer how to verify the JSON types, then create settings.json with enabled true and language en.'
-harness messages TASK_ID
+cosmos-orbit messages TASK_ID
 ```
 
 When the executing model requests a consultation, the runtime persists the question, wakes its
@@ -227,9 +233,9 @@ handoff; completed tasks do not create unnecessary new sessions.
   the runtime does not fabricate a percentage or fall back to cumulative usage.
 
 ```sh
-harness start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
-harness resume TASK_ID --context-budget 500000
-harness handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
+cosmos-orbit start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
+cosmos-orbit resume TASK_ID --context-budget 500000
+cosmos-orbit handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
 ```
 
 The handoff preserves the fixed contract (goal, constraints and checks), current verification,
@@ -353,14 +359,14 @@ The browser model picker offers CLI default, visible Codex entries from the loca
 
 ## Continue existing CLI work
 
-Choose **Continue from a handoff** in `harness`, then select an engine/model and workspace.
+Choose **Continue from a handoff** in `cosmos-orbit`, then select an engine/model and workspace.
 Supply a UTF-8 handoff document (Markdown, plain text or JSON) or paste text ending with `.END`.
 Add the current continuation request and choose Run now, Queue for worker, or Plan and inspect first.
 
 ```sh
-harness start --provider codex --workspace /path/to/project \
+cosmos-orbit start --provider codex --workspace /path/to/project \
   --handoff-file /path/to/HANDOFF.md --plan-only 'Continue the remaining artifact work.'
-harness start --provider claude --workspace /path/to/project \
+cosmos-orbit start --provider claude --workspace /path/to/project \
   --handoff-text 'Goal: ... Completed: ... Remaining: ... Checks: ...' --queue
 ```
 
@@ -373,3 +379,11 @@ Avoid running the old session against the same files while the managed task writ
 Handoffs are limited to 16,000 characters; continuation requests to 6,000. No silent truncation occurs.
 Existing pilot limits still apply: bounded text/JSON artifacts and supported checks, not arbitrary
 shell execution, test suites, deployment or unrestricted repository development.
+
+## Compatibility
+
+`cosmos-orbit` is the primary command; `harness` remains a compatibility alias. The internal Python
+package remains `harness`. Existing private state at `~/.local/share/local-harness` and the
+`HARNESS_HOME`, `HARNESS_INSTALL_DIR`, and `HARNESS_BIN_DIR` settings remain supported. Renaming
+the product does not move, reset or publish existing tasks. The installer reuses its existing private
+virtual environment and replaces the legacy distribution, preserving task storage.

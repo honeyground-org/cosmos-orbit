@@ -40,10 +40,10 @@ def launch(home=None):
     from .cli import main
     from .store import Store
     if not sys.stdin.isatty():
-        print('Interactive terminal required. Use harness --help for explicit commands.', file=sys.stderr)
+        print('Interactive terminal required. Use cosmos-orbit --help for explicit commands.', file=sys.stderr)
         return 2
     prefix = ['--home', str(home)] if home else []
-    print('\n  LOCAL HARNESS\n  Goal → Work → Verify')
+    print('\n  COSMOS ORBIT\n  Goal → Work → Verify')
     print('  Store: ' + str(Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()))
     try:
         action = choose('What would you like to do?', [
@@ -128,7 +128,7 @@ def launch(home=None):
             command += ['--queue']
         result = main(command + ['--', prompt])
         if mode == 'queue' and result == 0:
-            print('Queued: run harness worker with the same --home.')
+            print('Queued: run cosmos-orbit worker with the same --home.')
         return result
     except (ValueError, OSError) as error:
         print(str(error), file=sys.stderr)

@@ -24,10 +24,10 @@ LABELS = {
            'needs_input': 'Input needed', 'blocked': 'Blocked', 'interrupted': 'Interrupted',
            'stale': 'Evidence changed', 'paused': 'Paused', 'pause_pending': 'Pause requested',
            'unattended': 'Executor absent', 'idle': 'Idle', 'unbound': 'Not started',
-           'title': 'HARNESS / OBSERVER', 'scope': 'Runtime-owned sessions only; external sessions are not scanned',
+           'title': 'COSMOS ORBIT / OBSERVER', 'scope': 'Runtime-owned sessions only; external sessions are not scanned',
            'worker': 'Worker', 'on': 'online', 'off': 'offline', 'task': 'TASK', 'state': 'STATE',
            'provider': 'AI', 'goal': 'GOAL', 'attention': 'need attention', 'active': 'executing',
-           'empty': 'No tasks in this store. Start a task with harness start.',
+           'empty': 'No tasks in this store. Start a task with cosmos-orbit start.',
            'changes': 'RECENT CHANGES', 'stop': 'Ctrl-C closes the monitor; tasks keep running',
            'pending': 'Queued feedback', 'sessions': 'SESSIONS', 'reason': 'Reason'},
 

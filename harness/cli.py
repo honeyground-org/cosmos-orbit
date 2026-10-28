@@ -28,7 +28,7 @@ def show(task):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Persistent, provider-neutral local task runtime (pilot)')
+    parser = argparse.ArgumentParser(prog='cosmos-orbit', description='Persistent, provider-neutral local task runtime (pilot)')
     parser.add_argument('--home', help='Private task store (default: ~/.local/share/local-harness)')
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('commands', help='Show the quick command reference without starting services or models')
