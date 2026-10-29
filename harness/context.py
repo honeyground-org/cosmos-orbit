@@ -89,7 +89,10 @@ def checkpoint(store, task, key, phase, reason='threshold'):
         return None
     provider = data.get('peers', {}).get(key[5:], {}).get('provider') if key.startswith('peer:') else task['provider']
     packet = {'id': uuid.uuid4().hex, 'session_key': key, 'from_session': previous,
-              'reason': reason, 'goal': (data.get('contract') or {}).get('goal', task['prompt']),
+              'reason': reason, 'goal': data.get('mission_goal') or (data.get('contract') or {}).get('goal', task['prompt']),
+              'execution_plan': data.get('execution_plan'),
+              'objective_progress': data.get('objective_progress'),
+              'evaluation': data.get('evaluation'),
               'contract': data.get('contract'), 'contract_hash': data.get('contract_hash'),
               'development': data.get('development'),
               'memory_scope': data.get('memory', {}).get('project_id'),

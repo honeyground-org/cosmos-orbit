@@ -1,7 +1,7 @@
 """터미널과 뷰가 공유하는 실행 상태 설명. 기록된 사실만 투영한다."""
 
 PHASES = {'received': '접수', 'ready': '실행 대기', 'planning': '계획', 'running': '실행',
-          'applying': '변경 적용', 'verifying': '검증', 'repairing': '수정',
+          'evaluating': '관리자 평가', 'applying': '변경 적용', 'verifying': '검증', 'repairing': '수정',
           'waiting_peer': '협업 응답', 'needs_review': '결과 검토',
           'completed': '검증 완료', 'already_satisfied': '기존 결과 확인'}
 
@@ -21,8 +21,10 @@ def describe(task, worker_running):
         reason = '기록된 완료 조건을 확인했습니다.'
         next_action = next_action or '결과와 검증 근거를 확인할 수 있습니다.'
     elif state == 'needs_review':
-        tone, title = 'review', '결과 준비'
-        reason = '실행과 고정 검사가 끝났습니다. 전체 목적 충족 여부는 결과와 남은 작업으로 확인합니다.'
+        tone, title = 'review', '검토 대기'
+        reason = ('관리자가 목표별 근거와 고정 검사를 대조했습니다. 평가 결과를 확인할 수 있습니다.'
+                  if (task.get('evaluation') or {}).get('verdict') == 'concluded' else
+                  '실행과 고정 검사가 끝났지만 관리자의 목표 충족 평가는 아직 없습니다.')
         next_action = next_action or '최근 응답과 결과를 확인하세요. 추가 지시는 같은 세션으로 전달됩니다.'
     elif state == 'needs_input':
         tone, title = 'waiting', '입력 대기'
@@ -54,7 +56,10 @@ def describe(task, worker_running):
     elif task['busy']:
         tone, title = 'active', '실행 중'
         reason = '하네스 실행자가 이 작업을 처리하고 있습니다.'
-        if latest and latest['kind'] == 'provider_tool_started':
+        if state == 'evaluating':
+            title, reason = '관리자 평가 중', '원래 목표와 산출물 근거를 대조하고 다음 작업을 결정합니다.'
+            next_action = '평가에 따라 추가 실행, 결론 검토 또는 필수 입력 대기로 전환합니다.'
+        elif latest and latest['kind'] == 'provider_tool_started':
             reason = (latest.get('tool') or '도구') + ' 응답을 기다리고 있습니다.'
         elif latest and latest['kind'] == 'check_started':
             reason = '고정 검증 명령을 실행하고 결과를 기다리고 있습니다.'

@@ -50,6 +50,8 @@ class Engine:
             task['data']['development']['hold'] = False
             task['data']['attempt'] = 0
             task['data']['evidence'] = []
+            if task['data'].get('evaluation'):
+                task['data']['previous_evaluation'] = task['data'].pop('evaluation')
             if task['data'].get('execution_plan'):
                 task['data']['execution_plan']['state'] = 'superseded'
                 task['data']['plan_requested'] = True

@@ -15,11 +15,11 @@ from .commands import browser_guide
 from .context import limit_for
 from .workspace import verify
 
-ACTIVE = {'planning', 'running', 'applying', 'verifying', 'repairing'}
+ACTIVE = {'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing'}
 ATTENTION = {'needs_review', 'blocked', 'interrupted', 'needs_input', 'stale', 'unattended'}
 LABELS = {
     'en': {'received': 'Queued', 'ready': 'Ready', 'planning': 'Planning', 'running': 'Working',
-           'applying': 'Applying', 'verifying': 'Verifying', 'repairing': 'Repairing',
+           'evaluating': 'Manager evaluation', 'applying': 'Applying', 'verifying': 'Verifying', 'repairing': 'Repairing',
            'waiting_peer': 'Waiting for peer', 'completed': 'Verified', 'already_satisfied': 'Already satisfied',
            'needs_review': 'Review changes', 'needs_input': 'Input needed', 'blocked': 'Blocked', 'interrupted': 'Interrupted',
            'stale': 'Evidence changed', 'paused': 'Paused', 'pause_pending': 'Pause requested',
@@ -132,7 +132,7 @@ def snapshot(store, task_id=None):
                 peer = alias.startswith('peer:')
                 name = alias[5:] if peer else alias
                 provider = data.get('peers', {}).get(name, {}).get('provider', 'unknown') if peer else alias.split(':')[0]
-                in_flight = any(m['target'] == name and m['status'] == 'in_flight' for m in messages) if peer else task['status'] in ('planning', 'running') and alias == task['provider']
+                in_flight = any(m['target'] == name and m['status'] == 'in_flight' for m in messages) if peer else (task['status'] in ('planning', 'running') and alias == task['provider'] or task['status'] == 'evaluating' and alias == task['provider'] + ':manager')
                 session_state = 'running' if in_flight and busy else 'idle' if session_id else 'unbound'
                 sessions.append({'name': name, 'provider': provider, 'id': session_id, 'peer': peer,
                                  'state': session_state, 'managed': True,
@@ -150,7 +150,7 @@ def snapshot(store, task_id=None):
             response_rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind='provider_message' ORDER BY seq DESC LIMIT 6", (task['id'],)).fetchall()
             layer_activity = {}
             for layer, kinds_for_layer in {
-                'control': ('received', 'execution_plan_ready', 'feedback_applied', 'routing_applied', 'continuation_scheduled'),
+                'control': ('evaluation_started', 'evaluation_finished', 'received', 'execution_plan_ready', 'feedback_applied', 'routing_applied', 'continuation_scheduled'),
                 'execution': ('model_started', 'model_finished', 'provider_message'),
                 'context': ('memory_context_prepared', 'memory_context_submitted', 'session_checkpoint', 'automatic_checkpoint'),
                 'evidence': ('verified', 'result_published', 'baseline_recorded')}.items():
@@ -180,7 +180,7 @@ def snapshot(store, task_id=None):
             usage_input = sum(c.get('usage', {}).get('input_tokens', 0) for c in calls)
             usage_output = sum(c.get('usage', {}).get('output_tokens', 0) for c in calls)
             stage = {'received': 0, 'planning': 1, 'ready': 2, 'running': 2, 'waiting_peer': 2,
-                     'applying': 3, 'verifying': 4, 'repairing': 2, 'completed': 5,
+                     'applying': 3, 'verifying': 4, 'evaluating': 4, 'repairing': 2, 'completed': 5,
                      'already_satisfied': 5, 'stale': 4, 'needs_review': 4}.get(task['status'], 1 if not contract else 2)
             if state == 'stale':
                 stage = 4
@@ -195,7 +195,7 @@ def snapshot(store, task_id=None):
                           'routing': store.routing(task['id']), 'last_summary': data.get('last_summary', ''),
                           'files': data.get('development', {}).get('changed_paths', contract.get('files', [])),
                           'development': data.get('development'), 'execution_plan': data.get('execution_plan'),
-                          'objective_progress': data.get('objective_progress'),
+                          'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
                           'memory': {'mode': data.get('memory', {}).get('mode', 'off'),
                                      'project_id': data.get('memory', {}).get('project_id'),
                                      'seconds': (data.get('memory', {}).get('latest') or {}).get('seconds'),
@@ -390,7 +390,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
             if self.headers.get('Host') != authority or self.headers.get('Origin') != origin or not self.valid_token():
                 self.respond(403, '{}')
                 return
-            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/approve'):
+            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/approve', '/assess'):
                 self.respond(404, '{}')
                 return
             store = Store(home)
@@ -425,7 +425,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 # Hold the write reservation through revision validation and enqueue/control.
                 store.db.execute('BEGIN IMMEDIATE')
                 task = store.get(task_id)
-                if self.path in ('/feedback', '/approve') and body.get('revision') != task['revision']:
+                if self.path in ('/feedback', '/approve', '/assess') and body.get('revision') != task['revision']:
                     self.respond(409, json.dumps({'error': 'Task changed; refresh and review before submitting'}))
                     return
                 if self.path == '/feedback':
@@ -437,6 +437,10 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 elif self.path == '/approve':
                     from .planning import approve
                     approve(store, task)
+                    self.respond(200, json.dumps({'queued': True, 'worker_running': store.locked('worker')}))
+                elif self.path == '/assess':
+                    from .manager import request_assessment
+                    request_assessment(store, task)
                     self.respond(200, json.dumps({'queued': True, 'worker_running': store.locked('worker')}))
                 elif self.path == '/switch':
                     request = store.route(task_id, body.get('provider'), body.get('model') or None)

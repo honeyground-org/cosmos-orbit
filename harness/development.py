@@ -134,20 +134,9 @@ def check(store, task, lease_fds=()):
     task['data']['evidence'] = results
     task['data']['development']['verified_tree'] = fingerprint(task['workspace'])
     passed = all(r['passed'] for r in results)
-    task['data']['development']['phase'] = 'ready'
-    # Passing commands are evidence for review, not proof of the whole objective.
-    store.save(task, 'needs_review' if passed else 'repairing', 'verified',
-               {'checks': results, 'passed': passed})
-    from .memory import enqueue_checkpoint, flush
-    enqueue_checkpoint(store, task)
-    flush(store, task, lease_fds)
-    progress = task['data'].get('objective_progress') or {}
-    if passed and progress.get('next_action'):
-        task['data']['reason'] = ''
-        store.save(task, 'ready', 'continuation_scheduled',
-                   {'layer': 'control', 'direction': 'out', 'note': progress['next_action']})
-        return False
-    return passed
+    task['data']['development']['phase'] = 'evaluating'
+    store.save(task, 'evaluating', 'verified', {'checks': results, 'passed': passed})
+    return False
 
 
 def run(engine, task_id, plan_only=False):
@@ -180,7 +169,7 @@ def run(engine, task_id, plan_only=False):
                     task['data']['reason'] = 'Files changed after verification; provide feedback before more work'
                     store.save(task, 'stale', 'external_change_detected')
                 return task
-            if task['status'] in ('blocked', 'stale'):
+            if task['status'] in ('blocked', 'stale', 'needs_input'):
                 return task
             if task['data']['development']['phase'] == 'running':
                 task['data']['reason'] = ('Native execution was interrupted. Inspect the isolated workspace and logs, '
@@ -193,6 +182,21 @@ def run(engine, task_id, plan_only=False):
                 engine._feedback_boundary(task)
                 engine._routing_boundary(task)
                 data = task['data']
+                if data.get('plan_requested'):
+                    from .planning import prepare
+                    prepare(engine, task)
+                    return task
+                if data['development']['phase'] == 'evaluating':
+                    from .manager import evaluate
+                    stopped = evaluate(engine, task, lease_fds)
+                    if engine._feedback_boundary(task):
+                        continue
+                    if stopped:
+                        from .memory import enqueue_checkpoint, flush
+                        enqueue_checkpoint(store, task)
+                        flush(store, task, lease_fds)
+                        return task
+                    continue
                 if data['development']['phase'] == 'lookup':
                     from .memory import lookup
                     lookup(store, task, data['development']['lookup_requests'], lease_fds)
@@ -231,6 +235,7 @@ def run(engine, task_id, plan_only=False):
                               'public_web_allowed': data['options'].get('public_web', False),
                               'approved_plan': data.get('execution_plan'),
                               'previous_progress': data.get('objective_progress'),
+                              'manager_evaluation': data.get('evaluation'),
                               'checks': data['development']['checks'], 'last_verification': data['evidence']},
                               ensure_ascii=False))
                 from .memory import recall
@@ -271,8 +276,9 @@ def run(engine, task_id, plan_only=False):
                     next_status = 'running'
                 elif answer['blocker']:
                     data['reason'] = answer['blocker']
-                    data['development']['phase'] = 'blocked'
-                    next_status = 'blocked'
+                    # 관리자가 실행자의 차단 판단과 대안을 검토한다.
+                    data['development']['phase'] = 'verifying'
+                    next_status = 'verifying'
                 # Persist the response's next phase atomically; recovery must not skip a pending question/blocker.
                 store.save(task, next_status, 'model_finished', dict(metadata, phase='running', note=answer['summary']))
                 if engine._feedback_boundary(task):

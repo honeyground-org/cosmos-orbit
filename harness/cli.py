@@ -20,7 +20,7 @@ def show(task):
             'request': task['prompt'], 'contract': data['contract'],
             'development': data.get('development'), 'memory': data.get('memory'),
             'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
-            'objective_progress': data.get('objective_progress'),
+            'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
             'attempts': data['attempt'], 'evidence': data['evidence'],
             'reason': data['reason'], 'feedback': data['feedback'],
             'sessions': data['sessions'], 'context': data.get('context_measurements', {}),
@@ -41,6 +41,8 @@ def main(argv=None):
     plan_cmd.add_argument('id')
     plan_cmd.add_argument('--auto', action='store_true', help='Continue automatically after planning; no review hold')
     plan_cmd.add_argument('--public-web', action='store_true', help='Authorise read-only public-web research during execution')
+    assess_cmd = sub.add_parser('assess', help='Evaluate existing development evidence and continue feasible work')
+    assess_cmd.add_argument('id')
     approve_cmd = sub.add_parser('approve', help='Approve a reviewed plan and queue execution')
     approve_cmd.add_argument('id')
     result_cmd = sub.add_parser('result', help='Read or publish a task result in both terminal and browser')
@@ -148,6 +150,12 @@ def main(argv=None):
             if args.auto and task['status'] == 'ready':
                 task = engine.run(args.id)
             result = show(task)
+        elif args.command == 'assess':
+            with store.lock('task:' + args.id):
+                task = store.get(args.id)
+                from .manager import request_assessment
+                request_assessment(store, task)
+            result = show(engine.run(args.id))
         elif args.command == 'approve':
             from .planning import approve
             with store.lock('task:' + args.id):
@@ -347,7 +355,7 @@ def main(argv=None):
                             continue
                         if item['status'] == 'interrupted' and store.get(item['id'])['data']['pending'] is not None:
                             continue  # A conflicted batch needs explicit resume or recovery.
-                        if store.inbox(item['id']) or store.routing(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'repairing', 'waiting_peer', 'paused'):
+                        if store.inbox(item['id']) or store.routing(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing', 'waiting_peer', 'paused'):
                             try:
                                 result = engine.run(item['id'])
                                 if result['revision'] != item['revision']:

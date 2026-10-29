@@ -255,11 +255,13 @@ def enqueue_checkpoint(store, task):
         return
     evidence = [{k: v for k, v in row.items() if k in ('path', 'kind', 'passed', 'exit_code', 'timed_out', 'sha')}
                 for row in task['data']['evidence']]
-    request = task['data'].get('imported_handoff', {}).get('current_request', task['prompt'])
+    request = task['data'].get('mission_goal') or task['data'].get('imported_handoff', {}).get('current_request', task['prompt'])
     feedback = task['data']['feedback']
     payload = {'project_id': memory['project_id'], 'task_id': task['id'],
                'request': request[:6000], 'request_sha': digest(request), 'request_truncated': len(request) > 6000,
                'status': task['status'], 'evidence': evidence,
+               'objective_progress': task['data'].get('objective_progress'),
+               'evaluation': task['data'].get('evaluation'),
                'feedback_total': len(feedback),
                'feedback': [{'text': f['text'][:1000], 'sha': digest(f['text'])} for f in feedback[-4:]],
                'recorded_at': task['updated'],

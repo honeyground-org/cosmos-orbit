@@ -31,6 +31,7 @@ GROUPS = [
         ('cosmos-orbit messages TASK_ID', 'Read task-owned peer exchanges.')]),
     ('Queue and continue', [
         ('cosmos-orbit start --provider codex --workspace /path/to/project --queue "Your task"', 'Save work for the worker.'),
+        ('cosmos-orbit assess TASK_ID', '기존 결과를 관리자에게 평가시키고 가능한 후속 작업을 이어갑니다.'),
         ('cosmos-orbit worker', 'Run queued work; Ctrl-C stops the worker.'),
         ('cosmos-orbit worker --once', 'Process the current queue once.'),
         ('cosmos-orbit pause TASK_ID', 'Pause at a safe boundary.'),

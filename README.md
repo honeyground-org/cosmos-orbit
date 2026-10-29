@@ -142,18 +142,29 @@ default. In the terminal, `plan TASK_ID --auto` generates a plan and continues e
 Plans show intended steps, not fabricated per-step completion. Actual provider tool calls and
 check start/finish events drive the live layer interactions. Idle sessions do not simulate traffic.
 Use `result TASK_ID` or the task inspector to read a published result snapshot without an editor.
-Native turns report remaining work and a next action separately from verification. When checks
-pass but a feasible next action remains, Orbit records it and continues within `--max-attempts`.
-Reaching that budget stops with the pending action preserved; it does not mark the goal complete.
-These progress reports are executor assessments, not independently verified per-plan-step proofs.
-Interrupted native calls still require an explicit continuation after inspecting retained files.
+Native turns report remaining work and a next action separately from verification. After the
+fixed checks, a manager call in a separate fresh context evaluates the original goal, corrections,
+plan acceptance items, current file excerpts, report and check outputs. It uses the selected engine;
+it does not silently introduce another provider. The manager cannot execute tools or alter checks.
+
+The manager records an evidence assessment for every requirement. `continue` supplies a concrete
+next action and strategy to the next native turn. `concluded` requires all criteria to be met with
+cited evidence and current passing checks before **needs_review**. `needs_input` records an essential
+question. Unsupported completion claims are rejected; a repeated unchanged tree and next action,
+or the execution attempt limit, stops with pending work preserved. A supported negative research
+finding is a valid conclusion. These model assessments are not mathematical proof of goal completion.
+
+Use `cosmos-orbit assess TASK_ID` or **관리자 평가 후 이어가기** in the inspector to reassess an
+existing idle result and continue feasible work. This explicitly reruns its fixed checks. Older
+results are labelled as lacking manager assessment until evaluated. `evaluation_started` and
+`evaluation_finished` events, executor/manager sessions and per-criterion evidence appear in status
+and the browser. The file evidence bundle is bounded; omitted content remains unverified.
 
 After each native turn Orbit records command exit codes, timeout outcomes and private output logs.
-Failed checks trigger repair up to the attempt budget. Passing checks produce **needs_review**,
-not a claim that every part of the objective is complete. `status` shows the private workspace,
-base commit, changed paths, a tracked-files patch and separately listed untracked files. Inspect
-those files and the patch before transferring selected changes to your original repository.
-The engine-room inspector shows the same development details and command evidence.
+`status` shows the private workspace, base commit, changed paths, a tracked-files patch and separately
+listed untracked files. Inspect those files and the patch before transferring selected changes to
+your original repository. The engine-room inspector shows the same evidence. The current manager
+loop applies to development mode, not the bounded artifact mode.
 
 If native execution is interrupted, Orbit preserves the clone and does not replay the uncertain
 turn automatically. Inspect files/logs, then use `feedback TASK_ID 'Inspect the retained changes and
@@ -367,13 +378,18 @@ cosmos-orbit handoff TASK_ID  # manual checkpoint; pending writes must first be 
 ```
 
 The handoff preserves the fixed contract (goal, constraints and checks), current verification,
-application attempts, recent corrections, last execution summary and next phase. Current files and
+application attempts, recent corrections, last execution summary and next phase. Development handoffs
+also retain the full mission goal, execution plan, remaining work and manager evaluation. Current files and
 peer replies are supplied by the next call. Full feedback, previous sessions and event history remain
 in private storage; only the latest eight corrections are copied into the compact handoff packet.
 The original full request and correction history remain available to the planning phase. Model prose
 in a handoff is historical context, not new authority. Handoffs are journalled before clearing session
 bindings; retries reuse the saved handoff rather than losing it or incrementing the handoff count again.
 `status`, `watch` and browser session details expose measured tokens, threshold and handoff count.
+
+The context threshold is not a cumulative token or cost budget. Interrupted calls can lack usage
+metadata, and prompt-size preflight/reservation is not implemented. Manager evaluations use fresh
+contexts; their calls and reported usage are included in the recorded metrics.
 
 Native CLI compaction remains enabled. Compaction and resuming an existing session are not the same
 operation as this fresh-session handoff. The installed project handoff guide was inspected: it prepares
