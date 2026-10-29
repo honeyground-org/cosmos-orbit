@@ -58,6 +58,7 @@ button:hover{border-color:#8ee9ff88}.primary{background:linear-gradient(135deg,#
 .flow-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 8px}.flow-head h3{margin:0}.chips{display:flex;gap:6px}.chips button{padding:5px 10px;font-size:11px;border-radius:999px}.chips .selected{border-color:var(--lime);color:var(--lime)}
 .console article.msg{font:13px/1.6 system-ui,sans-serif;color:var(--ink)}.console article.msg small{font:10px ui-monospace,monospace}.console article.fail small{color:var(--amber)}
 .box>h3:first-child{margin-top:0}
+.operation p,.mission-card p,.mission-card strong,#detail p,#detail small,.response p,.gauge .sub,.result-strip .verdict span{overflow-wrap:anywhere;min-width:0}
 @media(max-width:700px){.gauges,.layer-row{grid-template-columns:1fr 1fr}.gauge b{font-size:14px}}
 .machine-stage{background:radial-gradient(ellipse at 50% 55%,#25414b 0,#14252e 48%,#101b2b 85%)}.machine-stage:before{opacity:.18}.machine-stage:after{box-shadow:inset 0 0 100px #08111b70,inset 0 1px 0 #ffffff1a}
 </style>
@@ -75,6 +76,14 @@ function sessionEvents(t){return [...new Map([...(eventPages.get(t.id)||[]),...t
 function eventTitle(e){const title=eventTitles[e.kind]||names[e.kind]?.[1]||e.kind;return title+((e.exit_code!=null&&e.exit_code!==0)||e.failed?' · 실패'+(e.exit_code!=null?' ('+e.exit_code+')':''):'')}
 function operation(t){return t.operation||{phase:w('stages')[t.stage],title:label(t.status),tone:t.busy?'active':'idle',reason:t.reason||'표시용 상태',next_action:'기록된 다음 전환을 기다립니다.',last_activity:t.events[0]}}
 function heartbeat(m){const h=m.session.health;if(!connected||m.session.state==='running'||!h||h.status!=='ready'||!h.checked_at)return false;return Date.now()-Date.parse(h.checked_at)<=(h.valid_for_seconds||45)*1000}
+// ── Light vocabulary (2026-10-29): colour says the state, rhythm says the state and the task's measured tempo. Nothing moves without a recorded state. ──
+const vocab={running:{color:'#a9f7ff',period:null},planning:{color:'#c4a3ff',period:6},evaluating:{color:'#ffe7a8',period:3},checking:{color:'#b9f59b',period:.45},completed:{color:'#6fe3a8',period:7.5},review:{color:'#9fd8ff',period:12},blocked:{color:'#ff8fb1',period:8},waiting:{color:'#ffd08a',period:5},standby:{color:'#8aa6ad',period:0},idle:{color:'#a8ffdb',period:4.2}};
+function coreState(m){const t=m.task,s=m.session;if(!connected)return 'standby';if(t.status==='evaluating'&&s.state==='running')return 'evaluating';if(t.busy&&s.state==='running')return t.status==='planning'?'planning':'running';const last=t.operation?.last_activity;if(t.busy&&last&&last.kind==='check_started')return 'checking';if(t.busy)return 'standby';if(['completed','already_satisfied'].includes(t.status))return 'completed';if(t.status==='needs_review')return 'review';if(['blocked','interrupted','stale','unattended'].includes(t.status))return 'blocked';if(['needs_input','paused','pause_pending','received','ready','waiting_peer'].includes(t.status))return 'waiting';return 'idle'}
+// Measured tempo: tool calls and responses in the last three minutes decide the running rhythm; a deliberate (plan-first / planning) task breathes slower.
+function tempo(t){const cut=Date.now()-180000,n=t.events.filter(e=>(e.kind==='provider_tool_started'||e.kind==='provider_message')&&Date.parse(e.at)>cut).length,deliberate=t.status==='planning'||!!t.execution_plan&&t.execution_plan.state==='awaiting_review',base=n>=12?.7:n>=6?1.1:n>=2?1.7:2.6;return deliberate?Math.min(4,base*1.6):base}
+// Amplitude envelope 0..1 for a state at phase ph (0..1 of its period). Completed is a quiet heart: lub, dub, long rest.
+function envelope(state,ph,hb){const wave=(1-Math.cos(ph*Math.PI*2))/2;switch(state){case 'running':return .55+.45*wave;case 'planning':return .25+.35*wave;case 'evaluating':return .35+.45*wave;case 'checking':return ph<.5?1:.2;case 'completed':{const b=ph<.12?Math.sin(ph/.12*Math.PI):ph>.2&&ph<.3?.6*Math.sin((ph-.2)/.1*Math.PI):0;return .08+.14*b}case 'waiting':return .12+.18*wave;case 'blocked':return ph<.04?.9:.2;case 'review':return .12+.10*wave;case 'standby':return .08;default:return hb?.06+.10*wave:.04}}
+const animatedState=m=>{const st=coreState(m);return st!=='standby'&&!(st==='idle'&&!heartbeat(m))};
 function stateColor(t){return {active:'#a9f7ff',waiting:'#ffd08a',problem:'#ff8199',review:'#99caff',complete:'#b8ffd9',idle:'#8aa3bf'}[operation(t).tone]||'#8aa3bf'}
 function track(t){const rail=el('div',undefined,'track'),stage=t.status==='needs_review'?5:t.stage;w('stages').forEach((s,i)=>rail.append(el('div',s,'station '+(i===stage?'current':''))));return rail}
 function modelText(t){const s=t.sessions.find(s=>!s.peer&&s.provider===t.provider);return s?.reported_models?.length?s.reported_models.join(', '):(t.requested_model?`${w('requested')}: ${t.requested_model}`:w('unreported'))}
@@ -110,7 +119,7 @@ function render(){
  ].map(([a,b],i)=>{const d=el('div');d.append(el('small',a),el('b',b),el('small',['계획과 지시, 실행 전환과 정지','실제 모델 호출과 도구 응답','컨텍스트 보존과 세션 인계','고정 검사와 결과 기록'][i]));return d}));
  replace('readouts',[[executing,'실행 중'],[attention,'결과 / 확인 필요'],[data.tasks.filter(t=>['completed','already_satisfied'].includes(t.status)).length,'검증 완료']].map(([v,k])=>{const d=el('div');d.append(el('b',v),el('span',k));return d}));
  $('sceneStatus').textContent=connected?(executing?'실행 중 · 수신 상태':'실행 없음 · 상태 관측 중'):'연결 끊김 · 마지막 수신 상태';
- $('motionLegend').textContent='코어는 실제 세션입니다. 밝기와 맥동은 실행 상태, 이동 입자는 기록된 호출·응답, 움직이는 점선은 진행 중인 모델 호출을 나타냅니다. 초록빛 코어 호흡은 쉬는 엔진의 로컬 준비 확인(45초 이내)이며 원격 연결이나 워커 실행을 뜻하지 않습니다. 클릭하면 같은 세션의 흐름을 확인합니다. 청록: 실행 · 파랑: 결과 · 주황: 대기 · 분홍: 중단/문제.';
+ $('motionLegend').textContent='코어는 실제 세션, 가운데 기둥은 Orbit 관리자입니다. 색은 상태, 리듬은 상태와 그 작업의 실측 템포를 따릅니다. 청록 = 실행 중(도구 호출이 잦을수록 빠르게) · 보라 = 계획(긴 한 호흡) · 흰금 = 관리자 평가(기둥에서 내려오는 파동) · 라임 = 고정 검사 · 깊은 초록 = 완료(느리고 고요한 심장) · 파랑 = 검토 대기(정적) · 주황 = 입력·승인 대기 · 분홍 = 차단(8초에 한 번 섬광). 기록된 상태 없이는 아무것도 움직이지 않습니다.';
  replace('missions',data.tasks.map(t=>{const o=operation(t),b=el('button',undefined,'mission-card '+o.tone);b.append(el('small',`${t.project||'Project'} · ${t.provider.toUpperCase()}`),el('strong',t.goal),el('span',o.phase+' · '+o.title,'badge'),el('p',o.reason),el('small','다음 · '+o.next_action),el('small','세션 흐름 열기 →','success'));b.onclick=()=>open(t.id);return b}));
  $('page').textContent=`${modules.length?modulePage+1:0} / ${Math.ceil(modules.length/8)}`;
  $('prevPage').disabled=$('edgePrev').disabled=modulePage===0;$('nextPage').disabled=$('edgeNext').disabled=(modulePage+1)*8>=modules.length;
@@ -130,6 +139,41 @@ function drawMachine(now=performance.now()){
  function plate(x,y,z,dx,dy,height,color){path([project(x,y+dy,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x,y+dy,z-height)],'#202a2b','#526165');path([project(x+dx,y,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x+dx,y,z-height)],'#172123','#3f5055');path([project(x,y,z),project(x+dx,y,z),project(x+dx,y+dy,z),project(x,y+dy,z)],color,'#758c8d')}
  function wire(points,color,width=1){paint.beginPath();points.forEach((p,i)=>i?paint.lineTo(...project(...p)):paint.moveTo(...project(...p)));paint.strokeStyle=color;paint.lineWidth=width*scale;paint.stroke()}
  function text(x,y,z,value,color='#cfe3ea',size=11,align='center'){const p=project(x,y,z);paint.font=`${Math.max(10,size*scale)}px ui-monospace,monospace`;paint.fillStyle=color;paint.textAlign=align;paint.shadowColor='#0b1226';paint.shadowBlur=6*scale;paint.fillText(value,...p);paint.shadowBlur=0}
+ // ── ORBIT tower: a glass column with a brass dilution-refrigerator chandelier and a cold qubit core. Light here is bound to the harness state only. ──
+ function drawTower(mode,anyBlocked){
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function ell(x,y,z,r,fill,stroke,w=1){const p=project(x,y,z);paint.beginPath();paint.ellipse(p[0],p[1],r*1.12*scale,r*0.48*scale,0,0,Math.PI*2);if(fill){paint.fillStyle=fill;paint.fill()}if(stroke){paint.strokeStyle=stroke;paint.lineWidth=w*scale;paint.stroke()}return p}
+  paint.save();if(mode==='offline')paint.globalAlpha=.42;
+  // pedestal: dark disc, cyan ring light, cold pool (pink ring when a task is blocked)
+  ell(0,0,22,78,'#0e1730','#8ee9ff33',1);ell(0,0,24,74,'#16223f',anyBlocked?'#ff8fb1aa':'#bff6ff88',1.4);ell(0,0,25,62,'#111b36',null);
+  const pool=project(0,0,26),gr=paint.createRadialGradient(pool[0],pool[1],0,pool[0],pool[1],90*scale);gr.addColorStop(0,'#bff6ff66');gr.addColorStop(1,'#bff6ff00');paint.fillStyle=gr;paint.fillRect(pool[0]-100*scale,pool[1]-50*scale,200*scale,100*scale);
+  // glass enclosure (hexagonal prism); back faces first
+  const R=52,zb=26,zt=212,hex=[...Array(6)].map((_,i)=>{const a=Math.PI/6+i*Math.PI/3;return [Math.cos(a)*R,Math.sin(a)*R]});
+  const faces=hex.map((p,i)=>{const q=hex[(i+1)%6];return {pts:[project(p[0],p[1],zb),project(q[0],q[1],zb),project(q[0],q[1],zt),project(p[0],p[1],zt)],depth:(project(p[0],p[1],0)[1]+project(q[0],q[1],0)[1])/2}}).sort((a,b)=>a.depth-b.depth);
+  const glass=(f,front)=>path(f.pts,front?'#bfeeff0d':'#bfeeff07',front?'#dff8ff66':'#dff8ff2e');
+  faces.slice(0,3).forEach(f=>glass(f,false));
+  for(let k=0;k<70;k++){const a=k*2.399,rr=(k*37%100)/100*R*.8,z=40+(k*53%170),q=project(Math.cos(a)*rr,Math.sin(a)*rr,z);paint.fillStyle=`rgba(191,246,255,${0.08+(k%5)*0.03})`;paint.fillRect(q[0],q[1],1.2*scale,1.2*scale)}
+  // chandelier: six brass tiers, fine rods, hanging cans, central coax
+  const tiers=[{z:190,r:40},{z:164,r:36},{z:138,r:31},{z:112,r:25},{z:88,r:19},{z:66,r:13}],brass=z=>z>150?'#e9d59a':z>100?'#d8bd7a':'#c4a35e';
+  for(let i=0;i<tiers.length;i++){const t=tiers[i];
+   if(i<tiers.length-1){const u=tiers[i+1];for(let k=0;k<28;k++){const a=k/28*Math.PI*2;wire([[Math.cos(a)*t.r,Math.sin(a)*t.r,t.z-1],[Math.cos(a)*u.r,Math.sin(a)*u.r,u.z+1]],k%4===0?'#f3e2b0aa':'#e8c67a55',k%4===0?.9:.5)}
+    for(let k=0;k<6;k++){const a=k/6*Math.PI*2+i*.5,x=Math.cos(a)*t.r*.55,y=Math.sin(a)*t.r*.55;wire([[x,y,t.z-2],[x,y,t.z-9]],'#b89654cc',2.2);const q=project(x,y,t.z-9);paint.fillStyle='#8a6f3a';paint.beginPath();paint.ellipse(q[0],q[1],2.2*scale,1*scale,0,0,Math.PI*2);paint.fill()}}
+   ell(0,0,t.z-2.5,t.r,'#6f5522','#fff0c060',1);const p=ell(0,0,t.z,t.r,brass(t.z),'#fff7dcaa',.9);
+   const spec=paint.createLinearGradient(p[0]-t.r*scale,p[1],p[0]+t.r*scale,p[1]);spec.addColorStop(0,'#ffffff00');spec.addColorStop(.32,'#ffffff66');spec.addColorStop(.46,'#ffffff12');spec.addColorStop(1,'#ffffff00');ell(0,0,t.z,t.r,spec,null);ell(0,0,t.z+.2,t.r*.55,null,'#7a5e2a88',.6)}
+  for(const [dx,dy] of [[-5,0],[0,0],[5,0],[0,5],[0,-5]])wire([[dx,dy,192],[dx,dy,58]],'#fff0c4bb',1.1);
+  // the qubit core: cold bloom, white chip, faint rings. Brighter while anything is being managed.
+  const chip=project(0,0,54),bloom=paint.createRadialGradient(chip[0],chip[1],0,chip[0],chip[1],46*scale);bloom.addColorStop(0,'#ffffff'+(mode==='idle'||mode==='offline'?'77':'dd'));bloom.addColorStop(.3,'#bff6ff77');bloom.addColorStop(1,'#8ee9ff00');paint.fillStyle=bloom;paint.fillRect(chip[0]-50*scale,chip[1]-50*scale,100*scale,100*scale);
+  path([project(-8,-8,54),project(8,-8,54),project(8,8,54),project(-8,8,54)],'#f4ffff','#ffffff');for(let r=0;r<3;r++)ell(0,0,54,14+r*8,null,`rgba(191,246,255,${.35-r*.1})`,.8);
+  // state light: evaluating = warm wave descending the rods (3s) · running = cold particles descending (2.6s) · idle/offline = bloom only
+  if((mode==='evaluating'||mode==='running')&&!reduced){const phase=(now/(mode==='evaluating'?3000:2600))%1;for(let i=0;i<tiers.length-1;i++){const t=tiers[i],u=tiers[i+1];for(let k=0;k<28;k+=2){const a=k/28*Math.PI*2,x=Math.cos(a)*(t.r+(u.r-t.r)*phase),y=Math.sin(a)*(t.r+(u.r-t.r)*phase),z=t.z+(u.z-t.z)*phase,q=project(x,y,z);paint.fillStyle=mode==='evaluating'?'#fff3c4':'#bff6ff';paint.shadowColor=paint.fillStyle;paint.shadowBlur=10;paint.beginPath();paint.arc(q[0],q[1],1.4*scale,0,Math.PI*2);paint.fill();paint.shadowBlur=0}}}
+  // front faces, a highlight stripe on the nearest face, the cap and the etched name
+  faces.slice(3).forEach(f=>glass(f,true));
+  const nf=faces[5],hs=paint.createLinearGradient(nf.pts[0][0],0,nf.pts[1][0],0);hs.addColorStop(0,'#ffffff00');hs.addColorStop(.18,'#ffffff22');hs.addColorStop(.26,'#ffffff05');hs.addColorStop(1,'#ffffff00');path(nf.pts,hs,null);
+  path(hex.map(p=>project(p[0],p[1],zt)),'#dff8ff1a','#f2fdffcc');path(hex.map(p=>project(p[0]*.86,p[1]*.86,zt+1)),null,'#8ee9ff66');
+  if(scale>=.72){const lbl=project(-118,12,24);paint.font=`${Math.max(10,10*scale)}px ui-monospace,monospace`;paint.fillStyle='#eafcff';paint.textAlign='right';paint.shadowColor='#8ee9ff';paint.shadowBlur=14;paint.fillText('O R B I T',lbl[0],lbl[1]);paint.shadowBlur=0}
+  for(let ring=0;ring<3;ring++){const p=project(0,0,30);paint.beginPath();paint.ellipse(p[0],p[1]-ring*12*scale,(88+ring*8)*scale,(36+ring*4)*scale,0,0,Math.PI*2);paint.strokeStyle=['#9bdfff60','#9bdfff38','#9bdfff1c'][ring];paint.lineWidth=1;paint.stroke()}
+  paint.restore();
+ }
  // Three exposed physical layers: retained state, control bus, execution sockets.
  paint.shadowColor='#0009';paint.shadowBlur=35*scale;paint.shadowOffsetY=30*scale;
  plate(-325,-230,-65,650,460,8,'#29445233');paint.shadowBlur=0;paint.shadowOffsetY=0;
@@ -154,7 +198,7 @@ if(scale>=.72){text(-185,252,-44,'03 / CONTEXT · CHECKPOINTS','#d2bfff',10);}
 if(scale>=.72){text(230,252,-65,'04 / VERIFICATION BUS','#cbe9b8',10);}
 if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  const visible=modules.slice(modulePage*8,modulePage*8+8);
- const slots=visible.length<=2?[[-170,40],[170,40]]:[[-270,-160],[-90,-160],[90,-160],[270,-160],[-270,170],[-90,170],[90,170],[270,170]];
+ const slots=visible.length<=2?[[-200,40],[200,40]]:visible.length<=4?[[-270,-160],[270,-160],[-270,170],[270,170]]:[[-270,-160],[-90,-160],[90,-160],[270,-160],[-270,170],[-90,170],[90,170],[270,170]];
  // Independent radial links end at Harness; no engine-to-engine transport is implied.
  visible.forEach((m,i)=>{const [x,y]=slots[i],end=[x*.18,y*.18,24],color=stateColor(m.task);wire([[x,y,3],end],color+'55',1.2);
  if(connected&&m.task.runtime&&m.task.busy&&m.session.state==='running'){paint.save();paint.setLineDash([5*scale,9*scale]);paint.lineDashOffset=matchMedia('(prefers-reduced-motion: reduce)').matches?0:-now/65*scale;wire([[x,y,3],end],'#baf7ffcc',2.3);paint.restore()}
@@ -162,44 +206,37 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  if(connected&&!matchMedia('(prefers-reduced-motion: reduce)').matches){for(const pulse of pulses.filter(p=>p.key===sessionKey(m.task,m.session)&&now-p.start<2200)){
  if(pulse.route==='tool'){const style=layerStyles[pulse.layer]||layerStyles.execution;const route=[[x,y,68],[x,y,style.z],[0,0,style.z]],f=Math.max(0,Math.min(1,(now-pulse.start)/2200)),travel=(pulse.out?f:1-f)*2,segment=Math.min(1,Math.floor(travel)),mix=travel-segment;wire(route,style.color+'88',1.6);const from=route[segment],to=route[segment+1],q=project(...from.map((v,k)=>v+(to[k]-v)*mix));paint.fillStyle=style.color;paint.shadowColor=style.color;paint.shadowBlur=18;paint.beginPath();paint.arc(q[0],q[1],4*scale,0,Math.PI*2);paint.fill();paint.shadowBlur=0;continue}
  const fraction=Math.min(1,(now-pulse.start)/2200),t=pulse.out?1-fraction:fraction,p=project(x+(end[0]-x)*t,y+(end[1]-y)*t,3+(end[2]-3)*t);paint.fillStyle=pulse.out?'#8edcff':'#dffcff';paint.shadowBlur=18;paint.shadowColor=paint.fillStyle;paint.beginPath();paint.arc(p[0],p[1],3*scale,0,Math.PI*2);paint.fill();paint.shadowBlur=0}}});
- plate(-57,-37,28,114,74,10,'#8ee9ff33');
- for(let i=0;i<7;i++)wire([[-44,-25+i*8,29],[44,-25+i*8,29]],'#9fd8ff',1);
- plate(-38,-25,78,76,50,50,'#8ee9ff44');if(scale>=.72){text(0,0,50,'ORBIT','#eafcff',11);}
- const core=project(0,0,36);for(let ring=0;ring<3;ring++){paint.beginPath();paint.ellipse(core[0],core[1]-ring*12*scale,(68+ring*7)*scale,(28+ring*4)*scale,0,0,Math.PI*2);paint.strokeStyle=['#9bdfff70','#9bdfff40','#9bdfff20'][ring];paint.lineWidth=1;paint.stroke()}
+ const towerMode=!connected||!data.worker_running?'offline':visible.some(m=>coreState(m)==='evaluating')?'evaluating':visible.some(m=>m.task.busy)?'running':'idle',towerBlocked=visible.some(m=>['blocked','interrupted','stale','unattended'].includes(m.task.status)),towerY=project(0,0,0)[1];let towerDrawn=false;
  // Draw back-to-front for solid depth and distinguish execution from verified evidence.
  visible.map((m,i)=>({m,i,xy:slots[i]})).sort((a,b)=>project(...a.xy)[1]-project(...b.xy)[1]).forEach(({m,i,xy:[x,y]})=>{
- const task=m.task,s=m.session,active=connected&&task.busy&&s.state==='running',verified=['completed','already_satisfied'].includes(task.status),color=task.busy&&!active?'#8aa6ad':stateColor(task);
+ if(!towerDrawn&&project(x,y,0)[1]>=towerY){drawTower(towerMode,towerBlocked);towerDrawn=true}
+ const task=m.task,s=m.session,state=coreState(m),color=vocab[state].color,reduced=matchMedia('(prefers-reduced-motion: reduce)').matches,active=state==='running'||state==='planning'||state==='evaluating'||state==='checking';
+ const period=state==='running'?tempo(task):vocab[state].period,ph=period?(reduced?.5:((now/1000)%period)/period):.5,amp=envelope(state,ph,heartbeat(m));
  plate(x-48,y-40,12,96,80,5,'#8ee9ff2e');
  const base=project(x,y,35),top=project(x,y,104),rx=44*scale,ry=20*scale;
+ // Body: a cool glass cylinder. Its halo carries the state colour at the state's amplitude, so a running core is the brightest thing on the stage and a completed core is the calmest.
+ const halo=paint.createRadialGradient(base[0],base[1],rx*.2,base[0],base[1],rx*2.3);halo.addColorStop(0,color+Math.round(20+amp*150).toString(16).padStart(2,'0'));halo.addColorStop(1,color+'00');paint.fillStyle=halo;paint.fillRect(base[0]-rx*2.4,base[1]-rx*2.4,rx*4.8,rx*4.8);
  const grad=paint.createLinearGradient(top[0]-rx,0,top[0]+rx,0);grad.addColorStop(0,'#37616cbb');grad.addColorStop(.28,'#b8e7e873');grad.addColorStop(.62,'#52828a88');grad.addColorStop(1,'#16383ddd');
  paint.beginPath();paint.ellipse(base[0],base[1],rx,ry,0,0,Math.PI);paint.lineTo(top[0]-rx,top[1]);paint.ellipse(top[0],top[1],rx,ry,0,Math.PI,2*Math.PI);paint.closePath();paint.fillStyle=grad;paint.fill();
- for(let z=46;z<100;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle='#364e4d88';paint.lineWidth=2*scale;paint.stroke()}
+ paint.save();paint.shadowColor=color;paint.shadowBlur=(2+amp*22)*scale;
+ for(let z=46;z<100;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle=color+Math.round(50+amp*170).toString(16).padStart(2,'0');paint.lineWidth=(1.2+amp*1.4)*scale;paint.stroke()}
+ paint.restore();
  paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);paint.fillStyle='#1c2b2e';paint.fill();paint.strokeStyle='#b9cbc7';paint.lineWidth=2*scale;paint.stroke();
+ paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);paint.fillStyle=color+Math.round(amp*90).toString(16).padStart(2,'0');paint.fill();
  // Floating containment field: context orbit, six workflow stations, evidence socket.
  const socket=project(x,y,13);paint.beginPath();paint.ellipse(socket[0],socket[1],rx*1.4,ry*1.4,0,0,Math.PI*2);paint.strokeStyle=color+'66';paint.lineWidth=1;paint.stroke();
  const beam=paint.createLinearGradient(0,base[1]-35*scale,0,socket[1]);beam.addColorStop(0,color+'00');beam.addColorStop(1,color+'25');path([[top[0]-rx*.7,base[1]-35*scale],[top[0]+rx*.7,base[1]-35*scale],[socket[0]+rx,socket[1]],[socket[0]-rx,socket[1]]],beam);
  const orbit=project(x,y,68);paint.beginPath();paint.ellipse(orbit[0],orbit[1],rx*1.65,ry*1.65,0,0,Math.PI*2);paint.strokeStyle='#8ee9ff66';paint.setLineDash([3*scale,7*scale]);paint.stroke();paint.setLineDash([]);
- for(let phase=0;phase<6;phase++){const a=phase*Math.PI/3-Math.PI/2,q=[orbit[0]+Math.cos(a)*rx*1.65,orbit[1]+Math.sin(a)*ry*1.65];paint.beginPath();paint.arc(q[0],q[1],(phase===(task.status==='needs_review'?5:task.stage)?4:2)*scale,0,Math.PI*2);paint.fillStyle=phase===(task.status==='needs_review'?5:task.stage)?color:'#3a5577';paint.shadowBlur=phase===(task.status==='needs_review'?5:task.stage)?10:0;paint.shadowColor=color;paint.fill();paint.shadowBlur=0}
+ for(let phase=0;phase<6;phase++){const a=phase*Math.PI/3-Math.PI/2,q=[orbit[0]+Math.cos(a)*rx*1.65,orbit[1]+Math.sin(a)*ry*1.65],cur=phase===(task.status==='needs_review'?5:task.stage);paint.beginPath();paint.arc(q[0],q[1],(cur?4:2)*scale,0,Math.PI*2);paint.fillStyle=cur?color:'#3a5577';paint.shadowBlur=cur?10:0;paint.shadowColor=color;paint.fill();paint.shadowBlur=0}
  const tokens=s.context_tokens,limit=s.context_limit;paint.beginPath();paint.ellipse(top[0],top[1],rx-7*scale,ry-5*scale,0,0,Math.PI*2);paint.strokeStyle='#6f8fb3';paint.lineWidth=3*scale;paint.stroke();
  if(tokens!==null&&limit){paint.beginPath();paint.ellipse(top[0],top[1],rx-7*scale,ry-5*scale,0,-Math.PI/2,-Math.PI/2+Math.min(1,tokens/limit)*Math.PI*2);paint.strokeStyle=color;paint.stroke()}
- const moving=active&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
- if(active){const glow=paint.createRadialGradient(base[0],base[1],0,base[0],base[1],rx*2.1);glow.addColorStop(0,'#8ee9ff73');glow.addColorStop(1,'#8ee9ff00');paint.fillStyle=glow;paint.fillRect(base[0]-rx*2,base[1]-rx*2,rx*4,rx*4);for(let k=0;k<3;k++){const phase=moving?(now/2600+k/3)%1:k/3;paint.beginPath();paint.moveTo(top[0]+(k-1)*17*scale,top[1]-15*scale-phase*28*scale);paint.quadraticCurveTo(top[0]+(k-1)*17*scale+Math.sin(phase*6)*8*scale,top[1]-35*scale-phase*28*scale,top[0]+(k-1)*17*scale,top[1]-50*scale-phase*28*scale);paint.strokeStyle=`rgba(169,247,255,${(1-phase)*.40})`;paint.lineWidth=2*scale;paint.stroke()}}
- // 점검된 대기 상태: 코어의 몸체·상단·바닥이 함께 호흡한다. 데이터 이동을 뜻하지 않는다.
- const hb=heartbeat(m),hs=s.health?.status;
- if(hb){
-  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches,breath=reduced?.45:(1-Math.cos(now*Math.PI*2/4200+i*.8))/2;
-  paint.save();
-  const halo=paint.createRadialGradient(base[0],base[1],rx*.2,base[0],base[1],rx*2.25);
-  halo.addColorStop(0,`rgba(160,255,206,${.12+breath*.28})`);halo.addColorStop(1,'rgba(160,255,206,0)');
-  paint.fillStyle=halo;paint.fillRect(base[0]-rx*2.3,base[1]-rx*2.3,rx*4.6,rx*4.6);
-  paint.shadowColor='#a8ffdb';paint.shadowBlur=(8+breath*22)*scale;
-  for(let z=44;z<=94;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle=`rgba(168,255,219,${.12+breath*.52})`;paint.lineWidth=(1.2+breath*1.6)*scale;paint.stroke()}
-  paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);paint.fillStyle=`rgba(187,255,226,${.04+breath*.18})`;paint.fill();
-  paint.beginPath();paint.ellipse(top[0],top[1],rx+(4+breath*8)*scale,ry+(3+breath*5)*scale,0,0,Math.PI*2);paint.strokeStyle=`rgba(187,255,226,${.25+breath*.60})`;paint.lineWidth=(1.6+breath*1.4)*scale;paint.stroke();
-  paint.restore();
- }
- else if(s.health&&s.state!=='running'){const q=project(x,y,104);paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,3*scale,0,Math.PI*2);paint.fillStyle=hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
- if(active||task.attention){paint.beginPath();const angle=moving?now/850:0;paint.ellipse(top[0],top[1],rx+5*scale,ry+4*scale,0,angle,angle+Math.PI*1.25);paint.strokeStyle=color;paint.shadowColor=color;paint.shadowBlur=active?10:4;paint.lineWidth=2*scale;paint.stroke();paint.shadowBlur=0}
+ // Running: light wisps rise at the measured tempo. Planning: one long breath, no wisps. Evaluating: a warm ring. Checking: quick lime ticks.
+ if(state==='running'&&!reduced){for(let k=0;k<3;k++){const p2=((now/(period*1000))+k/3)%1;paint.beginPath();paint.moveTo(top[0]+(k-1)*17*scale,top[1]-15*scale-p2*28*scale);paint.quadraticCurveTo(top[0]+(k-1)*17*scale+Math.sin(p2*6)*8*scale,top[1]-35*scale-p2*28*scale,top[0]+(k-1)*17*scale,top[1]-50*scale-p2*28*scale);paint.strokeStyle=`rgba(169,247,255,${(1-p2)*.45})`;paint.lineWidth=2*scale;paint.stroke()}}
+ if(active||task.attention||state==='completed'){paint.beginPath();const angle=state==='running'&&!reduced?now/(period*600):0,span=state==='completed'?Math.PI*2:Math.PI*1.25;paint.ellipse(top[0],top[1],rx+(5+amp*6)*scale,ry+(4+amp*4)*scale,0,angle,angle+span);paint.strokeStyle=color+Math.round(60+amp*190).toString(16).padStart(2,'0');paint.shadowColor=color;paint.shadowBlur=(2+amp*14)*scale;paint.lineWidth=(1.4+amp*1.2)*scale;paint.stroke();paint.shadowBlur=0}
+ // Waiting: a small question marker. Blocked: the socket ring turns pink. Engine readiness, when no other state owns the core, is a faint dot only.
+ if(state==='waiting'){const q=project(x,y,118);paint.beginPath();paint.arc(q[0]+rx*.85,q[1],6*scale,0,Math.PI*2);paint.fillStyle='#ffd08a';paint.fill();paint.fillStyle='#1c2b2e';paint.font=`${Math.max(9,9*scale)}px ui-monospace,monospace`;paint.textAlign='center';paint.fillText('?',q[0]+rx*.85,q[1]+3*scale)}
+ if(state==='blocked'){paint.beginPath();paint.ellipse(socket[0],socket[1],rx*1.4,ry*1.4,0,0,Math.PI*2);paint.strokeStyle='#ff8fb1cc';paint.lineWidth=1.5*scale;paint.stroke()}
+ if(s.health&&s.state!=='running'&&state!=='idle'){const q=project(x,y,104),hs=s.health.status;paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,2.5*scale,0,Math.PI*2);paint.fillStyle=hs==='ready'&&heartbeat(m)?'#a8ffdb99':hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
  text(x,y,100,String(modulePage*8+i+1).padStart(2,'0'),color,14);
  // On a small stage (phones, deep zoom-out) eight goal lines pile up unreadably; keep the number and status, the keys below and the inspection panel carry the names.
 if(scale>=.72){const lead=project(x,y,151);paint.fillStyle=color;paint.beginPath();paint.arc(lead[0],lead[1]-15*scale,3*scale,0,Math.PI*2);paint.fill();text(x,y,169,(task.goal.length>23?task.goal.slice(0,22)+'…':task.goal),'#ecf7f6',11);text(x,y,151,s.provider.toUpperCase()+' / '+sessionRole(s),color,10);}
@@ -207,8 +244,9 @@ if(scale>=.72){const lead=project(x,y,151);paint.fillStyle=color;paint.beginPath
  text(x,y,59,`${task.checks.filter(c=>c.passed).length}/${task.checks.length}`,'#0f1a2a',11);
  hitAreas.push({x:top[0],y:(top[1]+base[1])/2,rx:Math.max(25,rx+8),ry:(base[1]-top[1])/2+ry+8,task:task.id,session:task.sessions.indexOf(s)});
  });
+ if(!towerDrawn)drawTower(towerMode,towerBlocked);
  if(!visible.length){paint.font='14px ui-monospace,monospace';paint.fillStyle='#dff0f7';paint.textAlign='center';paint.fillText('NO MANAGED SESSIONS · RUN COSMOS-ORBIT TO BEGIN',w/2,h*.24)}
- cancelAnimationFrame(animation);if(connected&&(visible.some(m=>m.task.busy&&m.session.state==='running')||visible.some(heartbeat)||pulses.some(p=>now-p.start<2200)||liveLayers.length>0)&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches)animation=requestAnimationFrame(drawMachine);
+ cancelAnimationFrame(animation);if(connected&&(visible.some(animatedState)||pulses.some(p=>now-p.start<2200)||liveLayers.length>0)&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches)animation=requestAnimationFrame(drawMachine);
 }
 function setZoom(value){zoom=Math.max(.55,Math.min(2,value));$('zoomLevel').textContent=`${Math.round(zoom*100)}%`;$('zoomOut').disabled=zoom<=.55;$('zoomIn').disabled=zoom>=2;$('hoverCard').hidden=true;drawMachine()}
 $('zoomOut').onclick=()=>setZoom(zoom-.15);$('zoomIn').onclick=()=>setZoom(zoom+.15);$('zoomReset').onclick=()=>{yaw=0;setZoom(1)};
@@ -241,7 +279,8 @@ function renderDetail(){
  const s=t.sessions[selectedSession]||t.sessions[0];
  /* ① 상태 한 줄 · 이유 · 다음 행동 — 터미널 watch 와 같은 operation 투영 */
  const status=el('section',undefined,'box operation '+op.tone);status.append(el('span',op.phase+' · '+op.title,'badge'),el('p',op.reason),el('p','다음 · '+op.next_action));
- if(t.runtime)status.append(el('p',`현재 호출 ${time(t.runtime.elapsed_seconds)} 경과 · 제한까지 ${time(t.runtime.remaining_seconds)} · 제한 ${time(t.runtime.timeout_seconds)}`,'fine'));
+ if(t.runtime)status.append(el('p',`현재 호출 ${time(t.runtime.elapsed_seconds)} 경과`+(t.runtime.timeout_seconds?` · 제한 ${time(t.runtime.timeout_seconds)}`:' · 시간 제한 없음'),'fine'));
+ const ph=t.runtime?.process_health||t.process_health;if(ph){const st=({alive_output:'살아 있음 · 출력 중',alive_silent:'살아 있음 · 출력 없음',process_stopped:'프로세스 정지',exited:'종료'+(ph.exit_code!=null?' (코드 '+ph.exit_code+')':''),not_current:'관측 낡음 · 현재 실행자 아님'})[ph.status]||ph.status||'관측 없음';status.append(el('p',`프로세스 ${ph.pid?'PID '+ph.pid+' · ':''}${st}`+(ph.output_silent_seconds!=null?` · 무출력 ${time(ph.output_silent_seconds)}`:'')+(ph.checked_at?` · 관측 ${new Date(ph.checked_at).toLocaleTimeString('ko')}`+(ph.observation_age_seconds!=null?` (${Math.round(ph.observation_age_seconds)}초 전${ph.fresh===false?', 낡음':''})`:''):'')+(ph.os_states?` · OS ${[].concat(ph.os_states).join('/')}`:'')+(ph.cpu_percent!=null?` · CPU ${ph.cpu_percent}%`:'')+(ph.group_process_count!=null?` · 자식 ${ph.group_process_count}`:''),'fine'));status.append(el('small','원격 상태·진행 여부는 미확인입니다. 출력이 없다는 것만으로 이상으로 보지 않으며, 중단·재개는 실제 프로세스 이상을 확인한 뒤 결정합니다.'))}
  const activity=op.last_activity;status.append(el('small',activity?`마지막 기록 ${new Date(activity.at).toLocaleTimeString('ko')} · ${eventTitle(activity)}`:'아직 실행 기록이 없습니다.'));
  if(!connected)status.prepend(el('p','연결 끊김 · 아래는 마지막으로 수신한 상태입니다.','warn'));
  /* ② 상태별 주 행동 하나 + 보조 하나 */
