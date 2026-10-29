@@ -75,7 +75,7 @@ const eventPages=new Map();
 function sessionEvents(t){return [...new Map([...(eventPages.get(t.id)||[]),...t.events].map(e=>[e.seq??e.at+e.kind,e])).values()].sort((a,b)=>(b.seq||0)-(a.seq||0))}
 function eventTitle(e){const title=eventTitles[e.kind]||names[e.kind]?.[1]||e.kind;return title+((e.exit_code!=null&&e.exit_code!==0)||e.failed?' · 실패'+(e.exit_code!=null?' ('+e.exit_code+')':''):'')}
 function operation(t){return t.operation||{phase:w('stages')[t.stage],title:label(t.status),tone:t.busy?'active':'idle',reason:t.reason||'표시용 상태',next_action:'기록된 다음 전환을 기다립니다.',last_activity:t.events[0]}}
-function heartbeat(m){const h=m.session.health;if(!connected||m.task.busy||!h||h.status!=='ready'||!h.checked_at)return false;return Date.now()-Date.parse(h.checked_at)<=(h.valid_for_seconds||45)*1000}
+function heartbeat(m){const h=m.session.health;if(!connected||m.session.state==='running'||!h||h.status!=='ready'||!h.checked_at)return false;return Date.now()-Date.parse(h.checked_at)<=(h.valid_for_seconds||45)*1000}
 function stateColor(t){return {active:'#a9f7ff',waiting:'#ffd08a',problem:'#ff8199',review:'#99caff',complete:'#b8ffd9',idle:'#8aa3bf'}[operation(t).tone]||'#8aa3bf'}
 function track(t){const rail=el('div',undefined,'track'),stage=t.status==='needs_review'?5:t.stage;w('stages').forEach((s,i)=>rail.append(el('div',s,'station '+(i===stage?'current':''))));return rail}
 function modelText(t){const s=t.sessions.find(s=>!s.peer&&s.provider===t.provider);return s?.reported_models?.length?s.reported_models.join(', '):(t.requested_model?`${w('requested')}: ${t.requested_model}`:w('unreported'))}
@@ -185,7 +185,7 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  // Idle heartbeat: a faint breathing ring only when the engine's local readiness was confirmed within its validity window and the page is connected. Stale/checking/warning/unavailable show a static marker instead; nothing here implies a live remote connection.
  const hb=heartbeat(m),hs=s.health?.status;
  if(hb){const breath=matchMedia('(prefers-reduced-motion: reduce)').matches?.5:(Math.sin(now/1700)+1)/2;paint.beginPath();paint.ellipse(top[0],top[1],rx+3*scale+breath*3*scale,ry+2*scale+breath*2*scale,0,0,Math.PI*2);paint.strokeStyle=`rgba(185,245,155,${(.10+breath*.16).toFixed(3)})`;paint.lineWidth=1.5*scale;paint.stroke()}
- else if(s.health&&!task.busy){const q=project(x,y,104);paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,3*scale,0,Math.PI*2);paint.fillStyle=hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
+ else if(s.health&&s.state!=='running'){const q=project(x,y,104);paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,3*scale,0,Math.PI*2);paint.fillStyle=hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
  if(active||task.attention){paint.beginPath();const angle=moving?now/850:0;paint.ellipse(top[0],top[1],rx+5*scale,ry+4*scale,0,angle,angle+Math.PI*1.25);paint.strokeStyle=color;paint.shadowColor=color;paint.shadowBlur=active?10:4;paint.lineWidth=2*scale;paint.stroke();paint.shadowBlur=0}
  text(x,y,100,String(modulePage*8+i+1).padStart(2,'0'),color,14);
  // On a small stage (phones, deep zoom-out) eight goal lines pile up unreadably; keep the number and status, the keys below and the inspection panel carry the names.
