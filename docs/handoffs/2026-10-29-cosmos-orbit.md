@@ -2,6 +2,10 @@
 
 ## Start here
 
+Subsequent local development and memory requirements are recorded in
+[Development and memory continuation](2026-10-29-development-and-memory.md).
+Those working-tree changes are separate from the published state described below.
+
 Read this document, `README.md`, `CONTRIBUTING.md` and `SECURITY.md` before continuing.
 The product is **Cosmos Orbit**, repository **honeyground-org/cosmos-orbit**, default branch `main`.
 The working directory may still be named `local-harness`; do not infer that this is a different product.

@@ -46,7 +46,7 @@ class Provider:
             raise ValueError('Install and authenticate the selected CLI: ' + name)
         self.name, self.home, self.model, self.timeout = name, Path(home), model, timeout
 
-    def call(self, task_id, prompt, schema, session=None):
+    def call(self, task_id, prompt, schema, session=None, workspace=None, lease_fds=()):
         directory = self.home / 'runs' / task_id
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         call_id = uuid.uuid4().hex
@@ -73,6 +73,24 @@ class Provider:
             for feature in ('shell_tool', 'unified_exec', 'apps', 'browser_use', 'computer_use', 'multi_agent'):
                 command += ['--disable', feature]
             command += ['-']
+        if workspace is not None:
+            if self.name == 'claude':
+                command[command.index('--tools') + 1] = 'Read,Edit,Write,Glob,Grep'
+                command += ['--restricted', '--safe-mode', '--disable-slash-commands',
+                            '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']
+            else:
+                command[command.index('sandbox_mode="read-only"')] = 'sandbox_mode="workspace-write"'
+                # Native shell and patch tools operate inside the provider sandbox.
+                for feature in ('shell_tool', 'unified_exec'):
+                    index = command.index(feature)
+                    del command[index - 1:index + 1]
+                command[-1:-1] = ['-c', 'sandbox_workspace_write.network_access=false']
+        if workspace is not None and getattr(self, 'public_web', False):
+            if self.name == 'codex':
+                command[command.index('web_search="disabled"')] = 'web_search="live"'
+                command[command.index('sandbox_workspace_write.network_access=false')] = 'sandbox_workspace_write.network_access=true'
+            else:
+                command[command.index('--tools') + 1] += ',WebSearch,WebFetch'
         if self.model:
             # Options precede the stdin prompt marker for Codex.
             if self.name == 'codex':
@@ -88,11 +106,51 @@ class Provider:
         with log_path.open('w', encoding='utf-8') as stdout, error_path.open('w', encoding='utf-8') as stderr:
             os.chmod(log_path, 0o600)
             os.chmod(error_path, 0o600)
-            process = subprocess.Popen(command, cwd=str(directory), stdin=subprocess.PIPE,
+            process = subprocess.Popen(command, cwd=str(workspace or directory), stdin=subprocess.PIPE,
                                        stdout=stdout, stderr=stderr, text=True, encoding='utf-8',
-                                       start_new_session=True)
+                                       start_new_session=True, pass_fds=lease_fds)
             try:
-                process.communicate(prompt, timeout=self.timeout)
+                callback = getattr(self, 'on_event', None)
+                if callback is None:
+                    process.communicate(prompt, timeout=self.timeout)
+                else:
+                    from .telemetry import provider_event
+                    with log_path.open(encoding='utf-8', errors='replace') as stream:
+                        pending, dropping = '', False
+                        def drain():
+                            nonlocal pending, dropping
+                            # Bound parsing; full original provider output remains in the log.
+                            chunk = stream.read(262144)
+                            while chunk:
+                                for part in chunk.splitlines(keepends=True):
+                                    if not dropping:
+                                        pending += part
+                                        if len(pending) > 1048576:
+                                            pending, dropping = '', True
+                                    if part.endswith('\n'):
+                                        if not dropping:
+                                            try:
+                                                event = json.loads(pending)
+                                            except ValueError:
+                                                event = None
+                                            if isinstance(event, dict):
+                                                for kind, payload in provider_event(event):
+                                                    callback(kind, dict(payload, call_id=call_id))
+                                        pending, dropping = '', False
+                                chunk = stream.read(262144)
+                        first = True
+                        deadline = time.monotonic() + self.timeout
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise subprocess.TimeoutExpired(command, self.timeout)
+                            try:
+                                process.communicate(prompt if first else None, timeout=min(.25, remaining))
+                                drain()
+                                break
+                            except subprocess.TimeoutExpired:
+                                first = False
+                                drain()
             except BaseException:
                 os.killpg(process.pid, signal.SIGTERM)
                 try:

@@ -18,6 +18,9 @@ def show(task):
     return {'id': task['id'], 'status': task['status'], 'revision': task['revision'],
             'provider': task['provider'], 'workspace': task['workspace'],
             'request': task['prompt'], 'contract': data['contract'],
+            'development': data.get('development'), 'memory': data.get('memory'),
+            'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
+            'objective_progress': data.get('objective_progress'),
             'attempts': data['attempt'], 'evidence': data['evidence'],
             'reason': data['reason'], 'feedback': data['feedback'],
             'sessions': data['sessions'], 'context': data.get('context_measurements', {}),
@@ -34,8 +37,23 @@ def main(argv=None):
     sub.add_parser('commands', help='Show the quick command reference without starting services or models')
     sub.add_parser('doctor', help='Show installed CLIs; never installs or changes provider settings')
     sub.add_parser('list', help='Read current tasks without a model call')
+    plan_cmd = sub.add_parser('plan', help='Generate a separate execution plan for an existing development task')
+    plan_cmd.add_argument('id')
+    plan_cmd.add_argument('--auto', action='store_true', help='Continue automatically after planning; no review hold')
+    plan_cmd.add_argument('--public-web', action='store_true', help='Authorise read-only public-web research during execution')
+    approve_cmd = sub.add_parser('approve', help='Approve a reviewed plan and queue execution')
+    approve_cmd.add_argument('id')
+    result_cmd = sub.add_parser('result', help='Read or publish a task result in both terminal and browser')
+    result_cmd.add_argument('id')
+    result_cmd.add_argument('--file', help='UTF-8 result path relative to the task workspace; refresh after later turns')
+    result_cmd.add_argument('--title', help='User-facing task title')
+    result_cmd.add_argument('--summary', help='User-facing result summary')
     config = sub.add_parser('config', help='Choose a default provider once; task-level overrides remain possible')
     config.add_argument('--provider', choices=('codex', 'claude'))
+    config.add_argument('--brain-command', metavar='ARGV_JSON', help='Optional stdio Brain MCP command')
+    memory_cmd = sub.add_parser('memory', help='Inspect or retry optional memory integration')
+    memory_cmd.add_argument('id')
+    memory_cmd.add_argument('--flush', action='store_true', help='Retry queued Brain writes now')
     switch = sub.add_parser('switch', help='Queue engine/model selection at the next safe boundary')
     switch.add_argument('id')
     switch.add_argument('--provider', required=True, choices=('codex', 'claude'))
@@ -45,12 +63,22 @@ def main(argv=None):
     handoff_input = start.add_mutually_exclusive_group()
     handoff_input.add_argument('--handoff-file', help='Import an explicit UTF-8 handoff document into a new managed task')
     handoff_input.add_argument('--handoff-text', help='Import pasted handoff context into a new managed task')
+    start.add_argument('--memory', choices=('off', 'native', 'brain', 'both'), default='off')
+    start.add_argument('--native-memory-dir', action='append', default=[], help='Explicit native Markdown memory directory')
+    start.add_argument('--remember', action='store_true', help='Queue historical verification checkpoints for Brain')
+    start.add_argument('--project-id', help='Stable memory scope shared across checkouts')
+    start.add_argument('--plan-first', action='store_true', help='Generate a plan and wait for review before native execution')
+    start.add_argument('--public-web', action='store_true', help='Authorise public web research in native development execution')
+    start.add_argument('--development', action='store_true', help='Edit an isolated Git clone with native tools')
+    start.add_argument('--check', action='append', default=[], metavar='ARGV_JSON',
+                       help='Authorise a fixed verification command as a JSON argument array; repeatable')
     start.add_argument('--workspace', default='.')
     start.add_argument('--provider', choices=('codex', 'claude'))
     start.add_argument('--peer', action='append', default=[], metavar='NAME=PROVIDER',
                        help='Optional task-owned adviser session; repeat for multiple peers')
-    start.add_argument('--queue', action='store_true', help='Persist for a worker instead of running now')
-    start.add_argument('--plan-only', action='store_true')
+    execution = start.add_mutually_exclusive_group()
+    execution.add_argument('--queue', action='store_true', help='Persist for a worker instead of running now')
+    execution.add_argument('--plan-only', action='store_true')
     resume = sub.add_parser('resume', help='Recover from the durable checkpoint')
     resume.add_argument('id')
     feedback = sub.add_parser('feedback', help='Apply natural-language correction and reopen the task')
@@ -63,7 +91,7 @@ def main(argv=None):
         command.add_argument('--model', help='Optional model on the selected CLI; no cross-provider fallback')
         command.add_argument('--timeout', type=int)
         command.add_argument('--context-budget', type=int,
-                             help='Handoff before the next call at this measured context size; default Claude 500k, Codex min(500k, 80% window)')
+                             help='Handoff before the next call at this measured context size; default Claude 500k, Codex min(500k, 80%% window)')
     for name in ('status', 'events', 'messages', 'handoff', 'pause'):
         child = sub.add_parser(name)
         child.add_argument('id')
@@ -106,10 +134,60 @@ def main(argv=None):
             from .observer import serve
             serve(store.home, args.port, not args.no_open, args.lang)
             return 0
+        elif args.command == 'plan':
+            with store.lock('task:' + args.id):
+                task = store.get(args.id)
+                if not task['data'].get('development'):
+                    raise ValueError('Execution plans currently require a development task')
+                task['data']['plan_requested'] = True
+                task['data']['review_plan'] = not args.auto
+                if args.public_web:
+                    task['data']['options']['public_web'] = True
+                store.save(task, 'ready', 'execution_plan_requested', {'layer': 'control', 'note': 'Plan requested'})
+            task = engine.run(args.id)
+            if args.auto and task['status'] == 'ready':
+                task = engine.run(args.id)
+            result = show(task)
+        elif args.command == 'approve':
+            from .planning import approve
+            with store.lock('task:' + args.id):
+                task = store.get(args.id)
+                approve(store, task)
+            result = show(task)
+        elif args.command == 'result':
+            with store.lock('task:' + args.id):
+                task = store.get(args.id)
+                if args.file is not None or args.title is not None or args.summary is not None:
+                    presentation = task['data'].setdefault('presentation', {})
+                    for key, value, limit in [('title', args.title, 240), ('summary', args.summary, 2000), ('result_file', args.file, 1000)]:
+                        if value is not None:
+                            if not value.strip() or len(value) > limit:
+                                raise ValueError('Invalid result ' + key)
+                            presentation[key] = value
+                    from .results import capture
+                    capture(task)
+                    if presentation.get('report_error'):
+                        raise ValueError(presentation['report_error'])
+                    store.save(task, task['status'], 'result_published', {'note': 'Result available in terminal and browser', 'layer': 'evidence', 'direction': 'in'})
+                p = task['data'].get('presentation', {})
+                print(p.get('title') or task['prompt'])
+                print('Status: ' + task['status'])
+                print(p.get('summary') or task['data'].get('last_summary', ''))
+                if task['data'].get('reason'):
+                    print('Remaining: ' + task['data']['reason'])
+                if p.get('report'):
+                    print('\n' + p.get('report_source', 'Saved result') + '\n' + p['report'])
+                elif p.get('report_error'):
+                    print('Result unavailable: ' + p['report_error'])
+            return 0
         elif args.command == 'switch':
             result = {'queued': store.route(args.id, args.provider, args.model),
                       'note': 'Worker or resume applies this selection at a safe boundary. Model availability is checked by the CLI on its next call.'}
         elif args.command == 'start':
+            if args.plan_first and args.plan_only:
+                raise ValueError('Choose --plan-first for a generated plan or --plan-only for a model-free development hold')
+            if (args.plan_first or args.public_web) and not args.development:
+                raise ValueError('--plan-first and --public-web currently require --development')
             root = Path(args.workspace).expanduser().resolve()
             if not root.is_dir():
                 raise ValueError('Workspace must already exist')
@@ -139,8 +217,23 @@ def main(argv=None):
                 if not sep or not name or len(name) > 32 or not name.replace('-', '').replace('_', '').isalnum() or peer_provider not in ('codex', 'claude') or name in peers:
                     raise ValueError('Peer must be a unique NAME=codex or NAME=claude binding')
                 peers[name] = {'provider': peer_provider}
-            task = store.create(root, provider, prompt)
-            task['data']['options'] = initial_options
+            from .memory import configure as configure_memory
+            memory_config = {'workspace': str(root), 'data': {}}
+            configure_memory(store, memory_config, args.memory, directories=args.native_memory_dir,
+                             remember=args.remember, project=args.project_id)
+            if args.development:
+                if peers:
+                    raise ValueError('Development adviser sessions are not supported yet')
+                from .development import create
+                task = create(store, root, provider, prompt, args.check)
+            else:
+                if args.check:
+                    raise ValueError('--check requires --development')
+                task = store.create(root, provider, prompt)
+            task['data']['memory'] = memory_config['data']['memory']
+            task['data']['options'] = dict(initial_options, public_web=args.public_web)
+            task['data']['plan_requested'] = bool(args.development and not args.plan_only)
+            task['data']['review_plan'] = args.plan_first
             task['data']['peers'] = peers
             if imported:
                 task['data']['imported_handoff'] = imported
@@ -148,8 +241,18 @@ def main(argv=None):
             print('task ' + task['id'], file=sys.stderr, flush=True)
             if not args.queue:
                 task = engine.run(task['id'], plan_only=args.plan_only)
+                if args.development and not args.plan_only and not args.plan_first and task['status'] == 'ready':
+                    task = engine.run(task['id'])
             result = show(task)
         elif args.command == 'resume':
+            with store.lock('task:' + args.id):
+                task = store.get(args.id)
+                if task['data'].get('execution_plan', {}).get('state') == 'awaiting_review':
+                    from .planning import approve
+                    approve(store, task)
+                elif task['data'].get('development', {}).get('hold'):
+                    task['data']['development']['hold'] = False
+                    store.save(task, 'ready', 'development_execution_requested')
             store.set_paused(args.id, False)
             engine.configure(args.id, options)
             task = engine.run(args.id)
@@ -173,6 +276,11 @@ def main(argv=None):
             result = show(task)
             result['queued_feedback'] = store.inbox(args.id)
             result['messages'] = store.messages(args.id)
+            if task['data'].get('development'):
+                from .development import evidence_current
+                result['evidence_current'] = evidence_current(task)
+                if task['status'] == 'needs_review' and not result['evidence_current']:
+                    result['status'] = 'stale'
             if task['data']['contract']:
                 current = verify(task['workspace'], task['data']['contract'])
                 result['current_evidence'] = current
@@ -180,6 +288,10 @@ def main(argv=None):
                 result['recorded_status'] = result['status']
                 if result['status'] in ('completed', 'already_satisfied') and not result['evidence_current']:
                     result['status'] = 'stale'
+            from .observer import snapshot
+            projected = snapshot(store, args.id)['tasks'][0]
+            result['operation'] = projected['operation']
+            result['observed_status'] = projected['status']
         elif args.command == 'events':
             result = store.events(args.id)
         elif args.command == 'messages':
@@ -195,14 +307,42 @@ def main(argv=None):
             result = show(engine.recover(args.id))
         elif args.command == 'list':
             result = store.list()
+        elif args.command == 'memory':
+            from .memory import flush
+            with store.lock('task:' + args.id) as lease:
+                task = store.get(args.id)
+                if args.flush:
+                    for item in task['data'].get('memory', {}).get('outbox', []):
+                        if item['status'] != 'stored':
+                            item['retry_at'], item['attempts'] = 0, 0
+                    store.save(task, task['status'], 'memory_retry_requested')
+                    flush(store, task, (lease,))
+                result = task['data'].get('memory', {'mode': 'off'})
         elif args.command == 'config':
-            result = {'provider': store.preference('provider', args.provider)}
+            if args.brain_command is not None:
+                command = json.loads(args.brain_command)
+                if not isinstance(command, list) or not command or any(not isinstance(v, str) or not v for v in command):
+                    raise ValueError('Brain command must be a JSON argument array')
+                store.preference('brain_command', json.dumps(command))
+            result = {'provider': store.preference('provider', args.provider),
+                      'brain_command': store.preference('brain_command')}
         else:
             if args.interval < 1:
                 raise ValueError('Worker interval must be at least one second')
             with store.lock('worker'):
                 while True:
                     for item in store.list():
+                        if store.paused(item['id']):
+                            continue
+                        memory_task = store.get(item['id'])
+                        if any(m['status'] != 'stored' and m['attempts'] < 5 and m['retry_at'] <= time.time()
+                               for m in memory_task['data'].get('memory', {}).get('outbox', [])):
+                            try:
+                                from .memory import flush
+                                with store.lock('task:' + item['id']) as lease:
+                                    flush(store, store.get(item['id']), (lease,))
+                            except RuntimeError:
+                                pass  # Active executors own their task state.
                         if store.paused(item['id']):
                             continue
                         if item['status'] == 'interrupted' and store.get(item['id'])['data']['pending'] is not None:

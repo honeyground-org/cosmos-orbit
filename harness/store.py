@@ -165,7 +165,7 @@ class Store:
                     if time.monotonic() >= deadline:
                         raise RuntimeError('Another harness process owns this task or workspace')
                     time.sleep(0.01)
-            yield
+            yield fd
         finally:
             os.close(fd)
 

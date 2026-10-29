@@ -18,7 +18,7 @@ A local task runtime for ordinary-language requests. Use **Codex alone or Claude
 neither provider has a fixed role and the other subscription is not required. Existing CLI
 authentication is reused. The runtime does not install hooks or modify host configuration.
 
-This first vertical slice performs bounded UTF-8 text/JSON artifact work. It is a running
+The default mode performs bounded UTF-8 text/JSON artifact work. An opt-in repository development mode delegates native editing tools in a private Git clone and runs explicit user-owned verification commands. It is a running
 program with SQLite state, a serial queue worker, provider adapters, file reconciliation and
 a deterministic feedback loop. It is not a skill bundle or a workflow document interpreter.
 
@@ -99,6 +99,79 @@ cosmos-orbit list                   # no model call
 The worker is an ordinary foreground process that can be supervised by the user's service
 manager. No service is installed automatically. An idle worker makes no model calls.
 
+## Continue repository development
+
+Use `--development` for a clean, committed Git repository. This is an opt-in capability grant for
+local implementation in a private clone, plus each explicitly supplied verification command.
+The original working tree is never used as the execution directory. No changes are copied back,
+committed, pushed or deployed by Orbit. Uncommitted files, ignored files, virtual environments and
+submodules are not copied; submodule repositories are rejected in this pilot.
+
+```sh
+cosmos-orbit start --development --provider codex --workspace /path/to/repo \
+  --handoff-file /path/to/HANDOFF.md \
+  --check '["python3", "-m", "unittest", "discover"]' \
+  --timeout 600 --plan-only 'Implement the remaining change described in the handoff.'
+cosmos-orbit status TASK_ID
+cosmos-orbit resume TASK_ID
+```
+
+`--provider claude` also works independently. Codex uses its workspace-write sandbox with network
+access disabled by default. Explicit `--public-web` enables Codex live search and sandbox network
+access, or Claude WebSearch/WebFetch, for public research. Claude uses restricted file tools with edit permission, safe mode and no shell tool;
+Orbit runs the declared checks separately. These modes require CLI versions that support the flags;
+unsupported invocations stop without permission bypass or provider fallback.
+
+Repeat `--check` for multiple JSON argument arrays. These are trusted local programs run with your
+account permissions, without an implicit shell, in the clone. They can execute repository code;
+they are **not sandboxed by Orbit**. Supply only commands and repositories you trust. The model
+cannot replace the command list. Use a new task to change that list. Dependencies must already be
+available to these commands; Orbit does not automatically install them or copy secrets.
+
+Development `--plan-only` creates the clone and records the request and command contract without a
+model call or command execution. `--queue`, the worker, pause, feedback, model switching and context
+handoffs use the existing durable task store. Adviser sessions are not yet supported in this mode.
+Feedback retains the fixed command list and permits another bounded implementation cycle.
+
+The browser **New task** form creates a development task from a clean Git repository and fixed
+verification commands, then queues a persisted execution plan. With a worker running, execution
+continues automatically after planning. **Pause for my plan approval** is optional; it is not the
+default. In the terminal, `plan TASK_ID --auto` generates a plan and continues execution;
+`plan TASK_ID` pauses for review, and `approve TASK_ID` queues that reviewed plan.
+`start --plan-first` also opts into review. Public-web permission is explicit in both interfaces.
+Plans show intended steps, not fabricated per-step completion. Actual provider tool calls and
+check start/finish events drive the live layer interactions. Idle sessions do not simulate traffic.
+Use `result TASK_ID` or the task inspector to read a published result snapshot without an editor.
+Native turns report remaining work and a next action separately from verification. When checks
+pass but a feasible next action remains, Orbit records it and continues within `--max-attempts`.
+Reaching that budget stops with the pending action preserved; it does not mark the goal complete.
+These progress reports are executor assessments, not independently verified per-plan-step proofs.
+Interrupted native calls still require an explicit continuation after inspecting retained files.
+
+After each native turn Orbit records command exit codes, timeout outcomes and private output logs.
+Failed checks trigger repair up to the attempt budget. Passing checks produce **needs_review**,
+not a claim that every part of the objective is complete. `status` shows the private workspace,
+base commit, changed paths, a tracked-files patch and separately listed untracked files. Inspect
+those files and the patch before transferring selected changes to your original repository.
+The engine-room inspector shows the same development details and command evidence.
+
+If native execution is interrupted, Orbit preserves the clone and does not replay the uncertain
+turn automatically. Inspect files/logs, then use `feedback TASK_ID 'Inspect the retained changes and
+continue ...'` to authorise another attempt. Child processes inherit task/workspace locks to prevent
+a second executor taking over while an orphaned direct child is still running. This does not manage
+arbitrarily detached background jobs; tasks must not launch them. A verification interruption can be
+retried with `resume`; declared checks should be safe to repeat.
+
+Observation never reruns verification commands. It hashes tracked and non-ignored untracked files
+and marks changed evidence stale. Ignored dependency contents, the external environment and service
+state are not covered by this fingerprint. The clone is execution isolation, not a security boundary
+against hostile code. Native edits are not part of the artifact mode's compare-before-write journal.
+
+On 2026-10-29, isolated live Codex and Claude runs each fixed a small Python bug, passed the explicit
+behaviour checks and preserved the source checkout. Controlled private probes covered repair,
+attempt limits, pause/continue, fixed commands, plan-only, stale evidence, interrupted-turn replay
+prevention and feedback recovery. These small pilots do not establish general development productivity.
+
 ## Observe and intervene
 
 ```sh
@@ -161,23 +234,68 @@ no personal paths, organisation services, Brain installation or fixed AI role sp
 Local Brain integration will be optional. Currently supported providers are Codex and Claude;
 additional adapters and automatic service installation are not implemented yet.
 
-### Memory independence
+### Memory independence and optional Brain integration
 
-The default is standalone operation, with **no Local Brain dependency or calls**. Harness-owned
-memory is the durable task contract, progress, feedback, verification evidence and checkpoints
-in its own SQLite store. Provider sessions supply conversational continuity. Losing or omitting
-an external memory service must not erase task ownership, permissions or completion evidence.
+Orbit and Brain remain independently usable. `--memory off` is the default: Orbit owns its task
+contract, authority, feedback, checkpoints and verification without an external memory service.
+No global host settings or existing memory files are changed.
 
-Optional memory integrations may enrich context; they must not become the source of task state
-or grant execution authority. Local Brain is one possible integration, not the required backend.
-No external-memory adapter is implemented in this pilot yet. Host CLI personal-memory discovery
-is also not claimed: calls run in isolated directories with tools and host configuration disabled
-where supported. The verified standalone path uses harness state and resumed provider sessions.
+```sh
+cosmos-orbit config --brain-command '["/path/to/brain-mcp"]'
+cosmos-orbit start --development --provider codex --workspace /path/to/repo \
+  --memory both --remember --project-id my-project \
+  --check '["python3", "-m", "unittest", "discover"]' 'Implement the requested change.'
+cosmos-orbit memory TASK_ID
+cosmos-orbit memory TASK_ID --flush
+```
 
-Source code and private runtime data must remain separate. Do not commit state databases,
-provider logs, task exports or credentials. Example commands use disposable workspaces.
-The source is licensed under Apache-2.0. This is an early pilot; package-registry publication
-and native desktop installers are not available yet.
+Memory modes are `off`, `native`, `brain` and `both`. Configure a stable installed MCP executable
+or the source installation's `bin/brain-mcp` launcher. Orbit calls the MCP recall path; it does not
+substitute the Brain CLI's different lexical retrieval path. Configuring a command does not run it.
+Missing or slow Brain service is reported in the task's memory notes while task state stays intact.
+
+`native` is a **read-only Markdown context bridge**, not full native automatic-memory generation.
+It reads the selected engine's memory directory: Codex home `memories`, or Claude's original-project
+memory directory, including a recognised `autoMemoryDirectory` override. The disposable clone never
+becomes the memory project's identity. Use repeatable `--native-memory-dir /path/to/memory` for a
+custom layout or an inherited workspace memory directory. Known host memory opt-outs are respected;
+Orbit does not activate host generation, import all settings or run memory hooks. Managed policy and
+all future host storage formats are not claimed to be supported. Original files remain unchanged.
+
+The bridge selects bounded Markdown excerpts and records source paths, content hashes, truncation
+and context-preparation latency. Native duplicates are removed by excerpt content. Brain results keep
+the server's provenance and freshness data; legacy text results are explicitly unscoped/unversioned.
+Structured `orbit-1` support is negotiated through `brain_capabilities`. An opaque project ID is kept
+across clone execution and handoffs; an explicit `--project-id` wins, otherwise it derives from a
+credential-free origin identity or the original local path. Unscoped old memories can still be returned
+by Brain and must not be treated as project-specific facts.
+
+Brain recall runs at model-call boundaries, including repair context. The development executor may
+request up to two additional read-only recalls, neighbour lookups, timeline or paginated analysis
+reads per turn, with six per task. These turns count against the task's attempt budget. Analysis
+responses are bounded evidence, not a claim that the entire corpus was analysed. No automatic
+`useful` feedback is sent: context preparation, successful work and proven memory usefulness differ.
+MCP operations have a shared ten-second connection/request deadline and bounded response size.
+
+`--remember` queues historical verification checkpoints in the private task store. They contain bounded excerpts of the
+original request and recent corrections (with hashes), plus recorded check outcomes, not unverified lessons promoted to facts.
+Delivery uses a unique Orbit namespace and immutable idempotency key. The server must advertise the
+`orbit-1` safe JSON write contract; older servers leave checkpoints pending locally. Matching `stored`
+acknowledgement completes delivery; word indexing, embedding and serving states remain separately
+visible. Name/version conflicts never trigger an overwrite. Failed deliveries retain their payload,
+back off and stop after five attempts; the worker retries them, or use `memory TASK_ID --flush`.
+A lost acknowledgement can be retried with the same payload/key. Memory delivery never changes a
+failed task into a completed task.
+
+Native context plus MCP transport and durable delivery have isolated process probes. Existing live
+Brain recall was exercised. Safe-write lifecycle checks use a controlled MCP fixture until the Brain
+contract implementation is available; they are not evidence of a live Brain write or a quality gain.
+The native bridge does not yet reproduce every host's automatic write/generation behaviour, publish
+model-authored Brain analyses, or establish comparative long-session productivity.
+
+Source code and private runtime data remain separate. Do not publish task stores, memory packets,
+provider transcripts or private patches. Brain's corpus and indexes remain owned by Brain; Orbit never
+writes its databases directly. The source remains Apache-2.0.
 
 ## Automatic communication between sessions
 
@@ -205,7 +323,7 @@ This pilot wakes **runtime-owned sessions**. It does not attach to arbitrary alr
 terminals or inject keystrokes. Existing-session adapters need explicit capability negotiation.
 Without configured peers, no other session or provider is invoked.
 
-## What the runtime owns
+## What the default artifact runtime owns
 
 1. The selected AI interprets the request and follow-up corrections into a versioned contract.
 2. The runtime validates the scope and requires a meaningful quote supporting local write intent.
@@ -305,15 +423,14 @@ Attempt, timeout and context-budget options are persisted per task. Explicit opt
   Individual artifacts are capped at 100 KB, changes at 300 KB per batch and 15 files per contract.
 - Paths with symlinks, hard-linked target files, parent traversal, credentials, host instructions,
   and runtime directories are rejected. This is not a security sandbox against hostile local users.
-- No shell execution, file deletion, PR/merge/deploy, CI watcher or infrastructure apply is provided
-  by the task executor in this pilot. A request requiring them must remain unresolved.
-- Brain retrieval, workflow plugins, durable external-job watchers and evaluated
-  policy promotion are subsequent integrations. Feedback is persisted and affects the current
+- The default artifact executor provides no shell execution, file deletion, PR/merge/deploy, CI watcher or infrastructure apply. A request requiring them must remain unresolved.
+- Optional Brain MCP retrieval and safe-contract checkpoint delivery are implemented as a pilot.
+  Workflow plugins, durable external-job watchers and evaluated policy promotion remain future work. Feedback is persisted and affects the current
   task; there is no claim of automatic cross-task learning yet.
 - Existing CLI feature support varies. `doctor` reports installed versions; an unsupported CLI
   invocation stops with its local log path. There is no silent switch to another provider.
 
-Only the small artifact slice is implemented. The broader harness is not production-complete.
+The artifact slice and opt-in isolated development pilot are implemented. The broader harness is not production-complete.
 
 ## Verification on 2026-10-28
 
@@ -389,8 +506,8 @@ historical completion claims and permissions are not imported as verified facts 
 This does not attach to, stop, or resume an arbitrary existing native CLI process or session ID.
 Avoid running the old session against the same files while the managed task writes to them.
 Handoffs are limited to 16,000 characters; continuation requests to 6,000. No silent truncation occurs.
-Existing pilot limits still apply: bounded text/JSON artifacts and supported checks, not arbitrary
-shell execution, test suites, deployment or unrestricted repository development.
+Without `--development`, the existing artifact limits still apply. Opt-in development supports native
+editing and explicitly supplied command checks as described above; deployment remains outside its scope.
 
 ## Compatibility
 

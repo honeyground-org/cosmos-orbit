@@ -38,6 +38,12 @@ def build():
                 context_source='Synthetic fixture', handoff_count=i%3)]))
     state = dict(tasks=tasks, scope='demo', worker_running=True, at='', events=[], model_options={},
                  labels=dict(en=dict(running='Running', idle='Idle')))
+    history_start = html.index('async function loadEarlier(')
+    history_end = html.index("$('newTask').onclick", history_start)
+    html = html[:history_start] + "async function loadEarlier(){}\n" + html[history_end:]
+    form_start = html.index(" $('newTaskForm').onsubmit=")
+    form_end = html.index('async function poll()', form_start)
+    html = html[:form_start] + " $('newTaskForm').onsubmit=e=>{e.preventDefault();$('newNotice').textContent='Preview only. Install Cosmos Orbit to start a real task.'};\n" + html[form_end:]
     start = html.index('async function poll()')
     end = html.index('\nasync function action', start)
     html = html[:start] + 'const demoState=' + json.dumps(state) + ''';let demoTick=0;

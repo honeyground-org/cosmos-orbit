@@ -44,6 +44,15 @@ class Engine:
         messages = self.store.inbox(task['id'])
         if not messages or task['data']['pending']:
             return False
+        if task['data'].get('development'):
+            task['data']['development']['phase'] = 'ready'
+            task['data']['development']['verified_tree'] = None
+            task['data']['development']['hold'] = False
+            task['data']['attempt'] = 0
+            task['data']['evidence'] = []
+            if task['data'].get('execution_plan'):
+                task['data']['execution_plan']['state'] = 'superseded'
+                task['data']['plan_requested'] = True
         if task['data']['contract']:
             task['data']['contract_history'].append(task['data']['contract'])
         for message in messages:
@@ -66,9 +75,15 @@ class Engine:
         options = data.get('options', {})
         adapter = providers.Provider(task['provider'], self.store.home,
                                      self.model or options.get('model'), options.get('timeout', self.timeout))
+        from .memory import recall
+        prompt += recall(self.store, task, phase)
         session, prompt = context.prepare(self.store, task, key, phase, task['provider'], prompt)
         self.store.save(task, phase, 'model_started', {'phase': phase, 'session': session})
+        from .telemetry import recorder
+        adapter.on_event = recorder(self.store, task['id'], task['provider'])
         answer, metadata = adapter.call(task['id'], prompt, schema, session)
+        from .memory import submitted
+        submitted(self.store, task, metadata)
         data = task['data']
         data['sessions'][key] = metadata['session']
         data.setdefault('session_metadata', {})[key] = metadata
@@ -239,9 +254,15 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         passed = bool(checks) and all(c['passed'] for c in checks)
         self.store.save(task, pass_status if passed else 'repairing', 'verified',
                         {'contract_hash': task['data']['contract_hash'], 'checks': checks, 'passed': passed})
+        from .memory import enqueue_checkpoint, flush
+        enqueue_checkpoint(self.store, task)
+        flush(self.store, task)
 
     def run(self, task_id, max_attempts=None, plan_only=False):
         initial = self.store.get(task_id)
+        if initial['data'].get('development'):
+            from .development import run
+            return run(self, task_id, plan_only)
         if max_attempts is None:
             max_attempts = initial['data'].get('options', {}).get('max_attempts', 3)
         if not 1 <= max_attempts <= 10:

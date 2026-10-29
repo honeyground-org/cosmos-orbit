@@ -91,6 +91,8 @@ def checkpoint(store, task, key, phase, reason='threshold'):
     packet = {'id': uuid.uuid4().hex, 'session_key': key, 'from_session': previous,
               'reason': reason, 'goal': (data.get('contract') or {}).get('goal', task['prompt']),
               'contract': data.get('contract'), 'contract_hash': data.get('contract_hash'),
+              'development': data.get('development'),
+              'memory_scope': data.get('memory', {}).get('project_id'),
               'recent_feedback': data.get('feedback', [])[-8:],
               'feedback_total': len(data.get('feedback', [])),
               'progress': {'attempt': data.get('attempt', 0), 'checks': data.get('evidence', []),
