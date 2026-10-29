@@ -59,6 +59,7 @@ button:hover{border-color:#8ee9ff88}.primary{background:linear-gradient(135deg,#
 .console article.msg{font:13px/1.6 system-ui,sans-serif;color:var(--ink)}.console article.msg small{font:10px ui-monospace,monospace}.console article.fail small{color:var(--amber)}
 .box>h3:first-child{margin-top:0}
 @media(max-width:700px){.gauges,.layer-row{grid-template-columns:1fr 1fr}.gauge b{font-size:14px}}
+.machine-stage{background:radial-gradient(ellipse at 50% 55%,#25414b 0,#14252e 48%,#101b2b 85%)}.machine-stage:before{opacity:.18}.machine-stage:after{box-shadow:inset 0 0 100px #08111b70,inset 0 1px 0 #ffffff1a}
 </style>
 <header><div class="brand">O / <span>ORBIT ENGINE ROOM</span></div><div><button id="newTask">새 작업</button><button id="showCommands" aria-label="Open command reference">터미널 명령</button><span id="connection"></span><span id="worker"></span><select id="lang" hidden><option value="en">English</option></select></div></header>
 <main id="room"><div class="room-heading"><div><span class="eyebrow">COSMOS ORBIT / LIVE SYSTEM</span><h1 id="headline">The working machine.</h1><p id="overview"></p></div><div class="readouts" id="readouts"></div></div><div id="layers" class="layer-strip"></div><p class="mission-note" id="motionLegend"></p><div class="machine-stage"><div class="zoom-controls" role="group" aria-label="View zoom"><button id="zoomOut" aria-label="Zoom out">−</button><output id="zoomLevel" aria-label="Zoom level">100%</output><button id="zoomIn" aria-label="Zoom in">+</button><button id="zoomReset" aria-label="Reset view">Reset</button></div><div id="hoverCard" hidden></div><div class="edge-nav left"><button id="edgePrev" aria-label="Previous engine page">‹</button></div><div class="edge-nav right"><button id="edgeNext" aria-label="Next engine page">›</button></div><canvas id="machine" aria-label="Isometric view of managed AI sessions. Use the session buttons below to inspect a module."></canvas><div class="machine-caption"><span id="sceneStatus"></span><span>SCROLL TO ZOOM · DRAG TO ROTATE · CLICK TO INSPECT</span></div></div><div class="room-bottom"><div id="moduleKeys" aria-label="Managed sessions"></div><div class="page-controls"><button id="prevPage" aria-label="Previous modules">←</button><span id="page"></span><button id="nextPage" aria-label="Next modules">→</button></div></div><div id="missions" class="mission-list" aria-label="세션 상태와 다음 행동"></div><div class="room-footer"><span id="eventLine"></span><span id="updated"></span></div></main>
@@ -108,7 +109,7 @@ function render(){
  ].map(([a,b],i)=>{const d=el('div');d.append(el('small',a),el('b',b),el('small',['계획과 지시, 실행 전환과 정지','실제 모델 호출과 도구 응답','컨텍스트 보존과 세션 인계','고정 검사와 결과 기록'][i]));return d}));
  replace('readouts',[[executing,'실행 중'],[attention,'결과 / 확인 필요'],[data.tasks.filter(t=>['completed','already_satisfied'].includes(t.status)).length,'검증 완료']].map(([v,k])=>{const d=el('div');d.append(el('b',v),el('span',k));return d}));
  $('sceneStatus').textContent=connected?(executing?'실행 중 · 수신 상태':'실행 없음 · 상태 관측 중'):'연결 끊김 · 마지막 수신 상태';
- $('motionLegend').textContent='코어는 실제 세션입니다. 밝기와 맥동은 실행 상태, 이동하는 빛은 기록된 호출·응답을 나타냅니다. 옅은 초록 숨결은 쉬는 엔진의 로컬 준비 확인(45초 이내)이며 원격 연결이나 워커 실행을 뜻하지 않습니다. 클릭하면 같은 세션의 흐름을 확인합니다. 청록: 실행 · 파랑: 결과 · 주황: 대기 · 분홍: 중단/문제.';
+ $('motionLegend').textContent='코어는 실제 세션입니다. 밝기와 맥동은 실행 상태, 이동 입자는 기록된 호출·응답, 움직이는 점선은 진행 중인 모델 호출을 나타냅니다. 초록빛 코어 호흡은 쉬는 엔진의 로컬 준비 확인(45초 이내)이며 원격 연결이나 워커 실행을 뜻하지 않습니다. 클릭하면 같은 세션의 흐름을 확인합니다. 청록: 실행 · 파랑: 결과 · 주황: 대기 · 분홍: 중단/문제.';
  replace('missions',data.tasks.map(t=>{const o=operation(t),b=el('button',undefined,'mission-card '+o.tone);b.append(el('small',`${t.project||'Project'} · ${t.provider.toUpperCase()}`),el('strong',t.goal),el('span',o.phase+' · '+o.title,'badge'),el('p',o.reason),el('small','다음 · '+o.next_action),el('small','세션 흐름 열기 →','success'));b.onclick=()=>open(t.id);return b}));
  $('page').textContent=`${modules.length?modulePage+1:0} / ${Math.ceil(modules.length/8)}`;
  $('prevPage').disabled=$('edgePrev').disabled=modulePage===0;$('nextPage').disabled=$('edgeNext').disabled=(modulePage+1)*8>=modules.length;
@@ -125,22 +126,22 @@ function drawMachine(now=performance.now()){
  const scale=Math.min(w/1050,h/730)*zoom,ox=w/2,oy=h*.53;
  const project=(x,y,z=0)=>{const a=x*Math.cos(yaw)-y*Math.sin(yaw),b=x*Math.sin(yaw)+y*Math.cos(yaw);return [ox+(a-b)*.79*scale,oy+(a+b)*.34*scale-z*scale]};
  function path(points,fill,stroke){paint.beginPath();points.forEach((p,i)=>i?paint.lineTo(...p):paint.moveTo(...p));paint.closePath();if(fill){paint.fillStyle=fill;paint.fill()}if(stroke){paint.strokeStyle=stroke;paint.lineWidth=1;paint.stroke()}}
- function plate(x,y,z,dx,dy,height,color){path([project(x,y+dy,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x,y+dy,z-height)],'#1a2a4a66','#9fd8ff55');path([project(x+dx,y,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x+dx,y,z-height)],'#14203e66','#7fbfe655');path([project(x,y,z),project(x+dx,y,z),project(x+dx,y+dy,z),project(x,y+dy,z)],color,'#bfeaff88')}
+ function plate(x,y,z,dx,dy,height,color){path([project(x,y+dy,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x,y+dy,z-height)],'#202a2b','#526165');path([project(x+dx,y,z),project(x+dx,y+dy,z),project(x+dx,y+dy,z-height),project(x+dx,y,z-height)],'#172123','#3f5055');path([project(x,y,z),project(x+dx,y,z),project(x+dx,y+dy,z),project(x,y+dy,z)],color,'#758c8d')}
  function wire(points,color,width=1){paint.beginPath();points.forEach((p,i)=>i?paint.lineTo(...project(...p)):paint.moveTo(...project(...p)));paint.strokeStyle=color;paint.lineWidth=width*scale;paint.stroke()}
  function text(x,y,z,value,color='#cfe3ea',size=11,align='center'){const p=project(x,y,z);paint.font=`${Math.max(10,size*scale)}px ui-monospace,monospace`;paint.fillStyle=color;paint.textAlign=align;paint.shadowColor='#0b1226';paint.shadowBlur=6*scale;paint.fillText(value,...p);paint.shadowBlur=0}
  // Three exposed physical layers: retained state, control bus, execution sockets.
  paint.shadowColor='#0009';paint.shadowBlur=35*scale;paint.shadowOffsetY=30*scale;
- plate(-325,-230,-65,650,460,8,'#3b6a9a3a');paint.shadowBlur=0;paint.shadowOffsetY=0;
- plate(-325,-230,-44,650,460,9,'#5aa8d63a');plate(-325,-230,-22,650,460,9,'#8ee9ff2e');plate(-325,-230,0,650,460,10,'#a9f7ff33');
- for(let x=-290;x<300;x+=29){wire([[x,-213,1],[x,213,1]],'#9fd8ff1f',.6)}
- for(let y=-200;y<210;y+=29){wire([[-309,y,1],[309,y,1]],'#9fd8ff1f',.6)}
+ plate(-325,-230,-65,650,460,8,'#29445233');paint.shadowBlur=0;paint.shadowOffsetY=0;
+ plate(-325,-230,-44,650,460,9,'#438b9633');plate(-325,-230,-22,650,460,9,'#71c9d52b');plate(-325,-230,0,650,460,10,'#7dbac52e');
+ for(let x=-290;x<300;x+=29){wire([[x,-213,1],[x,213,1]],'#6c808137',.6)}
+ for(let y=-200;y<210;y+=29){wire([[-309,y,1],[309,y,1]],'#6c808137',.6)}
  // Exposed retention cells on the lower edge, never presented as invented utilization.
- for(let x=-275;x<250;x+=44){plate(x,207,-25,30,13,6,'#24406a');wire([[x+4,221,-25],[x+24,221,-25]],'#a9f7ff',2)}
+ for(let x=-275;x<250;x+=44){plate(x,207,-25,30,13,6,'#23393b');wire([[x+4,221,-25],[x+24,221,-25]],'#94aca6',2)}
  // Lower-plane lights report newly observed store/control/verification activity.
  const layerStyles={execution:{z:0,color:'#a9f7ff'},control:{z:-22,color:'#83d9ff'},context:{z:-44,color:'#c4a3ff'},evidence:{z:-65,color:'#b9f59b'}};
  const liveLayers=connected?layerPulses.filter(p=>now-p.start<2600):[];
  for(const [layer,style] of Object.entries(layerStyles)){const pulse=liveLayers.filter(p=>p.layer===layer).sort((a,b)=>b.start-a.start)[0];
- wire([[-325,230,style.z],[325,230,style.z],[325,-230,style.z]],style.color+'25',1);
+ wire([[-325,230,style.z],[325,230,style.z],[325,-230,style.z]],style.color+'70',1.3);
  if(pulse){const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches,phase=Math.max(0,(now-pulse.start)/2600),strength=reduced?.4:Math.sin(Math.PI*phase)*.8;paint.save();paint.globalAlpha=strength;paint.shadowColor=style.color;paint.shadowBlur=20*scale;
  wire([[-325,230,style.z],[325,230,style.z],[325,-230,style.z]],style.color,3);
  // A short vertical bus shows the control tower accessing the corresponding plane.
@@ -155,6 +156,8 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  const slots=visible.length<=2?[[-170,40],[170,40]]:[[-270,-160],[-90,-160],[90,-160],[270,-160],[-270,170],[-90,170],[90,170],[270,170]];
  // Independent radial links end at Harness; no engine-to-engine transport is implied.
  visible.forEach((m,i)=>{const [x,y]=slots[i],end=[x*.18,y*.18,24],color=stateColor(m.task);wire([[x,y,3],end],color+'55',1.2);
+ if(connected&&m.task.runtime&&m.task.busy&&m.session.state==='running'){paint.save();paint.setLineDash([5*scale,9*scale]);paint.lineDashOffset=matchMedia('(prefers-reduced-motion: reduce)').matches?0:-now/65*scale;wire([[x,y,3],end],'#baf7ffcc',2.3);paint.restore()}
+
  if(connected&&!matchMedia('(prefers-reduced-motion: reduce)').matches){for(const pulse of pulses.filter(p=>p.key===sessionKey(m.task,m.session)&&now-p.start<2200)){
  if(pulse.route==='tool'){const style=layerStyles[pulse.layer]||layerStyles.execution;const route=[[x,y,68],[x,y,style.z],[0,0,style.z]],f=Math.max(0,Math.min(1,(now-pulse.start)/2200)),travel=(pulse.out?f:1-f)*2,segment=Math.min(1,Math.floor(travel)),mix=travel-segment;wire(route,style.color+'88',1.6);const from=route[segment],to=route[segment+1],q=project(...from.map((v,k)=>v+(to[k]-v)*mix));paint.fillStyle=style.color;paint.shadowColor=style.color;paint.shadowBlur=18;paint.beginPath();paint.arc(q[0],q[1],4*scale,0,Math.PI*2);paint.fill();paint.shadowBlur=0;continue}
  const fraction=Math.min(1,(now-pulse.start)/2200),t=pulse.out?1-fraction:fraction,p=project(x+(end[0]-x)*t,y+(end[1]-y)*t,3+(end[2]-3)*t);paint.fillStyle=pulse.out?'#8edcff':'#dffcff';paint.shadowBlur=18;paint.shadowColor=paint.fillStyle;paint.beginPath();paint.arc(p[0],p[1],3*scale,0,Math.PI*2);paint.fill();paint.shadowBlur=0}}});
@@ -164,13 +167,13 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  const core=project(0,0,36);for(let ring=0;ring<3;ring++){paint.beginPath();paint.ellipse(core[0],core[1]-ring*12*scale,(68+ring*7)*scale,(28+ring*4)*scale,0,0,Math.PI*2);paint.strokeStyle=['#9bdfff70','#9bdfff40','#9bdfff20'][ring];paint.lineWidth=1;paint.stroke()}
  // Draw back-to-front for solid depth and distinguish execution from verified evidence.
  visible.map((m,i)=>({m,i,xy:slots[i]})).sort((a,b)=>project(...a.xy)[1]-project(...b.xy)[1]).forEach(({m,i,xy:[x,y]})=>{
- const task=m.task,s=m.session,active=connected&&task.busy&&s.state==='running',verified=['completed','already_satisfied'].includes(task.status),color=task.busy&&!active?'#8aa3bf':stateColor(task);
+ const task=m.task,s=m.session,active=connected&&task.busy&&s.state==='running',verified=['completed','already_satisfied'].includes(task.status),color=task.busy&&!active?'#8aa6ad':stateColor(task);
  plate(x-48,y-40,12,96,80,5,'#8ee9ff2e');
  const base=project(x,y,35),top=project(x,y,104),rx=44*scale,ry=20*scale;
- const grad=paint.createLinearGradient(top[0]-rx,0,top[0]+rx,0);grad.addColorStop(0,'#3f6ea8cc');grad.addColorStop(.28,'#dff6ff8c');grad.addColorStop(.62,'#5f94c299');grad.addColorStop(1,'#1a2d55dd');
+ const grad=paint.createLinearGradient(top[0]-rx,0,top[0]+rx,0);grad.addColorStop(0,'#37616cbb');grad.addColorStop(.28,'#b8e7e873');grad.addColorStop(.62,'#52828a88');grad.addColorStop(1,'#16383ddd');
  paint.beginPath();paint.ellipse(base[0],base[1],rx,ry,0,0,Math.PI);paint.lineTo(top[0]-rx,top[1]);paint.ellipse(top[0],top[1],rx,ry,0,Math.PI,2*Math.PI);paint.closePath();paint.fillStyle=grad;paint.fill();
- for(let z=46;z<100;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle='#9fd8ff55';paint.lineWidth=2*scale;paint.stroke()}
- paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);const lid=paint.createRadialGradient(top[0],top[1]-ry*.35,0,top[0],top[1],rx);lid.addColorStop(0,'#6aa6e8');lid.addColorStop(.55,'#2f5590');lid.addColorStop(1,'#1b3160');paint.fillStyle=lid;paint.fill();paint.strokeStyle='#dff6ff';paint.lineWidth=2*scale;paint.stroke();
+ for(let z=46;z<100;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle='#364e4d88';paint.lineWidth=2*scale;paint.stroke()}
+ paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);paint.fillStyle='#1c2b2e';paint.fill();paint.strokeStyle='#b9cbc7';paint.lineWidth=2*scale;paint.stroke();
  // Floating containment field: context orbit, six workflow stations, evidence socket.
  const socket=project(x,y,13);paint.beginPath();paint.ellipse(socket[0],socket[1],rx*1.4,ry*1.4,0,0,Math.PI*2);paint.strokeStyle=color+'66';paint.lineWidth=1;paint.stroke();
  const beam=paint.createLinearGradient(0,base[1]-35*scale,0,socket[1]);beam.addColorStop(0,color+'00');beam.addColorStop(1,color+'25');path([[top[0]-rx*.7,base[1]-35*scale],[top[0]+rx*.7,base[1]-35*scale],[socket[0]+rx,socket[1]],[socket[0]-rx,socket[1]]],beam);
@@ -179,10 +182,21 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  const tokens=s.context_tokens,limit=s.context_limit;paint.beginPath();paint.ellipse(top[0],top[1],rx-7*scale,ry-5*scale,0,0,Math.PI*2);paint.strokeStyle='#6f8fb3';paint.lineWidth=3*scale;paint.stroke();
  if(tokens!==null&&limit){paint.beginPath();paint.ellipse(top[0],top[1],rx-7*scale,ry-5*scale,0,-Math.PI/2,-Math.PI/2+Math.min(1,tokens/limit)*Math.PI*2);paint.strokeStyle=color;paint.stroke()}
  const moving=active&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
- if(active){const glow=paint.createRadialGradient(base[0],base[1],0,base[0],base[1],rx*2.1);glow.addColorStop(0,'#8ee9ff73');glow.addColorStop(1,'#8ee9ff00');paint.fillStyle=glow;paint.fillRect(base[0]-rx*2,base[1]-rx*2,rx*4,rx*4);for(let k=0;k<3;k++){const phase=moving?(now/2600+k/3)%1:k/3;paint.beginPath();paint.moveTo(top[0]+(k-1)*17*scale,top[1]-15*scale-phase*28*scale);paint.quadraticCurveTo(top[0]+(k-1)*17*scale+Math.sin(phase*6)*8*scale,top[1]-35*scale-phase*28*scale,top[0]+(k-1)*17*scale,top[1]-50*scale-phase*28*scale);paint.strokeStyle=`rgba(169,247,255,${(1-phase)*.18})`;paint.lineWidth=2*scale;paint.stroke()}}
- // Idle heartbeat: a faint breathing ring only when the engine's local readiness was confirmed within its validity window and the page is connected. Stale/checking/warning/unavailable show a static marker instead; nothing here implies a live remote connection.
+ if(active){const glow=paint.createRadialGradient(base[0],base[1],0,base[0],base[1],rx*2.1);glow.addColorStop(0,'#8ee9ff73');glow.addColorStop(1,'#8ee9ff00');paint.fillStyle=glow;paint.fillRect(base[0]-rx*2,base[1]-rx*2,rx*4,rx*4);for(let k=0;k<3;k++){const phase=moving?(now/2600+k/3)%1:k/3;paint.beginPath();paint.moveTo(top[0]+(k-1)*17*scale,top[1]-15*scale-phase*28*scale);paint.quadraticCurveTo(top[0]+(k-1)*17*scale+Math.sin(phase*6)*8*scale,top[1]-35*scale-phase*28*scale,top[0]+(k-1)*17*scale,top[1]-50*scale-phase*28*scale);paint.strokeStyle=`rgba(169,247,255,${(1-phase)*.40})`;paint.lineWidth=2*scale;paint.stroke()}}
+ // 점검된 대기 상태: 코어의 몸체·상단·바닥이 함께 호흡한다. 데이터 이동을 뜻하지 않는다.
  const hb=heartbeat(m),hs=s.health?.status;
- if(hb){const breath=matchMedia('(prefers-reduced-motion: reduce)').matches?.5:(Math.sin(now/1700)+1)/2;paint.beginPath();paint.ellipse(top[0],top[1],rx+3*scale+breath*3*scale,ry+2*scale+breath*2*scale,0,0,Math.PI*2);paint.strokeStyle=`rgba(185,245,155,${(.10+breath*.16).toFixed(3)})`;paint.lineWidth=1.5*scale;paint.stroke()}
+ if(hb){
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches,breath=reduced?.45:(1-Math.cos(now*Math.PI*2/4200+i*.8))/2;
+  paint.save();
+  const halo=paint.createRadialGradient(base[0],base[1],rx*.2,base[0],base[1],rx*2.25);
+  halo.addColorStop(0,`rgba(160,255,206,${.12+breath*.28})`);halo.addColorStop(1,'rgba(160,255,206,0)');
+  paint.fillStyle=halo;paint.fillRect(base[0]-rx*2.3,base[1]-rx*2.3,rx*4.6,rx*4.6);
+  paint.shadowColor='#a8ffdb';paint.shadowBlur=(8+breath*22)*scale;
+  for(let z=44;z<=94;z+=10){const q=project(x,y,z);paint.beginPath();paint.ellipse(q[0],q[1],rx,ry,0,0,Math.PI);paint.strokeStyle=`rgba(168,255,219,${.12+breath*.52})`;paint.lineWidth=(1.2+breath*1.6)*scale;paint.stroke()}
+  paint.beginPath();paint.ellipse(top[0],top[1],rx,ry,0,0,Math.PI*2);paint.fillStyle=`rgba(187,255,226,${.04+breath*.18})`;paint.fill();
+  paint.beginPath();paint.ellipse(top[0],top[1],rx+(4+breath*8)*scale,ry+(3+breath*5)*scale,0,0,Math.PI*2);paint.strokeStyle=`rgba(187,255,226,${.25+breath*.60})`;paint.lineWidth=(1.6+breath*1.4)*scale;paint.stroke();
+  paint.restore();
+ }
  else if(s.health&&s.state!=='running'){const q=project(x,y,104);paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,3*scale,0,Math.PI*2);paint.fillStyle=hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
  if(active||task.attention){paint.beginPath();const angle=moving?now/850:0;paint.ellipse(top[0],top[1],rx+5*scale,ry+4*scale,0,angle,angle+Math.PI*1.25);paint.strokeStyle=color;paint.shadowColor=color;paint.shadowBlur=active?10:4;paint.lineWidth=2*scale;paint.stroke();paint.shadowBlur=0}
  text(x,y,100,String(modulePage*8+i+1).padStart(2,'0'),color,14);
@@ -294,7 +308,7 @@ function renderDetail(){
 async function loadEarlier(t,button){button.disabled=true;try{const events=sessionEvents(t),before=Math.min(...events.map(e=>e.seq).filter(Number.isFinite));const response=await fetch('/events?task_id='+encodeURIComponent(t.id)+'&before='+before,{headers:{'X-Harness-Token':token}});const page=await response.json();if(!response.ok)throw Error(page.error||response.status);eventPages.set(t.id,[...events,...page.events]);if(selected===t.id)renderDetail()}catch(error){button.textContent=error.message;button.disabled=false}}
 $('newTask').onclick=()=>$('newTaskDialog').showModal();$('closeNewTask').onclick=()=>$('newTaskDialog').close();
  $('newTaskForm').onsubmit=async e=>{e.preventDefault();$('createTask').disabled=true;try{const checks=JSON.parse($('newChecks').value);const r=await fetch('/start',{method:'POST',headers:{'X-Harness-Token':token,'Content-Type':'application/json'},body:JSON.stringify({prompt:$('newPrompt').value,workspace:$('newWorkspace').value,provider:$('newProvider').value,checks,public_web:$('newWeb').checked,review_plan:$('newReview').checked})});const result=await r.json();if(!r.ok)throw Error(result.error||r.status);$('newNotice').textContent=result.worker_running?'계획 작성을 위해 접수했습니다.':'저장했습니다. 같은 저장소에서 cosmos-orbit worker를 실행하면 시작합니다.';await poll();$('newTaskDialog').close();open(result.task_id)}catch(error){$('newNotice').textContent=error.message}finally{$('createTask').disabled=false}};
-async function poll(){try{const r=await fetch('/state',{headers:{'X-Harness-Token':token},cache:'no-store'});if(!r.ok)throw Error(r.status);data=await r.json();connected=true}catch{connected=false}render()}
+async function poll(){try{const r=await fetch('/state',{headers:{'X-Harness-Token':token},cache:'no-store'});if(!r.ok){if([403,404].includes(r.status)){const last=Number(sessionStorage.getItem('orbit-view-refresh')||0);if(Date.now()-last>30000){sessionStorage.setItem('orbit-view-refresh',String(Date.now()));location.reload();return}}throw Error(r.status)}data=await r.json();connected=true}catch{connected=false}render()}
 async function action(path){const t=current();if(!t||busy)return;if(path==='/switch'&&$('modelChoice').value==='__custom__'&&!$('model').value.trim()){$('notice').textContent='Enter a custom model ID or choose CLI default.';return}busy=true;renderDetail();try{const r=await fetch(path,{method:'POST',headers:{'X-Harness-Token':token,'Content-Type':'application/json'},body:JSON.stringify({task_id:t.id,revision:path==='/feedback'?draftRevision:t.revision,text:$('feedback').value,provider:$('provider').value,model:$('model').value.trim()})});const result=await r.json();if(!r.ok){if(r.status===409){draftRevision=t.revision;throw Error(w('changed'))}throw Error(result.error||r.status)}if(path==='/feedback'){$('feedback').value='';draftRevision=null}$('notice').textContent=w(result.worker_running?'saved':'waiting')}catch(e){$('notice').textContent=e.message}finally{busy=false;await poll()}}
 $('showCommands').onclick=()=>$('commandGuide').showModal();$('closeCommands').onclick=()=>$('commandGuide').close();
 $('close').onclick=()=>$('drawer').close();$('lang').onchange=()=>{lang=$('lang').value;signature='';render()};$('feedback').oninput=()=>{if(draftRevision===null)draftRevision=current()?.revision;$('send').disabled=!$('feedback').value.trim()||busy||!connected};$('send').onclick=()=>action('/feedback');$('pause').onclick=()=>action('/pause');$('continue').onclick=()=>action('/continue');$('switch').onclick=()=>action('/switch');(async()=>{await poll();setTimeout(async function tick(){await poll();setTimeout(tick,2000)},2000)})();
