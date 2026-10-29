@@ -51,6 +51,16 @@ button:hover{border-color:#8ee9ff88}.primary{background:linear-gradient(135deg,#
 
 .mission-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:10px;margin:14px 0}.mission-card{text-align:left;background:var(--glass);border:1px solid var(--glass-line);padding:14px 16px;min-width:0;box-shadow:var(--glass-hi)}.mission-card strong,.mission-card small{display:block;overflow-wrap:anywhere}.mission-card strong{font-size:15px;margin:6px 0}.mission-card small{line-height:1.5}.report-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto;font:12px/1.7 ui-monospace,monospace}.mission-note{font-size:11px;color:var(--muted)}
 .layer-detail{display:grid;grid-template-columns:1fr 1fr;gap:8px}.layer-detail small{display:block}.layer-detail .instrument{padding:12px}.layer-detail strong{font:600 14px system-ui}.latest-response{white-space:pre-wrap}.runtime-strip{display:block;margin-top:12px}.session-control-link{display:block;margin-top:12px}dialog{inset:0 0 0 auto;margin:0;overscroll-behavior:contain}.layer-detail p{font-size:12px;margin:6px 0}.operation p{margin:10px 0}.operation.active{border-color:#83e8ff}.operation.problem{border-color:#ffac6b}.response p{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 18px}.session-flow{max-height:340px;overflow:auto}.mission-card p{font-size:12px;margin:10px 0}details.box>summary{color:var(--ink)}@media(max-width:600px){.layer-detail{grid-template-columns:1fr}.detailhead h2{font-size:18px}}
+
+/* ── Session detail, second pass (2026-10-29): gauges · result strip · one flow · layer row ── */
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.actions button{padding:9px 14px;border-radius:10px}
+.gauges{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0}.gauge{padding:10px 12px;border:1px solid var(--glass-line);border-radius:10px;background:var(--glass);box-shadow:var(--glass-hi);min-width:0}.gauge small{display:block;font:10px ui-monospace,monospace;letter-spacing:1px;color:var(--muted)}.gauge b{display:block;font:600 15px ui-monospace,monospace;margin-top:3px;overflow-wrap:anywhere;color:#f2fbff}.gauge .meter{height:5px;margin:8px 0 0}.gauge .sub{font-size:11px;color:var(--muted);margin-top:5px;line-height:1.4}
+.layer-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:10px 0 4px}.layer-row>div{padding:6px 12px;border-left:2px solid #ffffff22;min-width:0;transition:border-color .4s,box-shadow .4s}.layer-row>div.lit{border-left-color:var(--lime);box-shadow:-6px 0 18px -8px #8ee9ff88}.layer-row strong{display:block;font:600 12px system-ui}.layer-row small{display:block;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.result-strip .verdict{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font:12px ui-monospace,monospace}.result-strip .summary{font-size:13px;line-height:1.6;margin:10px 0 2px}.result-strip .excerpt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12.5px;line-height:1.6;color:var(--muted);display:-webkit-box;-webkit-line-clamp:8;-webkit-box-orient:vertical;overflow:hidden;margin:10px 0}.result-strip button{margin-top:4px}
+.flow-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 8px}.flow-head h3{margin:0}.chips{display:flex;gap:6px}.chips button{padding:5px 10px;font-size:11px;border-radius:999px}.chips .selected{border-color:var(--lime);color:var(--lime)}
+.console article.msg{font:13px/1.6 system-ui,sans-serif;color:var(--ink)}.console article.msg small{font:10px ui-monospace,monospace}.console article.fail small{color:var(--amber)}
+.box>h3:first-child{margin-top:0}
+@media(max-width:700px){.gauges,.layer-row{grid-template-columns:1fr 1fr}.gauge b{font-size:14px}}
 .demo-source{color:var(--blue);text-decoration:none;font-size:11px;margin-right:14px}@media(max-width:700px){.demo-source{display:inline-block;margin:5px}#connection{font-size:9px}}
 </style>
 <header><div class="brand">O / <span>ORBIT ENGINE ROOM</span></div><div><button id="newTask">새 작업</button><a class="demo-source" href="https://github.com/honeyground-org/cosmos-orbit">Install / GitHub ↗</a><button id="showCommands" aria-label="Open command reference">터미널 명령</button><span id="connection"></span><span id="worker"></span><select id="lang" hidden><option value="en">English</option></select></div></header>
@@ -66,6 +76,7 @@ const eventPages=new Map();
 function sessionEvents(t){return [...new Map([...(eventPages.get(t.id)||[]),...t.events].map(e=>[e.seq??e.at+e.kind,e])).values()].sort((a,b)=>(b.seq||0)-(a.seq||0))}
 function eventTitle(e){const title=eventTitles[e.kind]||names[e.kind]?.[1]||e.kind;return title+((e.exit_code!=null&&e.exit_code!==0)||e.failed?' · 실패'+(e.exit_code!=null?' ('+e.exit_code+')':''):'')}
 function operation(t){return t.operation||{phase:w('stages')[t.stage],title:label(t.status),tone:t.busy?'active':'idle',reason:t.reason||'표시용 상태',next_action:'기록된 다음 전환을 기다립니다.',last_activity:t.events[0]}}
+function heartbeat(m){const h=m.session.health;if(!connected||m.task.busy||!h||h.status!=='ready'||!h.checked_at)return false;return Date.now()-Date.parse(h.checked_at)<=(h.valid_for_seconds||45)*1000}
 function stateColor(t){return {active:'#a9f7ff',waiting:'#ffd08a',problem:'#ff8199',review:'#99caff',complete:'#b8ffd9',idle:'#8aa3bf'}[operation(t).tone]||'#8aa3bf'}
 function track(t){const rail=el('div',undefined,'track'),stage=t.status==='needs_review'?5:t.stage;w('stages').forEach((s,i)=>rail.append(el('div',s,'station '+(i===stage?'current':''))));return rail}
 function modelText(t){const s=t.sessions.find(s=>!s.peer&&s.provider===t.provider);return s?.reported_models?.length?s.reported_models.join(', '):(t.requested_model?`${w('requested')}: ${t.requested_model}`:w('unreported'))}
@@ -91,7 +102,7 @@ function render(){
  const executing=data.tasks.filter(t=>t.busy).length, attention=data.tasks.filter(t=>t.attention).length;
  $('headline').textContent=executing?'세션이 작업 중입니다.':attention?(data.tasks.filter(t=>t.attention).every(t=>t.status==='needs_review')?'결과가 준비되었습니다.':'확인이 필요한 작업이 있습니다.'):'실행 중인 작업이 없습니다.';
  $('overview').textContent=`${modules.length}개 세션 · ${data.tasks.length}개 작업 · ${data.scope==='demo'?'합성 데모 · 실제 실행 아님':'하네스가 관리하는 실제 실행 상태'}`;
- $('worker').textContent='SYNTHETIC SESSIONS';
+ const engines=Object.entries(data.health?.engines||{}).map(([k,v])=>k.toUpperCase()+' '+(({ready:'준비',checking:'확인 중',warning:'주의',unavailable:'없음'})[v.status]||v.status)).join(' · ');$('worker').textContent=('SYNTHETIC SESSIONS')+(engines?' · '+engines:'');$('worker').title=data.health?.policy||'';
  replace('layers',[
  ['01 / 지시 · 제어',`${data.tasks.length}개 작업 · 정지 요청 ${data.tasks.filter(t=>t.pause_requested).length}개`],
  ['02 / 실행 · 협업',`${executing}개 실행 · 협업 응답 대기 ${data.tasks.reduce((n,t)=>n+t.messages.filter(m=>!m.reply).length,0)}개`],
@@ -100,7 +111,7 @@ function render(){
  ].map(([a,b],i)=>{const d=el('div');d.append(el('small',a),el('b',b),el('small',['계획과 지시, 실행 전환과 정지','실제 모델 호출과 도구 응답','컨텍스트 보존과 세션 인계','고정 검사와 결과 기록'][i]));return d}));
  replace('readouts',[[executing,'실행 중'],[attention,'결과 / 확인 필요'],[data.tasks.filter(t=>['completed','already_satisfied'].includes(t.status)).length,'검증 완료']].map(([v,k])=>{const d=el('div');d.append(el('b',v),el('span',k));return d}));
  $('sceneStatus').textContent=connected?(executing?'실행 중 · 수신 상태':'실행 없음 · 상태 관측 중'):'연결 끊김 · 마지막 수신 상태';
- $('motionLegend').textContent='코어는 실제 세션입니다. 밝기와 맥동은 실행 상태, 이동하는 빛은 기록된 호출·응답을 나타냅니다. 클릭하면 같은 세션의 흐름을 확인합니다. 청록: 실행 · 파랑: 결과 · 주황: 대기 · 분홍: 중단/문제.';
+ $('motionLegend').textContent='코어는 실제 세션입니다. 밝기와 맥동은 실행 상태, 이동하는 빛은 기록된 호출·응답을 나타냅니다. 옅은 초록 숨결은 쉬는 엔진의 로컬 준비 확인(45초 이내)이며 원격 연결이나 워커 실행을 뜻하지 않습니다. 클릭하면 같은 세션의 흐름을 확인합니다. 청록: 실행 · 파랑: 결과 · 주황: 대기 · 분홍: 중단/문제.';
  replace('missions',data.tasks.map(t=>{const o=operation(t),b=el('button',undefined,'mission-card '+o.tone);b.append(el('small',`${t.project||'Project'} · ${t.provider.toUpperCase()}`),el('strong',t.goal),el('span',o.phase+' · '+o.title,'badge'),el('p',o.reason),el('small','다음 · '+o.next_action),el('small','세션 흐름 열기 →','success'));b.onclick=()=>open(t.id);return b}));
  $('page').textContent=`${modules.length?modulePage+1:0} / ${Math.ceil(modules.length/8)}`;
  $('prevPage').disabled=$('edgePrev').disabled=modulePage===0;$('nextPage').disabled=$('edgeNext').disabled=(modulePage+1)*8>=modules.length;
@@ -172,6 +183,10 @@ if(scale>=.72){text(-185,252,-22,'01 / CONTROL · FEEDBACK','#b9dcef',9);}
  if(tokens!==null&&limit){paint.beginPath();paint.ellipse(top[0],top[1],rx-7*scale,ry-5*scale,0,-Math.PI/2,-Math.PI/2+Math.min(1,tokens/limit)*Math.PI*2);paint.strokeStyle=color;paint.stroke()}
  const moving=active&&!matchMedia('(prefers-reduced-motion: reduce)').matches;
  if(active){const glow=paint.createRadialGradient(base[0],base[1],0,base[0],base[1],rx*2.1);glow.addColorStop(0,'#8ee9ff73');glow.addColorStop(1,'#8ee9ff00');paint.fillStyle=glow;paint.fillRect(base[0]-rx*2,base[1]-rx*2,rx*4,rx*4);for(let k=0;k<3;k++){const phase=moving?(now/2600+k/3)%1:k/3;paint.beginPath();paint.moveTo(top[0]+(k-1)*17*scale,top[1]-15*scale-phase*28*scale);paint.quadraticCurveTo(top[0]+(k-1)*17*scale+Math.sin(phase*6)*8*scale,top[1]-35*scale-phase*28*scale,top[0]+(k-1)*17*scale,top[1]-50*scale-phase*28*scale);paint.strokeStyle=`rgba(169,247,255,${(1-phase)*.18})`;paint.lineWidth=2*scale;paint.stroke()}}
+ // Idle heartbeat: a faint breathing ring only when the engine's local readiness was confirmed within its validity window and the page is connected. Stale/checking/warning/unavailable show a static marker instead; nothing here implies a live remote connection.
+ const hb=heartbeat(m),hs=s.health?.status;
+ if(hb){const breath=matchMedia('(prefers-reduced-motion: reduce)').matches?.5:(Math.sin(now/1700)+1)/2;paint.beginPath();paint.ellipse(top[0],top[1],rx+3*scale+breath*3*scale,ry+2*scale+breath*2*scale,0,0,Math.PI*2);paint.strokeStyle=`rgba(185,245,155,${(.10+breath*.16).toFixed(3)})`;paint.lineWidth=1.5*scale;paint.stroke()}
+ else if(s.health&&!task.busy){const q=project(x,y,104);paint.beginPath();paint.arc(q[0]+rx*.85,q[1]-ry*.9,3*scale,0,Math.PI*2);paint.fillStyle=hs==='unavailable'?'#ff8199':hs==='warning'?'#ffd08a':'#8aa3bf';paint.fill()}
  if(active||task.attention){paint.beginPath();const angle=moving?now/850:0;paint.ellipse(top[0],top[1],rx+5*scale,ry+4*scale,0,angle,angle+Math.PI*1.25);paint.strokeStyle=color;paint.shadowColor=color;paint.shadowBlur=active?10:4;paint.lineWidth=2*scale;paint.stroke();paint.shadowBlur=0}
  text(x,y,100,String(modulePage*8+i+1).padStart(2,'0'),color,14);
  // On a small stage (phones, deep zoom-out) eight goal lines pile up unreadably; keep the number and status, the keys below and the inspection panel carry the names.
@@ -181,7 +196,7 @@ if(scale>=.72){const lead=project(x,y,151);paint.fillStyle=color;paint.beginPath
  hitAreas.push({x:top[0],y:(top[1]+base[1])/2,rx:Math.max(25,rx+8),ry:(base[1]-top[1])/2+ry+8,task:task.id,session:task.sessions.indexOf(s)});
  });
  if(!visible.length){paint.font='14px ui-monospace,monospace';paint.fillStyle='#dff0f7';paint.textAlign='center';paint.fillText('NO MANAGED SESSIONS · RUN COSMOS-ORBIT TO BEGIN',w/2,h*.24)}
- cancelAnimationFrame(animation);if(connected&&(visible.some(m=>m.task.busy&&m.session.state==='running')||pulses.some(p=>now-p.start<2200)||liveLayers.length>0)&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches)animation=requestAnimationFrame(drawMachine);
+ cancelAnimationFrame(animation);if(connected&&(visible.some(m=>m.task.busy&&m.session.state==='running')||visible.some(heartbeat)||pulses.some(p=>now-p.start<2200)||liveLayers.length>0)&&!document.hidden&&!matchMedia('(prefers-reduced-motion: reduce)').matches)animation=requestAnimationFrame(drawMachine);
 }
 function setZoom(value){zoom=Math.max(.55,Math.min(2,value));$('zoomLevel').textContent=`${Math.round(zoom*100)}%`;$('zoomOut').disabled=zoom<=.55;$('zoomIn').disabled=zoom>=2;$('hoverCard').hidden=true;drawMachine()}
 $('zoomOut').onclick=()=>setZoom(zoom-.15);$('zoomIn').onclick=()=>setZoom(zoom+.15);$('zoomReset').onclick=()=>{yaw=0;setZoom(1)};
@@ -198,44 +213,80 @@ $('prevPage').onclick=$('edgePrev').onclick=()=>{if(modulePage>0){modulePage--;s
 function populateModels(){const provider=$('provider').value,value=$('model').value,options=new Map();for(const m of data?.model_options?.[provider]||[])options.set(m.id,{label:m.label,source:m.source});for(const t of data?.tasks||[])for(const s of t.sessions){if(s.provider!==provider)continue;for(const id of s.reported_models||[])if(!options.has(id))options.set(id,{label:id,source:'Previously reported'});if(s.requested_model&&!options.has(s.requested_model))options.set(s.requested_model,{label:s.requested_model,source:'Previously requested'})}const select=$('modelChoice');select.replaceChildren();function add(value,label){const o=el('option',label);o.value=value;select.append(o)}add('','CLI default — recommended if unsure');for(const [id,m] of options)add(id,`${m.label} · ${m.source}`);add('__custom__','Custom model ID…');select.value=value?(options.has(value)?value:'__custom__'):'';$('model').hidden=select.value!=='__custom__';}
 $('model').oninput=()=>{$('switch').disabled=busy||!connected||!$('model').value.trim()};
 $('provider').onchange=()=>{$('model').value='';populateModels()};$('modelChoice').onchange=()=>{const custom=$('modelChoice').value==='__custom__';$('model').hidden=!custom;$('model').value=custom?'':$('modelChoice').value;if(custom)$('model').focus()};
-function open(id,session=0){selected=id;selectedSession=session;draftRevision=null;$('feedback').value='';$('notice').textContent='';const t=current();$('provider').value=t.provider;$('model').value=t.requested_model||'';populateModels();renderDetail();$('drawer').showModal()}
+function open(id,session=0){selected=id;selectedSession=session;draftRevision=null;$('feedback').value='';$('notice').textContent='';const t=current();$('provider').value=t.provider;$('model').value=t.requested_model||'';populateModels();$('drawer').showModal();renderDetail()}
+let flowFilter='all';
+function noteText(e){const n=e.note||'';if(n.trim().startsWith('{')){try{const j=JSON.parse(n);if(j.summary)return j.summary+(j.next_action?'\n다음 · '+j.next_action:'');if(j.goal)return '계획 · '+j.goal+(Array.isArray(j.steps)?'\n단계 '+j.steps.length+'개 · 전문은 아래 작업 계획':'')}catch{}const sm=n.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)/);if(sm)return sm[1].replace(/\\n/g,'\n').replace(/\\"/g,'"')+' …';const gm=n.match(/"goal"\s*:\s*"((?:[^"\\]|\\.)*)/);if(gm)return '계획 · '+gm[1].replace(/\\"/g,'"')+'\n전문은 아래 작업 계획'}return n}
+function excerpt(text,limit){const lines=(text||'').split('\n').map(l=>l.replace(/^#{1,6}\s*/,'').replace(/\*\*/g,'').trim()).filter(Boolean);let out='';for(const l of lines){if(out.length+l.length>limit)break;out+=(out?'\n':'')+l}return out||(text||'').slice(0,limit)}
+function flowEvents(t){return [...new Map([...(eventPages.get(t.id)||[]),...t.events,...(t.responses||[])].map(e=>[e.seq??e.at+e.kind,e])).values()].sort((a,b)=>(a.seq||0)-(b.seq||0))}
+const isMessage=e=>e.kind==='provider_message'||e.kind==='model_finished'&&e.note&&e.note!=='running';
+function gauge(label,value,sub,fraction){const d=el('div',undefined,'gauge');d.append(el('small',label),el('b',value));if(fraction!=null){const m=el('div',undefined,'meter'),i=el('span');i.style.width=Math.min(100,Math.round(fraction*100))+'%';m.append(i);d.append(m)}if(sub)d.append(el('div',sub,'sub'));return d}
 function renderDetail(){
  const t=current();if(!t)return;
  const old=$('detail'),saved=new Set([...old.querySelectorAll('details[open]')].map(d=>d.dataset.key)),log=old.querySelector('.console'),logTop=log?.scrollTop||0,tail=!log||log.scrollHeight-log.scrollTop-log.clientHeight<30,body=[],op=operation(t);
- function disclosure(key,title,children){const d=el('details',undefined,'box');d.dataset.key=key;d.open=saved.has(key);d.append(el('summary',title),...children);body.push(d);return d}
+ function disclosure(key,title,children,openByDefault){const d=el('details',undefined,'box');d.dataset.key=key;d.open=saved.has(key)||(!!openByDefault&&!old.querySelector('details[data-key="'+key+'"]'));d.append(el('summary',title),...children);body.push(d);return d}
  const h=el('div',undefined,'detailhead');h.append(el('span',`${t.project||t.provider} · ${t.id}`,'fine'),el('h2',t.goal));body.push(h);
- const tabs=el('div',undefined,'session-tabs');t.sessions.forEach((s,i)=>{const b=el('button',`${s.provider} / ${s.name}`,i===selectedSession?'selected':'');b.onclick=()=>{selectedSession=i;renderDetail()};tabs.append(b)});body.push(tabs);
+ if(t.sessions.length>1){const tabs=el('div',undefined,'session-tabs');t.sessions.forEach((s,i)=>{const b=el('button',`${s.provider} / ${s.name}`,i===selectedSession?'selected':'');b.onclick=()=>{selectedSession=i;renderDetail()};tabs.append(b)});body.push(tabs)}
  const s=t.sessions[selectedSession]||t.sessions[0];
+ /* ① 상태 한 줄 · 이유 · 다음 행동 — 터미널 watch 와 같은 operation 투영 */
  const status=el('section',undefined,'box operation '+op.tone);status.append(el('span',op.phase+' · '+op.title,'badge'),el('p',op.reason),el('p','다음 · '+op.next_action));
  if(t.runtime)status.append(el('p',`현재 호출 ${time(t.runtime.elapsed_seconds)} 경과 · 제한까지 ${time(t.runtime.remaining_seconds)} · 제한 ${time(t.runtime.timeout_seconds)}`,'fine'));
  const activity=op.last_activity;status.append(el('small',activity?`마지막 기록 ${new Date(activity.at).toLocaleTimeString('ko')} · ${eventTitle(activity)}`:'아직 실행 기록이 없습니다.'));
  if(!connected)status.prepend(el('p','연결 끊김 · 아래는 마지막으로 수신한 상태입니다.','warn'));
- const controlLink=el('button',t.execution_plan?.state==='awaiting_review'?'계획 승인 후 실행':t.pause_requested?'계속':t.busy?'일시정지 예약':t.presentation?.report?'결과 열기':'추가 지시', 'session-control-link');controlLink.onclick=()=>{if(t.execution_plan?.state==='awaiting_review')return action('/approve');if(t.pause_requested)return action('/continue');if(t.busy)return action('/pause');const result=$('detail').querySelector('[data-key="result"]');if(result&&t.presentation?.report&&!t.busy){result.open=true;result.scrollIntoView({block:'start'})}else $('intervene').scrollIntoView({block:'start'})};status.append(controlLink);const sys=el('small',`실행 시도 ${t.attempt}/${t.budget} · 컨텍스트 ${s.context_tokens===null?'미측정':num(s.context_tokens)}/${num(s.context_limit)} · 기억 ${t.memory?.mode||'off'} · 검사 ${t.checks.filter(c=>c.passed).length}/${t.checks.length}`,'runtime-strip');status.append(sys);body.push(status,track(t),el('p','현재 하네스 단계입니다. 계획 항목별 완료율을 뜻하지 않습니다.','fine'));
- const layers=el('section',undefined,'layer-detail');
- for(const [key,title,meaning] of [['control','지시 · 제어','계획, 사용자 지시, 실행 전환'],['execution','실행 · 협업','모델 호출, 도구 실행, 세션 응답'],['context','기억 · 연속성','기억 조회, 컨텍스트, 인계'],['evidence','검증 · 결과','고정 검사, 결과 기록']]){
-  const row=el('div',undefined,'instrument'),e=t.layer_activity?.[key]||t.events.find(e=>(e.layer||eventLayer[e.kind]||(e.kind.startsWith('model_')?'execution':null))===key);
-  row.append(el('strong',title),el('small',meaning),el('p',e?eventTitle(e)+' · '+new Date(e.at).toLocaleTimeString('ko'):(key==='context'&&(!t.memory||t.memory.mode==='off')?'외부 기억 연동 꺼짐 · 세션 컨텍스트는 아래에서 확인':'아직 기록된 활동 없음')));layers.append(row)
- }
- const conversation=el('section',undefined,'box session-flow');conversation.append(el('h3','같은 세션의 최근 응답'));
- const responses=(t.responses||t.events.filter(e=>e.kind==='provider_message').slice().reverse()).filter(e=>(!e.alias||e.alias===s.name||(!s.peer&&e.alias===s.provider))&&!e.note.trim().startsWith('{')).slice().reverse();if(!t.busy&&t.last_summary)conversation.append(el('p',t.last_summary,'latest-response'));
- for(const e of responses){const row=el('article',undefined,'response');row.append(el('small',`${s.provider} · ${new Date(e.at).toLocaleTimeString('ko')}`),el('p',e.note));conversation.append(row)}
- if(!responses.length)conversation.append(el('p',t.last_summary||'아직 공개 응답이 기록되지 않았습니다.'));
- conversation.append(el('small','공개 응답의 최근 기록입니다. 비공개 추론은 표시하지 않으며, 각 기록은 최대 600자입니다.'));body.push(conversation,layers);
- if(t.objective_progress){const p=t.objective_progress,section=el('section',undefined,'box');section.append(el('h3','남은 작업'));for(const item of p.remaining||[])section.append(el('p',item));if(p.next_action)section.append(el('p','이어갈 행동 · '+p.next_action));section.append(el('small','실행자가 보고한 내용입니다. 검증 근거와 구분해 확인하세요.'));body.push(section)}
+ /* ② 상태별 주 행동 하나 + 보조 하나 */
+ const resultState=['needs_review','completed','already_satisfied','stale'].includes(t.status);
+ const actions=el('div',undefined,'actions');
+ const primary=el('button',t.execution_plan?.state==='awaiting_review'?'계획 승인 후 실행':t.pause_requested?'계속':t.busy?'일시정지 예약':resultState&&t.presentation?.report?'보고서 전체 보기':'지시 보내기','primary');
+ primary.disabled=busy||!connected;
+ primary.onclick=()=>{if(t.execution_plan?.state==='awaiting_review')return action('/approve');if(t.pause_requested)return action('/continue');if(t.busy)return action('/pause');const result=$('detail').querySelector('[data-key="result"]');if(result&&resultState&&t.presentation?.report){result.open=true;result.scrollIntoView({block:'start'})}else{$('intervene').scrollIntoView({block:'start'});$('feedback').focus()}};
+ actions.append(primary);
+ if(primary.textContent!=='지시 보내기'){const second=el('button',t.execution_plan?.state==='awaiting_review'?'수정 지시':'추가 지시');second.onclick=()=>{$('intervene').scrollIntoView({block:'start'});$('feedback').focus()};actions.append(second)}
+ status.append(actions);body.push(status);
+ /* ⑤ 하네스 내부 계기 — 예산 · 컨텍스트 · 모델 사용 · 검사와 기억 */
+ const passed=t.checks.filter(c=>c.passed).length,lastEvidence=t.layer_activity?.evidence,m=t.metrics||{};
+ const gauges=el('section',undefined,'gauges');
+ gauges.append(gauge('실행 시도 / 한도',`${t.attempt} / ${t.budget}`,t.busy?'진행 중인 시도 포함':'남은 시도 '+Math.max(0,t.budget-t.attempt),t.budget?t.attempt/t.budget:null));
+ gauges.append(gauge('컨텍스트 / 인계 기준',s.context_tokens===null?'미측정':`${num(s.context_tokens)} / ${num(s.context_limit)}`,`인계 ${s.handoff_count}회 · ${s.context_source==='unavailable'?'측정 경로 없음':'엔진 보고값'}`,s.context_tokens===null?null:s.context_tokens/(s.context_limit||1)));
+ gauges.append(gauge('모델 시간 · 호출',`${time(m.model_seconds||0)} · ${m.calls||0}회`,`입력 ${num(m.input_tokens||0)} · 출력 ${num(m.output_tokens||0)} 토큰 · 기록 기간 ${time(m.elapsed_seconds||0)}`));
+ gauges.append(gauge('고정 검사 · 기억',`${passed} / ${t.checks.length}${t.checks.length?(passed===t.checks.length?' 통과':' 실패'):' 없음'}`,(lastEvidence?`마지막 검사 ${new Date(lastEvidence.at).toLocaleTimeString('ko')}`:'아직 검사 전')+` · 기억 ${t.memory?.mode||'off'}`+(s.health?` · 엔진 ${({ready:'준비',checking:'확인 중',warning:'주의',unavailable:'사용 불가'})[s.health.status]||s.health.status}`:'')));
+ body.push(gauges,track(t),el('p','현재 하네스 단계입니다. 계획 항목별 완료율을 뜻하지 않습니다.','fine'));
+ /* ④ 결과 스트립 — 결과 상태일 때 첫 화면에 */
+ if(resultState&&(t.presentation?.report||t.checks.length||t.last_summary)){
+  const r=el('section',undefined,'box result-strip');r.append(el('h3','결과'));
+  const verdict=el('div',undefined,'verdict');verdict.append(el('span',t.checks.length?`검사 ${passed}/${t.checks.length} ${passed===t.checks.length?'통과':'실패'}`:'고정 검사 없음',passed===t.checks.length&&t.checks.length?'success':'warn'),el('span',`변경 파일 ${(t.files||[]).length}개`),el('span',t.presentation?.report_source?t.presentation.report_source.split(' · ')[0]:'저장된 보고서 없음','muted'));
+  if(t.status==='stale')verdict.append(el('span','검증 이후 파일이 바뀌었습니다','warn'));r.append(verdict);
+  for(const c of t.checks){const line=(c.output_tail||'').trim().split('\n').pop()||'';if(!c.passed)r.append(el('p',(c.reason||c.log||'검사 실패')+(line?' · '+line:''),'warn'));else if(line)r.append(el('p','검사 출력 · '+line,'fine'))}
+  if(t.last_summary){r.append(el('p',t.last_summary,'summary'));r.append(el('small','실행자가 보고한 요약입니다. 검증 근거와 구분해 확인하세요.'))}
+  if(t.objective_progress?.remaining?.length){const rem=el('div');rem.append(el('small','남은 작업'));for(const item of t.objective_progress.remaining)rem.append(el('p',item));r.append(rem)}
+  if(t.presentation?.report){r.append(el('div',excerpt(t.presentation.report,520),'excerpt'));const more=el('button','보고서 전체 보기');more.onclick=()=>{const d=$('detail').querySelector('[data-key="result"]');d.open=true;d.scrollIntoView({block:'start'})};r.append(more)}
+  if(t.presentation?.report_error)r.append(el('p',t.presentation.report_error,'warn'));
+  body.push(r)}
+ /* 하네스 레이어별 마지막 활동 — 눈에 안 보이는 처리 */
+ const layers=el('section',undefined,'layer-row'),latestLayer=['control','execution','context','evidence'].map(k=>[k,t.layer_activity?.[k]]).filter(([,e])=>e).sort((a,b)=>(b[1].seq||0)-(a[1].seq||0))[0]?.[0];
+ for(const [key,title] of [['control','지시 · 제어'],['execution','실행 · 협업'],['context','기억 · 연속성'],['evidence','검증 · 결과']]){
+  const row=el('div',undefined,key===latestLayer?'lit':''),e=t.layer_activity?.[key];
+  row.append(el('strong',title),el('small',e?eventTitle(e)+' · '+new Date(e.at).toLocaleTimeString('ko'):(key==='context'&&(!t.memory||t.memory.mode==='off')?'외부 기억 꺼짐 · 컨텍스트는 위 계기':'기록 없음')));layers.append(row)}
+ body.push(layers);
  if(t.feedback.length)body.push(el('p',`새 지시 ${t.feedback.length}개가 안전한 실행 경계를 기다리고 있습니다.`,'warn'));
- body.push(el('h3','하네스 처리 흐름'));
- const consoleBox=el('div',undefined,'console');consoleBox.setAttribute('aria-label','하네스 처리 흐름');
- const entries=sessionEvents(t).reverse(),starts=new Map();entries.forEach(e=>{const key=e.call_id+'/'+e.tool_id;if(e.kind==='provider_tool_started'&&e.tool_id)starts.set(key,e.at);const duration=e.kind==='provider_tool_finished'&&starts.has(key)?` · ${((Date.parse(e.at)-Date.parse(starts.get(key)))/1000).toFixed(1)}초`:'';const row=el('article');row.append(el('small',`${new Date(e.at).toLocaleTimeString('ko')} · ${e.layer||eventLayer[e.kind]||'control'} · ${eventTitle(e)}${duration}`));if(e.note)row.append(el('span',e.note));consoleBox.append(row)});
- if(!entries.length)consoleBox.append(el('span','기록된 실행을 기다리고 있습니다.'));body.push(consoleBox,el('p',`표시 ${entries.length}개 / 전체 ${t.event_count??entries.length}개 기록 · 최근 항목을 보고 있으면 자동으로 따라갑니다.`,'fine'));if(entries.length<(t.event_count||0)){const more=el('button','이전 기록 더 보기');more.onclick=()=>loadEarlier(t,more);body.push(more)}
+ /* ③ 세션 흐름 — 응답 · 도구 · 검사를 한 줄기로, 터미널 events 와 같은 기록 */
+ const head=el('div',undefined,'flow-head');head.append(el('h3','세션 흐름 · 응답 · 도구 · 검사'));const chips=el('div',undefined,'chips');
+ for(const [k,l] of [['all','전체'],['messages','응답만'],['tools','도구 · 검사']]){const b=el('button',l,k===flowFilter?'selected':'');b.onclick=()=>{flowFilter=k;renderDetail()};chips.append(b)}head.append(chips);body.push(head);
+ const consoleBox=el('div',undefined,'console');consoleBox.setAttribute('aria-label','세션 흐름');
+ const all=flowEvents(t),starts=new Map(),entries=all.filter(e=>flowFilter==='all'||(flowFilter==='messages'?isMessage(e):!isMessage(e)));
+ for(const e of all){const key=e.call_id+'/'+e.tool_id;if(e.kind==='provider_tool_started'&&e.tool_id)starts.set(key,e.at)}
+ for(const e of entries){const key=e.call_id+'/'+e.tool_id,duration=e.kind==='provider_tool_finished'&&starts.has(key)?` · ${((Date.parse(e.at)-Date.parse(starts.get(key)))/1000).toFixed(1)}초`:'',msg=isMessage(e),row=el('article',undefined,(msg?'msg':'')+(e.failed||(e.exit_code!=null&&e.exit_code!==0)?' fail':''));
+  row.append(el('small',`${new Date(e.at).toLocaleTimeString('ko')} · ${e.layer||eventLayer[e.kind]||'control'} · ${eventTitle(e)}${e.tool?' · '+e.tool:''}${duration}`));
+  const text=msg?noteText(e):(e.note&&!/^\S+ (started|returned)$/.test(e.note)?e.note:'');if(text)row.append(el('span',text));consoleBox.append(row)}
+ if(!entries.length)consoleBox.append(el('span',all.length?'이 필터에 해당하는 기록이 없습니다.':'기록된 실행을 기다리고 있습니다.'));
+ body.push(consoleBox,el('p',`표시 ${entries.length}개 / 불러온 ${all.length}개 / 전체 ${t.event_count??all.length}개 기록 · 최근 항목을 보고 있으면 자동으로 따라갑니다. 비공개 추론은 기록되지 않으며 각 항목은 최대 600자입니다.`,'fine'));
+ if(all.length<(t.event_count||0)){const more=el('button','이전 기록 더 보기');more.onclick=()=>loadEarlier(t,more);body.push(more)}
+ /* 접기 — 지시 · 계획 · 보고서 전문 · 검사 · 세션 기술 정보 · 작업 파일 */
  disclosure('request','원래 지시 · 작업 범위',[el('p',t.request||t.goal),...t.constraints.map(x=>el('p',x,'fine'))]);
  if(t.messages.length)disclosure('collaboration','협업 요청 · 응답 '+t.messages.length+'건',t.messages.filter(m=>!s.peer||m.target===s.name).flatMap(m=>[el('h3',m.target+' · '+m.status),el('p',m.question),el('p',m.reply||m.error||'응답 대기')]));
- if(t.execution_plan){const p=t.execution_plan,children=[el('p',p.goal),...p.steps.map((step,i)=>el('p',`${i+1}. ${step}`)),el('h3','확인 기준'),...p.acceptance.map(x=>el('p',x)),...p.risks.map(x=>el('p',x,'fine'))];if(p.state==='awaiting_review'){const approve=el('button','계획 승인 후 실행','primary');approve.disabled=busy||!connected;approve.onclick=()=>action('/approve');children.unshift(approve)}const d=disclosure('execution-plan','작업 계획 · '+p.state,children);if(p.state==='awaiting_review')d.open=true}
- if(t.presentation?.report_error)body.push(el('p',t.presentation.report_error,'warn'));
- if(t.presentation?.report)disclosure('result','결과 열기 · 저장된 보고서',[el('p',t.presentation.report_source||'','fine'),el('pre',t.presentation.report,'report-preview')]);
- const passed=t.checks.filter(c=>c.passed).length;
- disclosure('checks',`검증 근거 · ${passed}/${t.checks.length} 통과`,[el('p','검사 통과는 전체 목적 달성과 별도로 판단합니다.','fine'),...t.checks.map(c=>el('p',(c.passed?'✓ ':'! ')+(c.argv?c.argv.join(' '):(c.reason||c.path))+(c.log?' · '+c.log:''),c.passed?'success':'warn'))]);
- disclosure('context','기억 · 컨텍스트 · 실행 정보',[el('p',`컨텍스트 ${s.context_tokens===null?'미측정':num(s.context_tokens)} / 인계 기준 ${num(s.context_limit)} · 인계 ${s.handoff_count}회`),el('p',`기억 모드: ${t.memory?.mode||'off'} · 범위: ${t.memory?.project_id||'미설정'}`),...(t.memory?.notes||[]).map(n=>el('p',n.status+(n.reason?': '+n.reason:''))),...(t.memory?.outbox||[]).map(m=>el('p',`저장 ${m.status} · 시도 ${m.attempts}`+(m.error?' · '+m.error:''))),el('p',`완료된 모델 호출 ${t.metrics.calls} · 실행 시도 ${t.attempt}/${t.budget}`),el('p',`요청 모델 ${s.requested_model||'CLI 기본값'} · 보고 모델 ${s.reported_models.join(', ')||'미보고'}`),el('p',s.id||'세션 연결 전','mono')]);
- if(t.development)disclosure('workspace','작업 파일 · 원본과 격리 공간',[el('p','원본: '+t.development.source,'mono'),el('p','작업 공간: '+t.workspace,'mono'),el('p','변경 파일: '+(t.development.changed_paths||[]).join(', ')),el('p','패치: '+(t.development.tracked_patch||'검증 전'),'mono')]);
+ if(t.execution_plan){const p=t.execution_plan,children=[el('p',p.goal),...p.steps.map((step,i)=>el('p',`${i+1}. ${step}`)),el('h3','확인 기준'),...p.acceptance.map(x=>el('p',x)),...p.risks.map(x=>el('p',x,'fine')),el('small','단계별 완료 여부는 기록되지 않습니다. 위 단계 리본은 하네스 단계입니다.')];if(p.state==='awaiting_review'){const approve=el('button','계획 승인 후 실행','primary');approve.disabled=busy||!connected;approve.onclick=()=>action('/approve');children.unshift(approve)}disclosure('execution-plan',`작업 계획 · ${p.steps.length}단계 · ${({approved:'승인됨',awaiting_review:'승인 대기',draft:'작성 중'})[p.state]||p.state}`,children,p.state==='awaiting_review'||t.busy)}
+ if(t.presentation?.report)disclosure('result','보고서 전문 · '+(t.presentation.report_source||'저장본'),[el('pre',t.presentation.report,'report-preview')]);
+ disclosure('checks',`검증 근거 · ${passed}/${t.checks.length} 통과`,[el('p','검사 통과는 전체 목적 달성과 별도로 판단합니다.','fine'),...t.checks.map(c=>el('p',(c.passed?'✓ ':'! ')+(c.argv?c.argv.join(' ').slice(0,400):(c.reason||c.path))+(c.log?' · '+c.log:''),c.passed?'success':'warn'))]);
+ disclosure('context','세션 · 모델 · 기억 기술 정보',[el('p',`요청 모델 ${s.requested_model||'CLI 기본값'} · 보고 모델 ${s.reported_models.join(', ')||'미보고'}`),el('p',`기억 모드: ${t.memory?.mode||'off'} · 범위: ${t.memory?.project_id||'미설정'}`),...(t.memory?.notes||[]).map(n=>el('p',n.status+(n.reason?': '+n.reason:''))),...(t.memory?.outbox||[]).map(x=>el('p',`저장 ${x.status} · 시도 ${x.attempts}`+(x.error?' · '+x.error:''))),...(s.health?[el('p',`엔진 상태 ${s.health.status} · ${s.health.detail||''} · 확인 ${s.health.checked_at?new Date(s.health.checked_at).toLocaleTimeString('ko'):'-'} · 원격 연결은 확인하지 않습니다`)]:[]),el('p',s.id||'세션 연결 전','mono')]);
+ if(t.development)disclosure('workspace','작업 파일 · 원본과 격리 공간',[el('p','원본: '+t.development.source,'mono'),el('p','작업 공간: '+t.workspace,'mono'),el('p',`변경 파일 ${(t.development.changed_paths||[]).length}개: `+(t.development.changed_paths||[]).slice(0,60).join(', ')+((t.development.changed_paths||[]).length>60?' …':'')),el('p','패치: '+(t.development.tracked_patch||'검증 전'),'mono')]);
  replace('detail',body);consoleBox.scrollTop=tail?consoleBox.scrollHeight:logTop;
  $('switchTitle').textContent='실행 엔진 · 모델 변경';$('switch').textContent='변경 예약';$('switchNote').textContent=w('switchNote');$('route').textContent=t.routing?`변경 대기: ${t.routing.provider} / ${t.routing.model||w('default')}`:'';
  $('intervene').textContent='이 세션에 지시하기';$('feedback').placeholder='지금 작업에 추가하거나 수정할 내용을 입력하세요. 실행 중에는 안전한 경계에서 반영합니다.';

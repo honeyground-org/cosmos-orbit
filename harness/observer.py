@@ -233,8 +233,19 @@ def snapshot(store, task_id=None):
     worker_running = store.locked('worker')
     for task in tasks:
         task['operation'] = describe(task, worker_running)
+    health = None
+    try:
+        # Read-only engine/session readiness (local --version and session record only; no model calls).
+        # Adds session['health'] to each session and returns the project-level summary.
+        from .health import project_health
+        health = project_health(store.home, tasks)
+    except ImportError:
+        pass
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        health = {'checked_at': now(), 'engines': {}, 'policy': 'unavailable', 'error': str(error)}
     return {'at': now(), 'scope': 'managed', 'home': str(store.home), 'cursor': cursor,
             'worker_running': worker_running, 'tasks': tasks, 'total': len(summaries),
+            'health': health,
             'events': global_events, 'labels': LABELS, 'model_options': model_options()}
 
 
