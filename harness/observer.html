@@ -22,11 +22,9 @@ header{background:#141c33b8;backdrop-filter:blur(22px) saturate(160%);-webkit-ba
 .layer-strip>div{border:1px solid var(--glass-line);border-left:2px solid #8ee9ff99;background:var(--glass);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-radius:12px;padding:10px 14px;box-shadow:var(--glass-hi)}
 .layer-strip small{color:#a9cbe0}
 .machine-stage{border-radius:18px;border:1px solid var(--glass-line);box-shadow:var(--glass-hi),0 30px 80px #0007;overflow:hidden;background:radial-gradient(ellipse at 50% 58%,#5aaad84a,transparent 55%),radial-gradient(ellipse at 16% 14%,#8c6eff2e,transparent 42%),radial-gradient(ellipse at 84% 28%,#5adcc826,transparent 40%),linear-gradient(180deg,#1b2548,#111830)}
-.machine-stage:before{content:'';position:absolute;inset:-30%;pointer-events:none;z-index:0;background:conic-gradient(from 180deg at 50% 50%,#8ee9ff00,#8ee9ff14 20%,#c4a3ff12 45%,#5adcc810 70%,#8ee9ff00);filter:blur(44px);will-change:transform;animation:lumen-drift 64s linear infinite}
+.machine-stage:before{content:'';position:absolute;inset:-30%;pointer-events:none;z-index:0;background:conic-gradient(from 180deg at 50% 50%,#8ee9ff00,#8ee9ff14 20%,#c4a3ff12 45%,#5adcc810 70%,#8ee9ff00);filter:blur(44px)}
 .machine-stage:after{z-index:2;background:repeating-linear-gradient(0deg,transparent,transparent 3px,#9fe6ff05 4px);box-shadow:inset 0 0 120px #0a1024aa,inset 0 1px 0 #ffffff1a}
 #machine{position:relative;z-index:1}
-@keyframes lumen-drift{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.machine-stage:before{animation:none}}
 .machine-caption{color:#a9c6d8;z-index:3}
 #moduleKeys button{background:var(--glass);border:1px solid var(--glass-line);border-radius:10px;color:#dbeaf3;box-shadow:var(--glass-hi);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 #moduleKeys button:hover{border-color:#8ee9ff88;box-shadow:var(--glass-hi),0 0 18px #8ee9ff33}
