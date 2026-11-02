@@ -41,6 +41,9 @@ class Engine:
         self.store.save(task, task['status'], 'routing_applied', {'from': old, 'to': request}, routing_id=request['id'])
 
     def _feedback_boundary(self, task):
+        if task['data'].get('runtime_version') == 3:
+            from .simple_loop import feedback_boundary
+            return feedback_boundary(self.store, task)
         messages = self.store.inbox(task['id'])
         if not messages or task['data']['pending']:
             return False
@@ -262,6 +265,9 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
 
     def run(self, task_id, max_attempts=None, plan_only=False):
         initial = self.store.get(task_id)
+        if initial['data'].get('runtime_version') == 3:
+            from .simple_loop import run
+            return run(self, task_id)
         if initial['data'].get('development'):
             from .development import run
             return run(self, task_id, plan_only)
@@ -409,5 +415,33 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
             raise ValueError('Invalid attempt or context budget')
         with self.store.lock('task:' + task_id):
             task = self.store.get(task_id)
+            if task['data'].get('runtime_version') == 3:
+                from .simple_loop import completion_items
+                if 'max_attempts' in options:
+                    raise ValueError('Simplified tasks use --max-turns')
+                if 'max_turns' in options:
+                    limit = options['max_turns']
+                    if type(limit) is not int or not 1 <= limit <= 100:
+                        raise ValueError('max-turns must be between 1 and 100')
+                    task['data']['max_turns'] = limit
+                if 'done' in options:
+                    items = completion_items(options['done'], task['data']['development']['checks'], 'user')
+                    if not options['done']:
+                        raise ValueError('Completion definitions cannot be cleared')
+                    from .store import now
+                    task['data']['done'] = items
+                    task['data']['done_fixed'] = {'at': now(), 'origin': 'user', 'turn': task['data']['turns']}
+                    task['status'] = 'needs_input'
+                    task['data'].update(reason='Completion definitions changed; provide feedback to continue.',
+                                        reason_code='done_changed')
+                    task['data']['development']['phase'] = 'ready'
+                if (task['status'] == 'stalled' and task['data'].get('reason_code') == 'turn_limit'
+                        and task['data']['max_turns'] > task['data']['turns']):
+                    task['status'] = 'received'
+                    task['data'].update(reason='', reason_code='')
+            elif 'max_turns' in options or 'done' in options:
+                raise ValueError('--done and --max-turns apply to simplified tasks only')
             task['data'].setdefault('options', {}).update(options)
-            self.store.save(task, task['status'], 'options_updated', options)
+            event = 'goal_fixed' if task['data'].get('runtime_version') == 3 and 'done' in options else 'options_updated'
+            payload = dict(options, done=task['data']['done'], origin='user') if event == 'goal_fixed' else options
+            self.store.save(task, task['status'], event, payload)

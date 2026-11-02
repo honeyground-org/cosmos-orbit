@@ -92,6 +92,8 @@ def checkpoint(store, task, key, phase, reason='threshold'):
               'reason': reason, 'goal': data.get('mission_goal') or (data.get('contract') or {}).get('goal', task['prompt']),
               'execution_plan': data.get('execution_plan'),
               'objective_progress': data.get('objective_progress'),
+              'done': data.get('done'), 'done_fixed': data.get('done_fixed'),
+              'verdict': (data.get('verdicts') or [None])[-1],
               'evaluation': data.get('evaluation'),
               'contract': data.get('contract'), 'contract_hash': data.get('contract_hash'),
               'development': data.get('development'),

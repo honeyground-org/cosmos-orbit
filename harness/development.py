@@ -85,7 +85,7 @@ def create(store, root, provider, prompt, checks):
     return task
 
 
-def check(store, task, lease_fds=()):
+def check(store, task, lease_fds=(), simplified=False):
     """Run only the original user-supplied argv, never a command proposed by the model."""
     dev = task['data']['development']
     if git(task['workspace'], 'rev-parse', 'HEAD').decode().strip() != dev['base']:
@@ -145,8 +145,9 @@ def check(store, task, lease_fds=()):
     task['data']['evidence'] = results
     task['data']['development']['verified_tree'] = fingerprint(task['workspace'])
     passed = all(r['passed'] for r in results)
-    task['data']['development']['phase'] = 'evaluating'
-    store.save(task, 'evaluating', 'verified', {'checks': results, 'passed': passed})
+    task['data']['development']['phase'] = 'checking' if simplified else 'evaluating'
+    store.save(task, 'checking' if simplified else 'evaluating',
+               'checks_recorded' if simplified else 'verified', {'checks': results, 'passed': passed})
     return False
 
 

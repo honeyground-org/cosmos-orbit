@@ -7,6 +7,8 @@ PHASES = {'received': '접수', 'ready': '실행 대기', 'planning': '계획', 
 
 
 def describe(task, worker_running):
+    if task.get('runtime_version') == 3:
+        return describe_simple(task, worker_running)
     state = task['status']
     events = task['events']
     latest = events[0] if events else None
@@ -85,3 +87,34 @@ def describe(task, worker_running):
     return {'phase': phase, 'tone': tone, 'title': title, 'reason': reason,
             'next_action': next_action, 'last_activity': latest,
             'worker_running': worker_running}
+
+
+def describe_simple(task, worker_running):
+    """Stable v3 translation keys; legacy wording stays available for old tasks."""
+    state = task['status']
+    known = {'received', 'working', 'checking', 'verifying', 'verified', 'needs_input',
+             'stalled', 'interrupted', 'paused'}
+    recorded = task.get('recorded_status', state)
+    phase = state if state in known else recorded if recorded in known else 'received'
+    reason_key = task.get('reason_code') or phase
+    tone = ('active' if task.get('busy') and phase in ('working', 'checking', 'verifying')
+            else 'complete' if phase == 'verified'
+            else 'problem' if phase in ('stalled', 'interrupted')
+            else 'waiting')
+    titles = {'received': 'Queued', 'working': 'Working', 'checking': 'Checking fixed commands',
+              'verifying': 'Reviewing completion', 'verified': 'Completion verified',
+              'needs_input': 'Input needed', 'stalled': 'Work remains',
+              'interrupted': 'Execution interrupted', 'paused': 'Paused'}
+    reasons = {'received': 'Waiting for an executor.', 'working': 'The native executor is running.',
+               'checking': 'Orbit is running the fixed user commands.',
+               'verifying': 'A separate context is comparing the goal with recorded evidence.',
+               'verified': 'Current fixed checks and the independent review passed.',
+               'needs_input': 'A required user decision is pending.',
+               'stalled': 'Execution stopped with work preserved.',
+               'interrupted': 'Inspect saved files and diagnostics before authorising another execution.',
+               'paused': 'Paused at a safe boundary.'}
+    return {'phase_key': 'phase.' + phase, 'title_key': 'simple.' + phase,
+            'reason_key': 'simple.reason.' + reason_key, 'phase': titles[phase],
+            'title': titles[phase], 'tone': tone, 'reason': task.get('reason') or reasons[phase],
+            'next_action': (task.get('objective_progress') or {}).get('next_action', ''),
+            'last_activity': next(iter(task.get('events', [])), None), 'worker_running': worker_running}

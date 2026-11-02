@@ -149,6 +149,8 @@ def evaluate(engine, task, lease_fds=()):
 
 def request_assessment(store, task):
     data = task['data']
+    if data.get('runtime_version') == 3:
+        raise ValueError('Simplified tasks use the completion verifier; provide feedback to continue')
     if not data.get('development') or task['status'] not in ('needs_review', 'blocked', 'needs_input', 'stale'):
         raise ValueError('평가는 실행 중이 아닌 개발 작업의 산출물에만 요청할 수 있습니다.')
     if data.get('plan_requested') or data['development'].get('hold') or (data.get('execution_plan') or {}).get('state') == 'awaiting_review':

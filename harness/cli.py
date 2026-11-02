@@ -20,6 +20,10 @@ def show(task):
             'provider': task['provider'], 'workspace': task['workspace'],
             'request': task['prompt'], 'contract': data['contract'],
             'development': data.get('development'), 'memory': data.get('memory'),
+            'runtime_version': data.get('runtime_version', 2), 'goal': data.get('goal'),
+            'done': data.get('done'), 'done_fixed': data.get('done_fixed'), 'turns': data.get('turns'),
+            'max_turns': data.get('max_turns'), 'verdicts': data.get('verdicts'), 'resumes': data.get('resumes'),
+            'reason_code': data.get('reason_code'),
             'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
             'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
             'attempts': data['attempt'], 'evidence': data['evidence'],
@@ -73,6 +77,9 @@ def main(argv=None):
     start.add_argument('--plan-first', action='store_true', help='Generate a plan and wait for review before native execution')
     start.add_argument('--public-web', action='store_true', help='Authorise public web research in native development execution')
     start.add_argument('--development', action='store_true', help='Edit an isolated Git clone with native tools')
+    start.add_argument('--simplified', action='store_true',
+                       help='Preview the goal/done/check/verifier loop in the terminal; requires --development')
+    start.add_argument('--done', action='append', default=None, help='Explicit completion definition; repeatable, simplified loop only')
     start.add_argument('--check', action='append', default=[], metavar='ARGV_JSON',
                        help='Authorise a fixed verification command as a JSON argument array; repeatable')
     start.add_argument('--workspace', default='.')
@@ -89,7 +96,9 @@ def main(argv=None):
     feedback.add_argument('text')
     feedback.add_argument('--provider', choices=('codex', 'claude'))
     feedback.add_argument('--queue', action='store_true')
+    feedback.add_argument('--done', action='append', default=None, help='Replace completion definitions explicitly (simplified loop)')
     for command in (start, resume, feedback):
+        command.add_argument('--max-turns', type=int, help='Executor turn limit, default 8 in the simplified loop; no elapsed-time cutoff')
         command.add_argument('--max-attempts', type=int)
         command.add_argument('--model', help='Optional model on the selected CLI; no cross-provider fallback')
         command.add_argument('--timeout', type=int, help='Deprecated compatibility option; elapsed time never stops a task')
@@ -127,7 +136,7 @@ def main(argv=None):
     store = Store(args.home)
     notify = lambda phase, task_id: print(task_id + ' ' + phase, file=sys.stderr, flush=True)
     engine = Engine(store, notify=notify)
-    options = {key: getattr(args, key, None) for key in ('model', 'timeout', 'max_attempts', 'context_budget')}
+    options = {key: getattr(args, key, None) for key in ('model', 'timeout', 'max_attempts', 'context_budget', 'max_turns', 'done')}
     try:
         if args.command == 'watch':
             from .observer import watch as observe
@@ -140,6 +149,8 @@ def main(argv=None):
         elif args.command == 'plan':
             with store.lock('task:' + args.id):
                 task = store.get(args.id)
+                if task['data'].get('runtime_version') == 3:
+                    raise ValueError('Simplified tasks do not use a separate plan; use feedback to change requirements')
                 if not task['data'].get('development'):
                     raise ValueError('Execution plans currently require a development task')
                 task['data']['plan_requested'] = True
@@ -154,6 +165,8 @@ def main(argv=None):
         elif args.command == 'assess':
             with store.lock('task:' + args.id):
                 task = store.get(args.id)
+                if task['data'].get('runtime_version') == 3:
+                    raise ValueError('Simplified tasks verify completion claims automatically; use feedback to request another execution')
                 from .manager import request_assessment
                 request_assessment(store, task)
             result = show(engine.run(args.id))
@@ -193,6 +206,15 @@ def main(argv=None):
             result = {'queued': store.route(args.id, args.provider, args.model),
                       'note': 'Worker or resume applies this selection at a safe boundary. Model availability is checked by the CLI on its next call.'}
         elif args.command == 'start':
+            if args.simplified and (not args.development or args.plan_only or args.plan_first or args.peer or args.max_attempts is not None):
+                raise ValueError('--simplified requires --development and uses --max-turns instead of plans or peers')
+            if not args.simplified and (args.done is not None or args.max_turns is not None):
+                raise ValueError('--done and --max-turns require --simplified for new tasks')
+            if args.simplified:
+                from .simple_loop import completion_items
+                completion_items(args.done or [], [], 'user')
+                if args.max_turns is not None and not 1 <= args.max_turns <= 100:
+                    raise ValueError('max-turns must be between 1 and 100')
             if args.plan_first and args.plan_only:
                 raise ValueError('Choose --plan-first for a generated plan or --plan-only for a model-free development hold')
             if (args.plan_first or args.public_web) and not args.development:
@@ -246,6 +268,9 @@ def main(argv=None):
             task['data']['peers'] = peers
             if imported:
                 task['data']['imported_handoff'] = imported
+            if args.simplified:
+                from .simple_loop import initialize
+                initialize(store, task, args.done, args.max_turns if args.max_turns is not None else 8)
             store.save(task, 'received', 'options_recorded', task['data']['options'])
             print('task ' + task['id'], file=sys.stderr, flush=True)
             if not args.queue:
@@ -288,8 +313,12 @@ def main(argv=None):
             if task['data'].get('development'):
                 from .development import evidence_current
                 result['evidence_current'] = evidence_current(task)
-                if task['status'] == 'needs_review' and not result['evidence_current']:
-                    result['status'] = 'stale'
+                if task['status'] in ('needs_review', 'verified') and not result['evidence_current']:
+                    if task['data'].get('runtime_version') == 3:
+                        result.update(recorded_status=task['status'], status='needs_input', reason_code='stale_evidence',
+                                      reason='Files changed since verification; inspect them and provide feedback.')
+                    else:
+                        result['status'] = 'stale'
             if task['data']['contract']:
                 current = verify(task['workspace'], task['data']['contract'])
                 result['current_evidence'] = current
@@ -299,7 +328,13 @@ def main(argv=None):
                     result['status'] = 'stale'
             from .observer import snapshot
             projected = snapshot(store, args.id)['tasks'][0]
-            result['operation'] = projected['operation']
+            if task['data'].get('runtime_version') == 3:
+                from .operations import describe_simple
+                projected.update(runtime_version=3, status=result['status'],
+                                 reason_code=result.get('reason_code'), reason=result['reason'])
+                result['operation'] = describe_simple(projected, projected['operation']['worker_running'])
+            else:
+                result['operation'] = projected['operation']
             result['process_health'] = projected['process_health']
             result['runtime'] = projected['runtime']
             result['observed_status'] = projected['status']
@@ -358,7 +393,7 @@ def main(argv=None):
                             continue
                         if item['status'] == 'interrupted' and store.get(item['id'])['data']['pending'] is not None:
                             continue  # A conflicted batch needs explicit resume or recovery.
-                        if store.inbox(item['id']) or store.routing(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing', 'waiting_peer', 'paused'):
+                        if store.inbox(item['id']) or store.routing(item['id']) or item['status'] in ('received', 'ready', 'planning', 'running', 'working', 'checking', 'applying', 'verifying', 'evaluating', 'repairing', 'waiting_peer', 'paused'):
                             try:
                                 result = engine.run(item['id'])
                                 if result['revision'] != item['revision']:
@@ -370,7 +405,7 @@ def main(argv=None):
                     time.sleep(args.interval)
             return 0
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        if isinstance(result, dict) and result.get('status') in ('blocked', 'interrupted', 'needs_input', 'stale'):
+        if isinstance(result, dict) and result.get('status') in ('blocked', 'interrupted', 'needs_input', 'stale', 'stalled'):
             return 2
         return 0
     except (ValueError, RuntimeError, OSError) as error:
