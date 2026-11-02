@@ -1,14 +1,17 @@
 """Adapters to installed, authenticated CLIs; never select a second provider implicitly."""
 import json
+from collections import deque
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
 from .context import claude_measurement, codex_measurement
+from .recovery import atomic_json, process_identity, failure
 
 
 def obj(properties):
@@ -17,15 +20,6 @@ def obj(properties):
 
 STRING = {'type': 'string'}
 STRINGS = {'type': 'array', 'items': STRING}
-CHECK = obj({'path': STRING, 'kind': {'type': 'string', 'enum': ['contains', 'not_contains', 'equals', 'json_equals']},
-             'expected': STRING, 'pointer': STRING, 'reason': STRING})
-PLAN = obj({'goal': STRING, 'constraints': STRINGS, 'local_write': {'type': 'boolean'},
-            'permission_basis': STRING, 'questions': STRINGS, 'steps': STRINGS, 'files': STRINGS,
-            'checks': {'type': 'array', 'items': CHECK}})
-CHANGE = obj({'path': STRING, 'before_sha': STRING, 'content': STRING})
-EXECUTE = obj({'summary': STRING, 'changes': {'type': 'array', 'items': CHANGE}, 'blocker': STRING,
-               'messages': {'type': 'array', 'items': obj({'to': STRING, 'text': STRING})}})
-REPLY = obj({'accepted': {'type': 'boolean'}, 'reply': STRING})
 
 
 def doctor():
@@ -42,7 +36,7 @@ def doctor():
 
 def native_capabilities(provider, public_web=False):
     """Describe the actual native adapter, not the host CLI's full capabilities."""
-    return {'file_read_write': True, 'shell': provider == 'codex',
+    return {'file_read_write': True, 'shell': True,
             'public_web': bool(public_web), 'host_fixed_checks': True,
             'additional_host_commands': False,
             'scope': 'isolated workspace; no commits, deployment or external writes',
@@ -57,6 +51,7 @@ class Provider:
         self.name, self.home, self.model, self.timeout = name, Path(home), model, None
 
     def call(self, task_id, prompt, schema, session=None, workspace=None, lease_fds=()):
+        read_only = bool(getattr(self, 'read_only', False))
         directory = self.home / 'runs' / task_id
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         call_id = uuid.uuid4().hex
@@ -85,11 +80,28 @@ class Provider:
             command += ['-']
         if workspace is not None:
             if self.name == 'claude':
-                command[command.index('--tools') + 1] = 'Read,Edit,Write,Glob,Grep'
-                command += ['--restricted', '--safe-mode', '--disable-slash-commands',
+                if read_only:
+                    command[command.index('--tools') + 1] = 'Read,Glob,Grep,Bash'
+                    command += ['--restricted']
+                else:
+                    # Keep the executor's native settings, skills, MCP and memory behaviour.
+                    index = command.index('--tools')
+                    del command[index:index + 2]
+                    command.remove('--strict-mcp-config')
+                    index = command.index('--setting-sources')
+                    del command[index:index + 2]
+                sandbox = {'enabled': True, 'failIfUnavailable': True,
+                           'allowUnsandboxedCommands': False,
+                           'filesystem': {'denyWrite': [str(self.home)] if read_only else []},
+                           'network': {'allowedDomains': [], 'deniedDomains': [] if getattr(self, 'public_web', False) else ['*']}}
+                if read_only:
+                    sandbox['filesystem']['denyWrite'].append(str(Path(workspace).resolve()))
+                command += ['--settings', json.dumps({'sandbox': sandbox}),
                             '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']
             else:
-                command[command.index('sandbox_mode="read-only"')] = 'sandbox_mode="workspace-write"'
+                if not read_only:
+                    command.remove('--ignore-user-config')
+                    command[command.index('sandbox_mode="read-only"')] = 'sandbox_mode="workspace-write"'
                 # Native shell and patch tools operate inside the provider sandbox.
                 for feature in ('shell_tool', 'unified_exec'):
                     index = command.index(feature)
@@ -100,7 +112,8 @@ class Provider:
                 command[command.index('web_search="disabled"')] = 'web_search="live"'
                 command[command.index('sandbox_workspace_write.network_access=false')] = 'sandbox_workspace_write.network_access=true'
             else:
-                command[command.index('--tools') + 1] += ',WebSearch,WebFetch'
+                if '--tools' in command:
+                    command[command.index('--tools') + 1] += ',WebSearch,WebFetch'
         if self.model:
             # Options precede the stdin prompt marker for Codex.
             if self.name == 'codex':
@@ -110,15 +123,37 @@ class Provider:
         started = time.monotonic()
         started_wall = time.time()
         invocation = directory / (call_id + '.invocation.json')
-        version = subprocess.run([self.name, '--version'], capture_output=True, text=True, timeout=10)
-        invocation.write_text(json.dumps({'argv': command, 'version': version.stdout.strip()}, indent=2), encoding='utf-8')
+        try:
+            version = subprocess.run([self.name, '--version'], capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            version = 'unavailable'
+        invocation.write_text(json.dumps({'argv': command, 'version': version}, indent=2), encoding='utf-8')
         os.chmod(invocation, 0o600)
+        receipt = directory / (call_id + '.receipt.json')
+        record = {'task_id': task_id, 'call_id': call_id, 'receipt': str(receipt),
+                  'provider': self.name, 'requested_model': self.model, 'session': session,
+                  'status': 'prepared', 'started_wall': started_wall, 'process': None,
+                  'log': str(log_path), 'error_log': str(error_path), 'answer_path': str(output_path),
+                  'invocation': str(invocation), 'exit_code': None, 'seconds': None}
+        def persist(status):
+            record['status'] = status
+            atomic_json(receipt, record)
+            callback = getattr(self, 'on_call', None)
+            if callback:
+                callback(record)
+        persist('prepared')
         with log_path.open('w', encoding='utf-8') as stdout, error_path.open('w', encoding='utf-8') as stderr:
             os.chmod(log_path, 0o600)
             os.chmod(error_path, 0o600)
-            process = subprocess.Popen(command, cwd=str(workspace or directory), stdin=subprocess.PIPE,
+            runner = [sys.executable, str(Path(__file__).with_name('native_runner.py')), str(receipt), *command]
+            process = subprocess.Popen(runner, cwd=str(workspace or directory), stdin=subprocess.PIPE,
                                        stdout=stdout, stderr=stderr, text=True, encoding='utf-8',
-                                       start_new_session=True, pass_fds=lease_fds)
+                                       start_new_session=True, pass_fds=lease_fds,
+                                       env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1') if read_only else None)
+            record['process'] = process_identity(process.pid)
+            callback = getattr(self, 'on_call', None)
+            if callback:
+                callback(dict(record, status='running'))
             try:
                 callback = getattr(self, 'on_event', None)
                 if callback is None:
@@ -173,42 +208,76 @@ class Provider:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                 raise
-        if process.returncode:
-            raise RuntimeError('Selected CLI failed (exit %s). Inspect %s and %s' %
-                               (process.returncode, log_path, error_path))
-        usage = {}
-        reported_models = []
-        if self.name == 'claude':
-            events = [json.loads(line) for line in log_path.read_text(encoding='utf-8').splitlines() if line.strip()]
-            envelope = next((e for e in reversed(events) if e.get('type') == 'result'), {})
-            if not envelope:
-                raise ValueError('Claude stream has no result envelope')
-            context = claude_measurement(events)
-            if envelope.get('is_error'):
-                raise RuntimeError('Claude did not complete the call; inspect ' + str(log_path))
-            session = envelope.get('session_id', session)
-            answer = envelope.get('structured_output')
-            if answer is None:
-                answer = json.loads(envelope.get('result', '{}'))
-            usage = envelope.get('usage', {})
-            reported_models = list(envelope.get('modelUsage', {}))
-        else:
-            answer = json.loads(output_path.read_text(encoding='utf-8'))
-            for line in log_path.read_text(encoding='utf-8').splitlines():
+        record = json.loads(receipt.read_text())
+        callback = getattr(self, 'on_call', None)
+        if callback:
+            callback(record)
+        return read_result(record)
+
+
+def read_result(record):
+    """Parse only a terminal native response; partial file edits never imply completion."""
+    events = deque(maxlen=128)
+    provider, session = record['provider'], record.get('session')
+    reported = []
+    path = Path(record['log'])
+    if path.exists():
+        with path.open(encoding='utf-8', errors='replace') as stream:
+            for line in stream:
                 try:
                     event = json.loads(line)
+                    if isinstance(event, dict):
+                        if event.get('type') == 'thread.started':
+                            session = event.get('thread_id', session)
+                        if isinstance(event.get('model'), str) and event['model'] not in reported:
+                            reported.append(event['model'])
+                        if event.get('type') in ('thread.started', 'result', 'turn.completed', 'turn.failed', 'error', 'connection_error'):
+                            events.append(event)
+                        elif event.get('type') == 'assistant' and isinstance(event.get('message'), dict):
+                            events.append({'type': 'assistant', 'message': {'usage': event['message'].get('usage', {})}})
                 except ValueError:
                     continue
-                if event.get('type') == 'thread.started':
-                    session = event.get('thread_id', session)
-                if event.get('type') == 'turn.completed':
-                    usage = event.get('usage', {})
-                if isinstance(event.get('model'), str) and event['model'] not in reported_models:
-                    reported_models.append(event['model'])
-            context = codex_measurement(session, started_wall)
+    for event in events:
+        if event.get('type') == 'thread.started':
+            session = event.get('thread_id', session)
+    usage, models, answer = {}, [], None
+    terminal = next((event for event in reversed(events) if event.get('type') in ('result', 'turn.completed', 'turn.failed')), {})
+    usage = terminal.get('usage', {})
+    models = list(terminal.get('modelUsage', {}))
+    if provider == 'claude':
+        session = terminal.get('session_id', session)
+        measurement = claude_measurement(events)
+    else:
+        measurement = codex_measurement(session, record.get('started_wall', 0))
+        models = reported
+    metadata = {'call_id': record['call_id'], 'session': session, 'provider': provider,
+                'requested_model': record.get('requested_model'), 'reported_models': models,
+                'context': measurement, 'seconds': record.get('seconds'), 'usage': usage,
+                'log': record['log'], 'invocation': record['invocation']}
+    error_events = [str(event.get('error') or event.get('message') or event.get('result') or '')
+                    for event in events if event.get('type') in ('error', 'connection_error', 'turn.failed')
+                    or event.get('type') == 'result' and event.get('is_error')]
+    terminal_failed = terminal.get('type') == 'turn.failed' or terminal.get('is_error')
+    if record.get('exit_code') not in (None, 0) or terminal_failed or not terminal and error_events:
+        message = '\n'.join(error_events)
+        if not message:
+            error_path = Path(record['error_log'])
+            message = record.get('launch_error') or (error_path.read_text(errors='replace')[-4000:] if error_path.exists() else '')
+        if isinstance(record.get('exit_code'), int) and record['exit_code'] < 0:
+            from .recovery import ProviderFailure
+            raise ProviderFailure(message or 'Native process interrupted by a signal.', 'connection_wait', time.time() + 30, metadata)
+        raise failure(message or 'Native CLI exited without a successful response.', metadata)
+    if not terminal:
+        raise failure('Native call ended before its terminal response was recorded.', metadata)
+    try:
+        if provider == 'claude':
+            answer = terminal.get('structured_output')
+            if answer is None:
+                answer = json.loads(terminal.get('result', '{}'))
+        else:
+            answer = json.loads(Path(record['answer_path']).read_text(encoding='utf-8'))
         if not isinstance(answer, dict):
-            raise ValueError('Provider response must be a structured object')
-        return answer, {'session': session, 'provider': self.name,
-                        'requested_model': self.model, 'reported_models': reported_models, 'context': context,
-                        'seconds': round(time.monotonic() - started, 3),
-                        'usage': usage, 'log': str(log_path), 'invocation': str(invocation)}
+            raise ValueError('Response must be a JSON object')
+    except (ValueError, OSError) as error:
+        raise failure('Native response could not be read: ' + str(error), metadata) from error
+    return answer, metadata

@@ -97,6 +97,13 @@ def describe_simple(task, worker_running):
     recorded = task.get('recorded_status', state)
     phase = state if state in known else recorded if recorded in known else 'received'
     reason_key = task.get('reason_code') or phase
+    if reason_key in ('provider_wait', 'connection_wait'):
+        return {'phase_key': 'phase.received', 'title_key': 'simple.received',
+                'reason_key': 'simple.reason.' + reason_key,
+                'phase': 'Waiting to resume', 'title': 'Waiting to resume', 'tone': 'waiting',
+                'reason': task.get('reason') or 'The provider is temporarily unavailable.',
+                'next_action': 'The worker retries automatically at the recorded retry time.',
+                'last_activity': next(iter(task.get('events', [])), None), 'worker_running': worker_running}
     tone = ('active' if task.get('busy') and phase in ('working', 'checking', 'verifying')
             else 'complete' if phase == 'verified'
             else 'problem' if phase in ('stalled', 'interrupted')

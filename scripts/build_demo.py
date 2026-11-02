@@ -36,6 +36,29 @@ def build():
                 state='running', requested_model=None, reported_models=['Illustrative model'],
                 context_tokens=[122000,310000,74000,440000][i%4], context_limit=500000,
                 context_source='Synthetic fixture', handoff_count=i%3)]))
+    # The preview illustrates the current single loop; it never reads a real task store.
+    for i, task in enumerate(tasks):
+        state_name = ['working', 'verifying', 'checking', 'verified', 'received', 'needs_input'][i % 6]
+        station = {'received': 0, 'working': 1, 'checking': 2, 'verifying': 3, 'verified': 4, 'needs_input': 3}[state_name]
+        task.update(runtime_version=3, status=state_name, recorded_status=state_name,
+                    stage=station, busy=state_name in ('working', 'checking', 'verifying'),
+                    attention=state_name == 'needs_input', turns=0 if state_name == 'received' else 1, max_turns=8,
+                    reason_code='question' if state_name == 'needs_input' else '',
+                    done_fixed={'origin': 'synthetic fixture'}, resumes=[], verdicts=[],
+                    done=[{'id': 'G0', 'text': 'The complete original request', 'origin': 'user', 'how': 'inspect'},
+                          {'id': 'D1', 'text': task['goal'], 'origin': 'user', 'how': 'inspect'}]
+                         + [{'id': 'C' + str(j + 1), 'text': 'Fixed check ' + str(j + 1), 'origin': 'check', 'how': 'check:' + str(j + 1)} for j in range(3)])
+        for j, check in enumerate(task['checks']):
+            check.update(path='command:' + str(j + 1), passed=state_name == 'verified' or j < 2,
+                         exit_code=0 if state_name == 'verified' or j < 2 else None)
+        if state_name == 'verified':
+            task['verdicts'] = [{'turn': 1, 'outcome': 'verified', 'items': [dict(id=item['id'], status='met', evidence=['Synthetic observation']) for item in task['done']],
+                                 'extra': [], 'missing': [], 'fix': [], 'question': ''}]
+        task['executor_result'] = {'finished': state_name in ('verified', 'verifying', 'needs_input'), 'summary': 'Synthetic fixture only.',
+                                   'remaining': [], 'question': 'Choose a domain boundary.' if state_name == 'needs_input' else ''}
+        task['sessions'][0].update(name=task['provider'] + (':verifier' if state_name == 'verifying' else ''),
+                                   state='running' if task['busy'] else 'idle')
+        task['metrics']['by_phase'] = {'working': {'calls': 1, 'seconds': 30}, 'verifying': {'calls': 1, 'seconds': 10}}
     state = dict(tasks=tasks, scope='demo', worker_running=True, at='', events=[], model_options={},
                  labels=dict(en=dict(running='Running', idle='Idle')))
     history_start = html.index('async function loadEarlier(')
@@ -47,7 +70,7 @@ def build():
     start = html.index('async function poll()')
     end = html.index('\nasync function action', start)
     html = html[:start] + 'const demoState=' + json.dumps(state) + ''';let demoTick=0;
-const demoEvents=[['model_started','Orbit sends a bounded task to the engine.'],['model_finished','The engine returns a proposed result to Orbit.'],['session_checkpoint','Orbit records a context checkpoint.'],['verified','Orbit records verification evidence.'],['feedback_queued','A new instruction reaches the control layer.']];
+const demoEvents=[['model_started','Orbit sends the goal and retained work to the engine.'],['model_finished','The engine returns a proposed result to Orbit.'],['session_checkpoint','Orbit records a context checkpoint.'],['checks_recorded','Orbit records fixed-check evidence.'],['feedback_queued','A new instruction reaches the control layer.']];
 async function poll(){
  demoTick++;data=demoState;data.at=new Date().toISOString();
  data.tasks.forEach((t,i)=>{const [kind,note]=demoEvents[(demoTick+i)%demoEvents.length];t.events.unshift({seq:demoTick,at:data.at,kind,note});t.events=t.events.slice(0,12)});

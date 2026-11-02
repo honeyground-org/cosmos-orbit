@@ -23,6 +23,7 @@ class Store:
         os.chmod(self.home / 'tasks.sqlite3', 0o600)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.execute('PRAGMA synchronous=FULL')
         self.db.executescript('''
           CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY, workspace TEXT NOT NULL, provider TEXT NOT NULL,

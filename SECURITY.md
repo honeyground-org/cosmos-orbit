@@ -14,15 +14,28 @@ https://github.com/honeyground-org/cosmos-orbit/security/advisories/new
 Do not post exploitable details in public issues.
 
 
-Opt-in repository development uses private Git clones with no origin remote. Codex native tools use
-its workspace-write sandbox; Claude native file tools use restricted mode. Orbit does not bypass
-provider permissions. This is not equivalent to a container or a hostile-code sandbox. Explicit
-`--public-web` (or the matching new-task checkbox) permits public research: Codex receives live
-search and sandbox network access; Claude receives WebSearch/WebFetch. Network access is broader
-than a URL allowlist. It does not authorise authenticated account access, orders or publication.
-Without this option, native Codex network access remains disabled. Explicit
-`--check` commands execute locally with the caller's environment and permissions, and may themselves
-run repository code. They are user-owned capabilities, not model-generated commands. Trust the
-repository and commands before opting in. Do not use production credentials in development checks.
-Native edits remain in the clone for review and do not use the artifact-mode write journal. Private
-patches, command output and provider logs may contain source or sensitive data; do not publish them.
+Native execution uses a private clone with no origin remote. Original files, ignored data and
+credentials are not copied by Orbit. The native executor retains its installed CLI configuration,
+skills, hooks and optional MCP servers; those remain user-controlled. Shell sandboxing does not
+sandbox custom hooks or external MCP services. Keep those configurations and repositories trusted.
+
+The completion reviewer uses a fresh context with read-only workspace tools and a sandboxed shell.
+Codex uses its read-only sandbox. Claude enables its Bash sandbox, requires it to be available,
+forbids unsandboxed retry and denies writes to the workspace and Orbit state. The host independently
+rejects changed workspace evidence after review. Native CLI and managed policy behaviour remain
+part of the trust boundary; this is not protection against a hostile installed CLI or local account.
+
+Explicit --check commands execute with the caller's permissions and environment. The model cannot
+change their argument lists. They are not sandboxed by Orbit and must be safe to repeat after an
+interruption. --public-web permits public research, not account access, external writes or trading.
+
+Call receipts and process identities are saved before native launch. A supervisor holds task and
+workspace leases while the native process runs. Recovery checks owned processes and saved terminal
+responses before continuing; it never treats file changes alone as a successful model response.
+Explicit user pauses survive restarts. Temporary provider failures use bounded retries; silence
+alone never kills a process or authorises replay. Arbitrarily detached jobs and externally visible
+side effects are outside an exactly-once guarantee.
+
+Historical proposals and events remain private and readable. Removed artifact execution paths are
+not replayed with new native permissions. Retained patches, tool traces, command logs, receipts and
+worker output can contain private source and user requests; do not publish them.

@@ -14,578 +14,177 @@ This is an interactive preview of the real UI, not a recording. GitHub README pa
 JavaScript, so the preview opens on GitHub Pages.
 
 
-A local task runtime for ordinary-language requests. Use **Codex alone or Claude alone**;
-neither provider has a fixed role and the other subscription is not required. Existing CLI
-authentication is reused. The runtime does not install hooks or modify host configuration.
+A local companion for **Codex CLI or Claude Code**. Orbit keeps the original goal,
+continues unfinished work, recovers interrupted calls and independently checks the conclusion.
+Either engine works alone. Brain is optional. There is one execution loop.
 
-The default mode performs bounded UTF-8 text/JSON artifact work. An opt-in repository development mode delegates native editing tools in a private Git clone and runs explicit user-owned verification commands. It is a running
-program with SQLite state, a serial queue worker, provider adapters, file reconciliation and
-a deterministic feedback loop. It is not a skill bundle or a workflow document interpreter.
+## Start
 
-## Simplified loop (preview, 2026-11-02)
-
-Orbit is being reduced to four jobs: **fix the goal, fix the definition of done, keep the executor
-going to the end, and check the completion claim against that definition** (did it do it · what is
-missing · what is wrong · did it drift). Select the preview path explicitly:
-
-```sh
-cosmos-orbit start --simplified --development --provider codex --workspace /path/to/repo \
-  --check '["python3", "-m", "unittest", "discover"]' \
-  --done "D1 …" --done "D2 …" "Your request"      # omit --done: the executor proposes it on turn 1
-cosmos-orbit feedback TASK_ID --queue "…"          # same session resumes; --done replaces the definition
-```
-
-One task is one executor session. There is no planner call and no manager loop. After every executor
-turn the host runs your fixed checks; the independent reviewer is called **once**, only when the
-executor claims completion and every check passes. It returns `items` (met / unmet / unclear with
-evidence), `extra`, `missing`, `fix` and `question`; the host, not the model, derives the outcome.
-Stops are `verified`, `needs_input` (a question, scope drift, a missing definition, or files changed
-after verification), `stalled` (no progress across two resumes, or the turn limit), `interrupted`
-(a CLI error) and `paused`. **No stop is time-based.** States: received · working · checking ·
-verifying · verified · needs_input · stalled · interrupted · paused.
-
-The dashboard and `watch` show, per task, the request text, the completion checklist (✓ met · ✗ unmet
-· ? unclear · ○ not reviewed) with fixed-check exit codes, the reviewer's verdict, the session stream
-and the stop reason as the first line. In the new-task form, tick *Simplified loop* to enter the
-completion definition and turn limit. Existing tasks keep their recorded states and are not migrated;
-the sections below describe the legacy planner/manager path, which remains the default until the
-shared measurement (`scripts/orbit/practicality_ledger.py`) closes.
-
-## Install
-
-Requires **macOS or Linux, Python 3.9+, and an installed/authenticated Codex CLI or Claude Code**.
-Windows is not currently supported because the runtime uses POSIX file locks.
-
-Install and launch from source:
+Requires macOS or Linux, Python 3.9+, Git, and an installed, authenticated provider CLI.
 
 ```sh
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
-./install.sh --launch  # install and immediately open the interactive launcher
-# On later runs:
+./install.sh --launch
 cosmos-orbit doctor
-cosmos-orbit
+cosmos-orbit start --provider codex --workspace /path/to/repo \
+  --check '["python3", "verify.py"]' 'Your complete request'
 ```
 
-The installer creates a dedicated virtual environment at `~/.local/share/local-harness-app/venv`
-and launchers at `~/.local/bin/cosmos-orbit` and `~/.local/bin/harness`. It installs the browser asset, starts no services and does
-not alter provider credentials or shell configuration. If needed, add `~/.local/bin` to your PATH.
-Python packaging tools may be downloaded during installation; runtime Python dependencies are empty.
-If your Linux distribution ships `venv` separately, install its Python venv package first.
+`--workspace` must be a clean, committed Git repository root. Orbit makes a private clone without
+an origin remote. The source checkout, uncommitted and ignored files are not copied or changed;
+submodules are currently unsupported. Review and transfer the resulting patch yourself. Orbit
+never commits, pushes or deploys task changes.
 
-Alternatively, use an existing pipx installation:
+Use `--provider claude` for Claude alone. Executor calls keep the engine's native settings,
+project guidance, skills and memory behaviour. Native permissions remain in force. The shell
+runs inside the native CLI sandbox; Claude requires its sandbox and cannot retry unsandboxed.
+`--public-web` explicitly permits public research; it does not authorise account writes or orders.
+Custom MCP servers and hooks remain user-controlled and are outside the shell sandbox boundary.
+Project settings that are uncommitted or ignored are absent from the clone; native memory keyed
+to a checkout path can differ from a direct terminal session.
+
+`--check` is optional and repeatable. Each value is a JSON argument array owned by the user;
+the model cannot replace it. These trusted commands run locally in the clone with the user's
+permissions, without an implicit shell. They must be safe to repeat after an interrupted check.
+Without fixed commands, Orbit still records the workspace fingerprint and independently reviews
+the completion claim; it does not pretend that a test suite was configured.
+
+## The loop
+
+1. Keep the **original request and every correction**. The mandatory G0 criterion checks the whole
+   request even when an executor's proposed checklist misses something.
+2. Freeze up to six explicit `--done` items, or obtain them from the first executor response.
+   There is no separate planner call. A later `feedback --done` explicitly replaces the checklist.
+3. Resume the owned native session while work remains. A failed fixed check returns its real
+   failure output directly to the executor, without paying for a reviewer first.
+4. When the executor claims completion and current fixed checks pass, use a fresh context to
+   inspect the actual workspace and run independent, read-only counterexamples. Missing work
+   returns to the executor. Scope drift or an essential question is shown to the user.
+
+The reviewer must produce evidence for every completion ID. Empty evidence cannot pass. A
+successful native tool observation is required for `verified`; a claim that tests were run is
+insufficient. Read-only review cannot change the fixed commands or implementation, and any
+workspace change during review invalidates the evidence. Review is proportional to the stated
+task, rather than an invitation to keep expanding it. These checks reduce unsupported completion
+claims; they are not mathematical proof of arbitrary software correctness.
 
 ```sh
-pipx install git+https://github.com/honeyground-org/cosmos-orbit.git
-cosmos-orbit
+cosmos-orbit start --provider claude --workspace /path/to/repo \
+  --done 'The requested behaviour works for the stated inputs' \
+  --max-turns 8 --queue 'Your request'
+cosmos-orbit worker --background
+cosmos-orbit feedback TASK_ID 'Keep the original purpose; also handle this case.'
+cosmos-orbit verify TASK_ID
 ```
 
-To update, obtain the newer source and rerun `./install.sh`. To uninstall, remove the installed
-launcher and the `local-harness-app` installation directory. Private task data under
-`~/.local/share/local-harness` is retained. Use `HARNESS_INSTALL_DIR` and `HARNESS_BIN_DIR` to choose
-absolute installation paths. An unrelated existing launcher is never overwritten.
+`verify` rechecks a saved result without rerunning implementation. Failed checks or unmet
+requirements remain visible for feedback. Execution stops as `verified`, `needs_input`,
+`stalled`, `interrupted` or `paused`; active phases are `received`, `working`, `checking`,
+and `verifying`. The executor-turn limit defaults to eight and is explicit, not a clock deadline.
+Repeated unchanged files, remaining work and observed tool evidence can report `stalled`.
+A supported negative research result can be a valid conclusion.
 
-## Start using it
+## Recovery and continuity
 
-Run `cosmos-orbit commands` for a grouped command reference. It is also available as **Command reference**
-in the launcher and **Commands** in the browser header. Viewing help makes no model calls.
+Orbit saves a durable native-call receipt **before launch**: its owned session, private output
+paths and process identity. A small supervisor retains the task/workspace locks and saves the
+exit receipt even if the foreground app dies. Native tools do not need to preserve those locks.
 
-Run `cosmos-orbit` without a subcommand for the interactive launcher.
-Choose a new task, browser dashboard, terminal monitor, worker, or an existing task's engine/model
-selection. Task setup asks for an installed CLI, CLI-default or explicit model ID, workspace,
-ordinary-language request, and immediate execution or queueing. The launcher prints the state-store
-location. `--home PATH` works with the launcher too. Noninteractive callers use explicit subcommands.
-The model selector currently accepts an ID; it does not yet discover account-specific model lists.
+When the worker or app starts again:
+
+- A still-live owned process is allowed to finish. Recovery never starts a competing executor.
+- A terminal response already saved by the CLI is recovered before requesting any new work.
+- An incomplete response resumes the owned session with the original goal, corrections and
+  retained files. The executor is told to inspect them and continue only missing work.
+- Interrupted completion review reruns current fixed checks and recovers or repeats the independent
+  review. It does not rerun implementation merely because the reviewer was interrupted.
+- Explicit provider usage limits and temporary connection failures record a retry time. The worker
+  waits and resumes when it is due, with at most five consecutive automatic failure retries.
+  An explicit reset time in supported CLI messages is honoured. Silence is never a retry signal.
+
+Opening the interactive `cosmos-orbit` app starts the local worker for previously authorised work.
+`worker --background` keeps it running after the terminal closes. A foreground task deferred by a
+provider limit also starts a background worker so the retry does not require another instruction.
+No operating-system login service is installed. Reopening the app after a computer restart starts
+recovery. Native sessions, filesystem and provider availability still determine what can be recovered;
+arbitrarily detached jobs and external side effects are not an exactly-once execution guarantee.
 
 ```sh
-cosmos-orbit doctor
-cosmos-orbit config --provider codex  # optional: choose once; a single installed CLI is auto-selected
-cosmos-orbit start --provider codex --workspace /path/to/workspace \
-  'Create settings.json with language set to en and retries set to 3.'
-# Or use --provider claude. No second provider is called automatically.
-cosmos-orbit status TASK_ID
-cosmos-orbit feedback TASK_ID 'Change retries to 5; keep the language unchanged.'
+cosmos-orbit pause TASK_ID
+cosmos-orbit resume TASK_ID
 cosmos-orbit handoff TASK_ID
-cosmos-orbit resume TASK_ID
-cosmos-orbit events TASK_ID
-cosmos-orbit recover TASK_ID --keep-current-files  # only for a conflicted pending action
+cosmos-orbit switch TASK_ID --provider claude
 ```
 
-After configuring a default provider, omit `--provider` from ordinary requests.
-`--plan-only` records an interpreted goal, constraints, scope and acceptance checks without
-editing workspace files. `--provider` selects an installed provider; `--model` is optional.
-The configured role split is not prescribed. A feedback turn can specify `--provider` to
-switch provider while retaining the original request, corrections and contract history.
+A user pause or Ctrl-C is preserved. Automatic recovery never clears it. Engine/model switching
+applies at a safe boundary and retains the original request. Context measurements and advisory
+thresholds remain visible; a manual handoff retains the goal, checklist, corrections and evidence.
+Native CLI compaction continues normally. There is no extra automatic model handoff loop.
+
+## Observe the same work
 
 ```sh
-cosmos-orbit start --provider claude --workspace /path/to/workspace --queue \
-  'Create a short onboarding checklist in onboarding.md.'
-cosmos-orbit worker                 # continue queued work, Ctrl-C to stop the worker
-cosmos-orbit worker --once          # process the current queue once
-cosmos-orbit list                   # no model call
-```
-
-The worker is an ordinary foreground process that can be supervised by the user's service
-manager. No service is installed automatically. An idle worker makes no model calls.
-
-## Continue repository development
-
-Use `--development` for a clean, committed Git repository. This is an opt-in capability grant for
-local implementation in a private clone, plus each explicitly supplied verification command.
-The original working tree is never used as the execution directory. No changes are copied back,
-committed, pushed or deployed by Orbit. Uncommitted files, ignored files, virtual environments and
-submodules are not copied; submodule repositories are rejected in this pilot.
-
-```sh
-cosmos-orbit start --development --provider codex --workspace /path/to/repo \
-  --handoff-file /path/to/HANDOFF.md \
-  --check '["python3", "-m", "unittest", "discover"]' \
-  --plan-only 'Implement the remaining change described in the handoff.'
+cosmos-orbit dashboard
+cosmos-orbit watch --once
 cosmos-orbit status TASK_ID
-cosmos-orbit resume TASK_ID
+cosmos-orbit events TASK_ID
+cosmos-orbit result TASK_ID
 ```
 
-`--provider claude` also works independently. Codex uses its workspace-write sandbox with network
-access disabled by default. Explicit `--public-web` enables Codex live search and sandbox network
-access, or Claude WebSearch/WebFetch, for public research. Claude uses restricted file tools with edit permission, safe mode and no shell tool;
-Orbit runs the declared checks separately. These modes require CLI versions that support the flags;
-unsupported invocations stop without permission bypass or provider fallback.
+The terminal and engine-room view use the same task store, completion checklist, call history,
+fixed-check exit codes and stop/retry reason. Effects represent observed execution and transport;
+unknown context and remote progress remain unknown. The six-language view respects reduced motion.
+Use the same `--home PATH` for the app, worker and observers. Observation does not start model work.
 
-Repeat `--check` for multiple JSON argument arrays. These are trusted local programs run with your
-account permissions, without an implicit shell, in the clone. They can execute repository code;
-they are **not sandboxed by Orbit**. Supply only commands and repositories you trust. The model
-cannot replace the command list. Use a new task to change that list. Dependencies must already be
-available to these commands; Orbit does not automatically install them or copy secrets.
+The dashboard binds to `127.0.0.1` and validates its host, origin and per-launch token. It is a local
+single-user interface, not a public server. Do not expose it through a proxy.
 
-Development `--plan-only` creates the clone and records the request and command contract without a
-model call or command execution. `--queue`, the worker, pause, feedback, model switching and context
-handoffs use the existing durable task store. Adviser sessions are not yet supported in this mode.
-Feedback retains the fixed command list and permits another bounded implementation cycle.
+## Optional memory and imported work
 
-The browser **New task** form creates a development task from a clean Git repository and fixed
-verification commands, then queues a persisted execution plan. With a worker running, execution
-continues automatically after planning. **Pause for my plan approval** is optional; it is not the
-default. In the terminal, `plan TASK_ID --auto` generates a plan and continues execution;
-`plan TASK_ID` pauses for review, and `approve TASK_ID` queues that reviewed plan.
-`start --plan-first` also opts into review. Public-web permission is explicit in both interfaces.
-Plans show intended steps, not fabricated per-step completion. Actual provider tool calls and
-check start/finish events drive the live layer interactions. Idle sessions do not simulate traffic.
-Use `result TASK_ID` or the task inspector to read a published result snapshot without an editor.
-Native turns report remaining work and a next action separately from verification. After the
-fixed checks, a manager call in a separate fresh context evaluates the original goal, corrections,
-current file excerpts, recorded changed paths, bounded native tool evidence, report and check outputs. It uses the selected engine;
-it does not silently introduce another provider. The manager cannot execute tools or alter checks.
-
-The manager records an evidence assessment for every user requirement. Planner-generated acceptance
-items describe proposed methods; they do not silently add mandatory deliverables. Planning, execution
-and evaluation receive the actual native adapter capabilities. In particular, Claude file-only execution
-returns to Orbit for fixed checks instead of being sent back to run unavailable shell commands.
-The manager receives the recorded Git changed-path list independently of bounded file excerpts.
-Native tool evidence is limited to the latest executor call and explicitly bounded; it does not prove
-that no unobserved action occurred. Reasoning blocks are excluded.
-
-A structurally inconsistent manager verdict receives one fresh assessment using the same evidence
-and validation error, without replaying implementation. Both responses and usage are recorded.
-Failed checks, stale files, missing criteria and unsupported completion remain rejected; a second
-invalid assessment preserves the interruption for inspection. There is no time-based cutoff.
-
-`continue` supplies a concrete
-next action and strategy to the next native turn. `concluded` requires all criteria to be met with
-cited evidence and current passing checks before **needs_review**. `needs_input` records an essential
-question. Unsupported completion claims are rejected; a repeated unchanged tree and next action,
-or the execution attempt limit, stops with pending work preserved. A supported negative research
-finding is a valid conclusion. These model assessments are not mathematical proof of goal completion.
-
-Use `cosmos-orbit assess TASK_ID` or **관리자 평가 후 이어가기** in the inspector to reassess an
-existing idle result and continue feasible work. This explicitly reruns its fixed checks. Older
-results are labelled as lacking manager assessment until evaluated. `evaluation_started` and
-`evaluation_finished` events, executor/manager sessions and per-criterion evidence appear in status
-and the browser. The file evidence bundle is bounded; omitted content remains unverified.
-
-After each native turn Orbit records command exit codes and private output logs.
-`status` shows the private workspace, base commit, changed paths, a tracked-files patch and separately
-listed untracked files. Inspect those files and the patch before transferring selected changes to
-your original repository. The engine-room inspector shows the same evidence. The current manager
-loop applies to development mode, not the bounded artifact mode.
-
-If native execution is interrupted, Orbit preserves the clone and does not replay the uncertain
-turn automatically. Inspect files/logs, then use `feedback TASK_ID 'Inspect the retained changes and
-continue ...'` to authorise another attempt. Child processes inherit task/workspace locks to prevent
-a second executor taking over while an orphaned direct child is still running. This does not manage
-arbitrarily detached background jobs; tasks must not launch them. A verification interruption can be
-retried with `resume`; declared checks should be safe to repeat.
-
-Observation never reruns verification commands. It hashes tracked and non-ignored untracked files
-and marks changed evidence stale. Ignored dependency contents, the external environment and service
-state are not covered by this fingerprint. The clone is execution isolation, not a security boundary
-against hostile code. Native edits are not part of the artifact mode's compare-before-write journal.
-
-On 2026-10-29, isolated live Codex and Claude runs each fixed a small Python bug, passed the explicit
-behaviour checks and preserved the source checkout. Controlled private probes covered repair,
-attempt limits, pause/continue, fixed commands, plan-only, stale evidence, interrupted-turn replay
-prevention and feedback recovery. These small pilots do not establish general development productivity.
-
-## Observe and intervene
-
-```sh
-cosmos-orbit watch --lang en          # live terminal view
-cosmos-orbit watch --once             # plain snapshot, suitable for redirected output
-cosmos-orbit watch --task TASK_ID
-cosmos-orbit dashboard --lang en      # loopback browser UI, opens automatically
-cosmos-orbit dashboard --no-open      # print URL without opening a browser
-cosmos-orbit pause TASK_ID            # request pause at a safe boundary
-cosmos-orbit resume TASK_ID           # clear pause and execute in this terminal
-```
-
-Both views show **only tasks and sessions registered in the selected harness state store**.
-The engine-room view maps managed sessions to selectable isometric execution modules connected
-to a shared state core. A module ring shows measured context relative to its handoff threshold;
-unknown context remains unfilled. Status lights and execution signals follow observed runtime state.
-Drag to rotate the view, or use the numbered session buttons. Click a module for the task plan,
-evidence, model identity, context, conversations, timeline and interventions. Eight modules are
-shown per page, with explicit navigation for the remaining sessions. Native task states, not
-percentage estimates, determine activity. Idle and completed sessions are not animated as busy.
-They do not scan unrelated terminals or attach to external sessions. The browser shows goals,
-session bindings, verification evidence, consultation messages and recent state changes.
-An active recorded state without its executor lock is marked as executor absent. Completed
-artifacts are rechecked without modifying them; changed evidence is displayed as stale.
-
-Browser feedback is queued durably. Pause waits for the current model call or file application
-to reach a safe boundary; it does not kill the provider midway. Continue clears the pause request.
-A running `cosmos-orbit worker` processes queued work; otherwise the UI explicitly reports that the
-request is waiting for a worker. Opening a monitor never starts model work. Closing it leaves
-independent tasks running. Use the same `--home PATH` for the worker and both views.
-
-The browser listens only on `127.0.0.1`, with host validation, a per-launch request token and
-same-origin mutation checks. It is a local single-user observer, not a remotely hosted service
-or a multi-user authentication boundary. Do not expose its port through a public proxy.
-
-## Switch engine or model
-
-```sh
-cosmos-orbit switch TASK_ID --provider claude --model MODEL_ID
-cosmos-orbit switch TASK_ID --provider codex  # reset to this CLI's default selection
-```
-
-The launcher and mission detail panel offer the same controls. Selection requests are durable;
-the latest unconsumed request replaces the preceding one. The worker or `resume` applies a selection
-at a safe boundary, after any pending file batch is reconciled. Paused work remains paused.
-The fixed goal, acceptance checks, feedback, attempt budget and history are retained. A fresh
-target-provider session receives the durable task context. Completed tasks are not reopened simply
-to change a selection, and conflicted pending writes still require explicit recovery.
-
-Requested models and models reported by the CLI are separate fields. Historical calls and CLI
-outputs without model identity are marked unreported, never inferred from a default. The next
-CLI invocation checks model availability; unsupported selections interrupt the task without
-silently falling back. This control currently applies to the task executor, not its named advisers.
-
-## Distribution direction
-
-Cosmos Orbit is a standalone open-source runtime maintained at
-[honeyground-org/cosmos-orbit](https://github.com/honeyground-org/cosmos-orbit). Provider adapters, durable state, execution and observation are separate modules;
-no personal paths, organisation services, Brain installation or fixed AI role split are required.
-Local Brain integration will be optional. Currently supported providers are Codex and Claude;
-additional adapters and automatic service installation are not implemented yet.
-
-### Memory independence and optional Brain integration
-
-Orbit and Brain remain independently usable. `--memory off` is the default: Orbit owns its task
-contract, authority, feedback, checkpoints and verification without an external memory service.
-No global host settings or existing memory files are changed.
+`--memory off` disables Orbit's memory bridge; it does not disable native CLI memory/settings.
+`native`, `brain` and `both` provide bounded, attributed context. `--remember` with Brain queues
+historical checkpoints, with idempotency and conflict handling. Memory delivery never changes a
+failed task into a completed task, and an acknowledgement is not proof of completed embedding.
 
 ```sh
 cosmos-orbit config --brain-command '["/path/to/brain-mcp"]'
-cosmos-orbit start --development --provider codex --workspace /path/to/repo \
-  --memory both --remember --project-id my-project \
-  --check '["python3", "-m", "unittest", "discover"]' 'Implement the requested change.'
+cosmos-orbit start --provider codex --workspace /path/to/repo \
+  --memory both --remember --project-id my-project 'Your request'
 cosmos-orbit memory TASK_ID
-cosmos-orbit memory TASK_ID --flush
+cosmos-orbit start --workspace /path/to/repo --provider codex \
+  --handoff-file /path/to/HANDOFF.md 'Continue the remaining work.'
 ```
 
-Memory modes are `off`, `native`, `brain` and `both`. Configure a stable installed MCP executable
-or the source installation's `bin/brain-mcp` launcher. Orbit calls the MCP recall path; it does not
-substitute the Brain CLI's different lexical retrieval path. Configuring a command does not run it.
-Missing or slow Brain service is reported in the task's memory notes while task state stays intact.
+Imported handoffs are historical context, not fresh authority. The original text, source and hash
+are retained. Current files and the current request take precedence. This starts a managed task;
+it does not attach to an unrelated CLI session or scan other conversations.
 
-`native` is a **read-only Markdown context bridge**, not full native automatic-memory generation.
-It reads the selected engine's memory directory: Codex home `memories`, or Claude's original-project
-memory directory, including a recognised `autoMemoryDirectory` override. The disposable clone never
-becomes the memory project's identity. Use repeatable `--native-memory-dir /path/to/memory` for a
-custom layout or an inherited workspace memory directory. Known host memory opt-outs are respected;
-Orbit does not activate host generation, import all settings or run memory hooks. Managed policy and
-all future host storage formats are not claimed to be supported. Original files remain unchanged.
+## Existing records and installation
 
-The bridge selects bounded Markdown excerpts and records source paths, content hashes, truncation
-and context-preparation latency. Native duplicates are removed by excerpt content. Brain results keep
-the server's provenance and freshness data; legacy text results are explicitly unscoped/unversioned.
-Structured `orbit-1` support is negotiated through `brain_capabilities`. An opaque project ID is kept
-across clone execution and handoffs; an explicit `--project-id` wins, otherwise it derives from a
-credential-free origin identity or the original local path. Unscoped old memories can still be returned
-by Brain and must not be treated as project-specific facts.
+Old task/event/message history stays readable. An old native-development task is upgraded only
+when execution is requested; old conclusions are not relabelled as new verified evidence. Historical
+artifact proposals and pending file batches are retained for inspection rather than replayed with
+broader native permissions. `recover --keep-current-files` can abandon a historical pending proposal
+without overwriting files. The planner, per-turn manager and artifact execution loops are removed.
 
-Brain recall runs at model-call boundaries, including repair context. The development executor may
-request up to two additional read-only recalls, neighbour lookups, timeline or paginated analysis
-reads per turn, with six per task. These turns count against the task's attempt budget. Analysis
-responses are bounded evidence, not a claim that the entire corpus was analysed. No automatic
-`useful` feedback is sent: context preparation, successful work and proven memory usefulness differ.
-MCP operations have a shared ten-second connection/request deadline and bounded response size.
+`cosmos-orbit` is the main command and `harness` remains an alias. Existing `HARNESS_HOME`,
+`HARNESS_INSTALL_DIR`, `HARNESS_BIN_DIR` and private storage paths remain supported. Run `install.sh`
+again to update, or use `pipx install git+https://github.com/honeyground-org/cosmos-orbit.git`.
+The installer starts no service by itself; `--launch` opens the app. Uninstalling the application
+retains private task data. No host auth files, global CLI settings or shell profiles are rewritten.
 
-`--remember` queues historical verification checkpoints in the private task store. They contain bounded excerpts of the
-original request and recent corrections (with hashes), plus recorded check outcomes, not unverified lessons promoted to facts.
-Delivery uses a unique Orbit namespace and immutable idempotency key. The server must advertise the
-`orbit-1` safe JSON write contract; older servers leave checkpoints pending locally. Matching `stored`
-acknowledgement completes delivery; word indexing, embedding and serving states remain separately
-visible. Name/version conflicts never trigger an overwrite. Failed deliveries retain their payload,
-back off and stop after five attempts; the worker retries them, or use `memory TASK_ID --flush`.
-A lost acknowledgement can be retried with the same payload/key. Memory delivery never changes a
-failed task into a completed task.
+Private SQLite state, native transcripts, call receipts, patches and worker logs must not be published.
+Interrupted calls may lack usage; unknown duration and usage are not fabricated. The repository
+has no runtime Python dependencies. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-Native context plus MCP transport and durable delivery have isolated process probes. Existing live
-Brain recall was exercised. Safe-write lifecycle checks use a controlled MCP fixture until the Brain
-contract implementation is available; they are not evidence of a live Brain write or a quality gain.
-The native bridge does not yet reproduce every host's automatic write/generation behaviour, publish
-model-authored Brain analyses, or establish comparative long-session productivity.
-
-Source code and private runtime data remain separate. Do not publish task stores, memory packets,
-provider transcripts or private patches. Brain's corpus and indexes remain owned by Brain; Orbit never
-writes its databases directly. The source remains Apache-2.0.
-
-## Automatic communication between sessions
-
-Optionally bind named advisers to a task. Names are user-selected, not fixed product roles;
-both sessions can use the same provider, or different providers when available.
+The public interactive demo is generated from the installed UI using synthetic fixtures only:
 
 ```sh
-cosmos-orbit start --provider codex --peer reviewer=claude --workspace /path/to/workspace \
-  'Ask reviewer how to verify the JSON types, then create settings.json with enabled true and language en.'
-cosmos-orbit messages TASK_ID
+python3 scripts/build_demo.py
+python3 scripts/build_demo.py --check
 ```
 
-When the executing model requests a consultation, the runtime persists the question, wakes its
-own named peer session, records the reply and automatically resumes the original session with it.
-No user prompt to read a mailbox is needed. Messages move through `queued`, `in_flight`,
-`answered` and `consumed`; `in_flight` is not proof of receipt or completion. Peer replies are
-advice, not user permissions, and cannot change the fixed acceptance contract.
-
-Delivery failures wait 30 seconds before retry, with at most two delivery attempts. A running
-worker handles retries; foreground users can `resume` later. A bounded three consultation rounds
-and duplicate-question checks prevent endless acknowledgement loops. A crash can repeat a
-read-only model consultation, so this is not an exactly-once inference or billing guarantee.
-
-This pilot wakes **runtime-owned sessions**. It does not attach to arbitrary already-open CLI
-terminals or inject keystrokes. Existing-session adapters need explicit capability negotiation.
-Without configured peers, no other session or provider is invoked.
-
-## What the default artifact runtime owns
-
-1. The selected AI interprets the request and follow-up corrections into a versioned contract.
-2. The runtime validates the scope and requires a meaningful quote supporting local write intent.
-   This is provenance for an AI interpretation, not a deterministic proof of natural-language consent.
-3. The AI proposes full file contents; it does not write the target workspace itself.
-4. The runtime checks paths and original hashes, persists the pending action, and replaces files.
-5. Fixed text/JSON checks run locally. Failed results are fed into another execution turn;
-   the executor cannot replace the acceptance criteria to make its work pass.
-6. After three applied attempts by default, unresolved work becomes blocked. Authentication,
-   malformed responses and process failures become interrupted, not completed.
-7. User feedback reopens the task, preserves its history, and creates a new contract revision.
-
-Feedback submitted while a model is running is stored in a durable inbox. The runtime consumes it
-at the next safe boundary, discarding an un-applied model proposal when superseded. A file batch
-already being applied is reconciled before the new instruction; feedback does not automatically
-undo completed writes. `status` exposes corrections still queued.
-
-## Automatic context handoff
-
-The runtime checks each owned executor/adviser session after a call and before its next call.
-When its measured context reaches the threshold, it saves a durable handoff, starts a fresh native
-CLI session, injects the handoff and continues automatically. File application is reconciled before
-handoff; completed tasks do not create unnecessary new sessions.
-
-- **Claude default: 500,000 tokens.** Read the latest assistant request's input tokens, including
-  cache creation and cache reads. The final result's aggregate usage is not current context.
-- **Codex default: min(500,000, 80% of its reported effective context window).** Read
-  `last_token_usage.total_tokens` from the owned session's current native token-count event, never
-  `total_token_usage`. If the window is unavailable, the configured default is 500,000.
-- An explicit `--context-budget NUMBER` overrides the default for that task. Existing explicit
-  budgets remain unchanged. The interactive launcher also asks for an optional threshold.
-- Measurements are taken at call boundaries, not continuously during a generation. Claude reports
-  the latest request input; Codex reports the latest request total. These scopes are labelled and
-  are not presented as identical billing metrics. Unsupported/missing measurements remain unknown;
-  the runtime does not fabricate a percentage or fall back to cumulative usage.
-
-```sh
-cosmos-orbit start --provider claude --context-budget 500000 --workspace /path/to/workspace 'Task request'
-cosmos-orbit resume TASK_ID --context-budget 500000
-cosmos-orbit handoff TASK_ID  # manual checkpoint; pending writes must first be reconciled
-```
-
-The handoff preserves the fixed contract (goal, constraints and checks), current verification,
-application attempts, recent corrections, last execution summary and next phase. Development handoffs
-also retain the full mission goal, execution plan, remaining work and manager evaluation. Current files and
-peer replies are supplied by the next call. Full feedback, previous sessions and event history remain
-in private storage; only the latest eight corrections are copied into the compact handoff packet.
-The original full request and correction history remain available to the planning phase. Model prose
-in a handoff is historical context, not new authority. Handoffs are journalled before clearing session
-bindings; retries reuse the saved handoff rather than losing it or incrementing the handoff count again.
-`status`, `watch` and browser session details expose measured tokens, threshold and handoff count.
-
-The context threshold is not a cumulative token or cost budget. Interrupted calls can lack usage
-metadata, and prompt-size preflight/reservation is not implemented. Manager evaluations use fresh
-contexts; their calls and reported usage are included in the recorded metrics.
-
-Native CLI compaction remains enabled. Compaction and resuming an existing session are not the same
-operation as this fresh-session handoff. The installed project handoff guide was inspected: it prepares
-notes and asks a human to clear/start another chat, so it cannot perform this unattended runtime path.
-The runtime adds only durable task-state transfer and native new-session creation; it does not install
-or change user skills, copy personal memory paths, or require Local Brain. This applies to owned sessions,
-not arbitrary external CLI terminals. Codex rollout metadata is version-sensitive; missing or changed
-formats are shown as unknown instead of being mistaken for zero.
-
-References: [Claude usage scopes](https://code.claude.com/docs/en/agent-sdk/cost-tracking),
-[Claude CLI session/streaming interfaces](https://code.claude.com/docs/en/cli-reference),
-[Codex developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
-
-## State and recovery
-
-Private state defaults to `~/.local/share/local-harness`; use `--home PATH` or `HARNESS_HOME`
-to isolate it. The SQLite database, event history and provider logs include task text and
-artifact contents. Do not publish that directory. State is kept outside the code repository.
-
-A task lock and workspace lock prevent concurrent runtime writers. Before/after hashes let
-an interrupted file batch resume without rewriting an already applied file. An unexpected
-external edit stops recovery for inspection. A batch is not a cross-file atomic transaction;
-its pending action is retained so a partial batch can be reconciled. Original contents remain
-in the stored action history for manual recovery. External processes are not locked by this runtime.
-
-`status` rechecks the contract and reports `stale` when a previously completed result no longer
-passes. `resume` then records `stale` and stops; it does not revert user edits to an older goal.
-Use feedback to request new work. If checks already hold before any change, the distinct
-`already_satisfied` state reports that no work was performed, rather than claiming an implementation.
-Historical completion evidence is
-retained; it is not a claim that files can never change afterwards.
-
-For an interrupted batch with conflicting external changes, `recover --keep-current-files` abandons
-the pending proposal and preserves every current file. The proposal and original contents remain
-in the event journal. Submit feedback to replan; no automatic rollback overwrites external work.
-
-Attempt and context-budget options are persisted per task. Legacy `--timeout` values are accepted for compatibility but never impose an execution deadline. Explicit options on a later
-`resume` or `feedback` update that task; omitted options retain their stored values.
-
-## Pilot boundaries
-
-- Checks currently support `contains`, `not_contains`, `equals` and `json_equals` (JSON Pointer).
-  Completion means those fixed checks passed. It does **not** prove arbitrary software correctness,
-  subjective quality or satisfaction of every natural-language intention. Unsupported verification
-  must be surfaced as a question, not replaced with a weaker test.
-- Initial context is bounded to 30 files / 48 KB with a 500-entry scan ceiling. Truncation is explicit.
-  Individual artifacts are capped at 100 KB, changes at 300 KB per batch and 15 files per contract.
-- Paths with symlinks, hard-linked target files, parent traversal, credentials, host instructions,
-  and runtime directories are rejected. This is not a security sandbox against hostile local users.
-- The default artifact executor provides no shell execution, file deletion, PR/merge/deploy, CI watcher or infrastructure apply. A request requiring them must remain unresolved.
-- Optional Brain MCP retrieval and safe-contract checkpoint delivery are implemented as a pilot.
-  Workflow plugins, durable external-job watchers and evaluated policy promotion remain future work. Feedback is persisted and affects the current
-  task; there is no claim of automatic cross-task learning yet.
-- Existing CLI feature support varies. `doctor` reports installed versions; an unsupported CLI
-  invocation stops with its local log path. There is no silent switch to another provider.
-
-The artifact slice and opt-in isolated development pilot are implemented. The broader harness is not production-complete.
-
-## Verification on 2026-10-28
-
-Validated with installed Codex CLI 0.164.0 and Claude Code 2.1.312:
-
-- Each provider alone created a JSON artifact, then applied a natural-language correction while
-  retaining the other requested value. The local runtime verified the results.
-- A queued task ran through the worker. A task switched from Codex to Claude after a checkpoint.
-- A low context-budget probe triggered reconstruction from a checkpoint and completed its task.
-- Codex requested a Claude adviser reply; the runtime delivered it, resumed Codex and completed
-  the artifact without manual message relay.
-- Private isolated fault probes checked wrong-result rejection, repair with fixed checks,
-  concurrency, interrupted batches, conflicting external edits, queued feedback and strict JSON types.
-- Observer probes checked managed-only projection, model-free stale-evidence detection, HTTP
-  host/origin/token validation, revision conflicts, queued feedback and pause/continue controls.
-  A delayed executor probe paused before applying its pending proposal and continued without
-  another model call. Browser rendering was inspected against real pilot task/session records.
-- Interactive terminal setup was exercised through engine/model selection and durable queueing.
-  An isolated controlled-provider probe switched engines during execution, reconciled the pending
-  artifact, retained the fixed contract and repaired it with the selected provider/model.
-
-These are pilot checks, not evidence of lower cost or better outcomes across real development work.
-
-Automatic handoff verification: real Codex and Claude runs each crossed a deliberately reduced
-1,000-token threshold, saved a handoff, obtained a different session ID and completed the fixed
-artifact checks. Isolated probes covered the exact 500,000-token boundary, cache accounting,
-aggregate-usage rejection, adviser sessions and retry after a fresh-session failure. No 500,000-token
-live workload was generated solely for testing.
-
-## Project files
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development and verification guidance, and
-[SECURITY.md](SECURITY.md) for local data boundaries. The English-only product interface does not
-translate or overwrite user-provided task content.
-
-## UI status
-
-The installed browser interface is a live isometric engine-room view backed by the selected task
-store. The earlier [design prototype](docs/design/README.md) is retained separately as a historical
-concept with illustrative data. It is not the installed runtime UI.
-The [public interactive demo](https://honeyground-org.github.io/cosmos-orbit/) is generated from the
-current runtime UI with synthetic fixtures using `python3 scripts/build_demo.py`.
-
-The engine room uses translucent layers for purpose/control, execution/exchange, context/continuity, and verification. Active sessions have rotating rings and a subtle heat-like glow (execution activity, not measured temperature). Completed sessions stay still. Hover for the full task and model identity; select a module for context and verification meters, session selection, and recorded request/response logs. Unknown context remains unmeasured. Reduced-motion preferences disable continuous animation.
-
-Each page presents eight floating session cores. Six orbit nodes map to Intake, Plan, Execute, Apply, Verify, and Done; the highlighted node is the current task stage. The cap ring represents measured context against the handoff threshold, and the core body shows passing checks. Session state and task stage are distinct: an idle adviser can belong to a completed task.
-
-Each engine has an independent connection to the Harness control tower. Transport pulses indicate newly observed model request/response events or targeted peer message transitions, not continuous traffic. Ambiguous session attribution suppresses the pulse. The initial snapshot does not replay old traffic. Peer exchanges remain routed through Harness; no direct engine-to-engine connection is implied. Page arrows appear at either edge on hover or keyboard focus and remain visible on touch devices; the footer controls remain available.
-
-Zoom the engine view with the mouse wheel or trackpad over the canvas, or use the + / − controls (55–200%). Reset restores 100% zoom and the original rotation. Zoom is retained during polling and page navigation; scrolling outside the canvas still scrolls the page.
-
-Lower layers briefly illuminate on newly observed activity: blue for control/feedback, violet for measured-context updates and checkpoints, and green for verification events. Edge lights and a vertical access path connect each pulse to the relevant layer. These indicate event delivery, not verification success or hardware activity. Initial snapshots stay quiet, repeated polls do not replay events, and reduced-motion mode uses a static highlight.
-
-The browser model picker offers CLI default, visible Codex entries from the local CLI cache, Claude family aliases, and models recorded in managed sessions. Each suggestion identifies its source; none guarantees current account access. Changing provider resets the selection. Custom IDs remain available as an explicit option. Cache parsing is bounded and optional; missing or malformed caches leave default/history/custom choices usable. Claude aliases follow the [official model configuration](https://code.claude.com/docs/en/model-config).
-
-## Continue existing CLI work
-
-Choose **Continue from a handoff** in `cosmos-orbit`, then select an engine/model and workspace.
-Supply a UTF-8 handoff document (Markdown, plain text or JSON) or paste text ending with `.END`.
-Add the current continuation request and choose Run now, Queue for worker, or Plan and inspect first.
-
-```sh
-cosmos-orbit start --provider codex --workspace /path/to/project \
-  --handoff-file /path/to/HANDOFF.md --plan-only 'Continue the remaining artifact work.'
-cosmos-orbit start --provider claude --workspace /path/to/project \
-  --handoff-text 'Goal: ... Completed: ... Remaining: ... Checks: ...' --queue
-```
-
-The original handoff content is retained in the private task request, with a source reference and
-SHA-256 recorded in `status`. Editing or deleting the original document does not change the import.
-A fresh managed session establishes a remaining-work contract and inspects current workspace evidence;
-historical completion claims and permissions are not imported as verified facts or new authority.
-This does not attach to, stop, or resume an arbitrary existing native CLI process or session ID.
-Avoid running the old session against the same files while the managed task writes to them.
-Handoffs are limited to 16,000 characters; continuation requests to 6,000. No silent truncation occurs.
-Without `--development`, the existing artifact limits still apply. Opt-in development supports native
-editing and explicitly supplied command checks as described above; deployment remains outside its scope.
-
-## Compatibility
-
-`cosmos-orbit` is the primary command; `harness` remains a compatibility alias. The internal Python
-package remains `harness`. Existing private state at `~/.local/share/local-harness` and the
-`HARNESS_HOME`, `HARNESS_INSTALL_DIR`, and `HARNESS_BIN_DIR` settings remain supported. Renaming
-the product does not move, reset or publish existing tasks. The installer reuses its existing private
-virtual environment and replaces the legacy distribution, preserving task storage.
-
-### Process observation without output
-
-Native execution, planning, manager evaluation and fixed verification commands have no elapsed-time
-cutoff. A quiet CLI is not killed for taking too long. While an owned process runs, Orbit samples its
-exit state, process-group OS states and CPU usage, and stdout/stderr size changes every five seconds.
-`status`, `watch` and the browser expose the latest observation, PID and silent duration. Observations
-older than 15 seconds, or without an active owner, are labelled not current; they are not proof of a
-live remote model. CPU activity and log changes are observations, not evidence of task progress.
-
-A CLI exit/error preserves the interrupted task for a resume decision. An OS-stopped process is
-reported separately. Silence alone does not trigger automatic termination or replay. Brief timeouts
-on diagnostic commands remain so a failed diagnostic cannot block the observer; they do not kill
-the task. Remote provider connection and reasoning progress remain unverified unless the CLI
-provides evidence. Existing pause requests still take effect at safe call boundaries.
+It makes no provider calls or runtime requests and is not evidence of real task completion or
+recovery. Process-fault probes and live-provider validation are separate. Full power-loss/network
+recovery and general long-task productivity require further real-world evidence.

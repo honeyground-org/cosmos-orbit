@@ -1,30 +1,27 @@
 """Shared, model-free command reference for terminal and browser.
 
-Ten commands (redesign 2026-11-01 §5: "commands ≤ 10"). The simplified loop — goal → executor → fixed checks →
-one independent review — is the preview path selected explicitly with --simplified; the legacy planner/manager
-path remains the default until the shared measurement (§7) closes. Legacy subcommands still exist in `--help`.
+One native execution loop owns goal preservation, recovery and completion verification. Legacy subcommands still exist in `--help`.
 """
 from html import escape
 
 GROUPS = [
-    ('Start', [
-        ('cosmos-orbit doctor', 'Check installed provider CLIs. Nothing is installed or changed.'),
-        ('cosmos-orbit start --simplified --development --provider codex --workspace /path/to/repo --check \'["python3", "-m", "unittest", "discover"]\' --done "D1 …" --done "D2 …" "Your request"',
-         'Simplified loop (preview): fix the goal and completion definition, run the executor in a private clone, run your fixed checks, then one independent review. Omit --done to let the executor propose it on its first turn. --max-turns 8 by default; there is no elapsed-time cutoff.'),
-        ('cosmos-orbit start --development --provider claude --workspace /path/to/repo --check \'["python3", "verify.py"]\' "Your request"',
-         'Legacy development path (planner and manager). Still the default while the simplified loop is measured.')]),
-    ('Observe', [
-        ('cosmos-orbit dashboard', 'Open the engine room: goal, completion checklist (✓ met · ✗ unmet · ? unclear · ○ not reviewed), fixed-check exit codes, the session stream and the stop reason.'),
-        ('cosmos-orbit watch --once', 'Print one terminal snapshot of the same projection.'),
-        ('cosmos-orbit status TASK_ID', 'Inspect a task: completion definition, verdicts, resumes, evidence and whether the verified tree is still current.')]),
+    ('Work', [
+        ('cosmos-orbit start --provider codex --workspace /path/to/repo "Your request"',
+         'Fix the original goal, execute with the native CLI, check the result and independently test the completion claim. --check and repeated --done are optional.'),
+        ('cosmos-orbit worker --background', 'Continue authorised queued work and recover interrupted calls after the terminal closes.'),
+        ('cosmos-orbit resume TASK_ID', 'Continue after a pause. Interrupted calls are reconciled with retained files and the owned native session.')]),
+    ('Inspect', [
+        ('cosmos-orbit dashboard', 'Inspect the same goals, calls, checks, recovery and conclusions shown in the terminal.'),
+        ('cosmos-orbit watch --once', 'Read one model-free terminal snapshot.'),
+        ('cosmos-orbit status TASK_ID', 'Read completion evidence, retry time, work location and process state.'),
+        ('cosmos-orbit verify TASK_ID', 'Recheck a saved result without rerunning implementation. Missing evidence is not completion.')]),
     ('Steer', [
-        ('cosmos-orbit feedback TASK_ID --queue "Updated instruction"', 'Queue a correction for the next safe boundary; the same session resumes. Add --done "…" to replace the completion definition explicitly, or --max-turns N to raise the turn limit.'),
-        ('cosmos-orbit pause TASK_ID', 'Pause at a safe boundary; resume TASK_ID continues in this terminal.'),
-        ('cosmos-orbit worker', 'Run queued work until Ctrl-C. Use the same --home as the dashboard.'),
-        ('cosmos-orbit --home /path/to/private-state dashboard', 'Select a private task store; the worker, watch and dashboard must share it.')])
+        ('cosmos-orbit feedback TASK_ID "Updated instruction"', 'Keep the original goal and add this correction. Repeated --done explicitly replaces the checklist.'),
+        ('cosmos-orbit pause TASK_ID', 'Stop at a safe boundary. A user pause is never cleared by automatic recovery.'),
+        ('cosmos-orbit handoff TASK_ID', 'Preserve goal, feedback and current evidence before choosing a fresh executor session.')])
 ]
-NOTE = ('Replace TASK_ID and /path/to/... with your values. Viewing this guide executes nothing. '
-        'Every subcommand, including legacy ones, is listed by cosmos-orbit --help.')
+NOTE = ('Use --home PATH consistently for the app, worker and observers. '
+        'Viewing help or observing a task never starts model work. See --help for engine switching, memory and historical records.')
 
 
 def terminal_guide():

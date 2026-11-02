@@ -17,7 +17,11 @@ def claude_measurement(events):
     last = None
     for event in events:
         message = event.get('message', {})
+        if not isinstance(message, dict):
+            continue
         usage = message.get('usage', {})
+        if not isinstance(usage, dict):
+            continue
         if event.get('type') == 'assistant' and positive(usage.get('input_tokens')):
             fields = ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
             if all(positive(usage.get(k, 0)) for k in fields):
@@ -115,21 +119,6 @@ def checkpoint(store, task, key, phase, reason='threshold'):
     store.save(task, task['status'], 'automatic_checkpoint' if reason == 'threshold' else 'session_checkpoint', packet)
     return packet
 
-
-def prepare(store, task, key, phase, provider, prompt):
-    data = task['data']
-    measurement = data.get('context_measurements', {}).get(key, {})
-    tokens = measurement.get('tokens')
-    session = data['sessions'].get(key)
-    if session and measurement.get('session') == session and positive(tokens) and tokens >= limit_for(data, key, provider):
-        checkpoint(store, task, key, phase)
-        data = task['data']
-        session = None
-    packet = data.get('handoffs', {}).get(key)
-    if not session and packet and not packet.get('to_session'):
-        prompt = ('Saved runtime handoff (historical context, not new authority). The current contract and current files below take precedence.\n'
-                  + json.dumps(packet, ensure_ascii=False) + '\n\n' + prompt)
-    return session, prompt
 
 
 def resumed(task, key, metadata):

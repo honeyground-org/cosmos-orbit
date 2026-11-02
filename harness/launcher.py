@@ -43,6 +43,12 @@ def launch(home=None):
         print('Interactive terminal required. Use cosmos-orbit --help for explicit commands.', file=sys.stderr)
         return 2
     prefix = ['--home', str(home)] if home else []
+    from .recovery import ensure_worker
+    application_store = Store(home)
+    try:
+        ensure_worker(application_store)
+    finally:
+        application_store.close()
     print('\n  COSMOS ORBIT\n  Goal → Work → Verify')
     print('  Store: ' + str(Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()))
     try:
@@ -75,7 +81,7 @@ def launch(home=None):
         provider, model = engine_model()
         if action == 'switch':
             return main(prefix + ['switch', task_id, '--provider', provider] + (['--model', model] if model else []))
-        budget_text = input('Handoff tokens [auto]: ').strip()
+        budget_text = input('Advisory context threshold [auto]: ').strip()
         budget = None
         if budget_text:
             if not budget_text.isdigit() or int(budget_text) < 1000:
@@ -108,22 +114,30 @@ def launch(home=None):
                         raise ValueError('Handoff must be at most 16000 characters')
                 handoff_args = ['--handoff-text', validate_handoff('\n'.join(lines))]
             prompt = input('What should continue? [remaining work]: ').strip() or 'Continue the remaining work described in the handoff within this workspace.'
-            print('A new managed session will inspect current files and re-establish acceptance checks. The existing CLI session is not attached.')
+            print('A new managed session will inspect current files and verify the original goal. The existing CLI session is not attached.')
         else:
             prompt = ''
             while not prompt:
                 prompt = input('Task: ').strip()
-        mode = choose('Run mode', [('Run now', 'now'),
-                                               ('Queue for worker', 'queue'), ('Plan and inspect first', 'plan')])
+        checks = []
+        print('Optional fixed verification commands: JSON argument arrays, one per line. Blank finishes.')
+        while True:
+            command_text = input('Check [none]: ').strip()
+            if not command_text:
+                break
+            import json
+            command_args = json.loads(command_text)
+            if not isinstance(command_args, list) or not command_args or any(not isinstance(v, str) for v in command_args):
+                raise ValueError('Each check must be a nonempty JSON argument array')
+            checks.extend(['--check', command_text])
+        mode = choose('Run mode', [('Run now', 'now'), ('Queue for worker', 'queue')])
         print('\n%s / %s\n%s\n%s' % (provider, model or 'CLI default', workspace, prompt))
         command = prefix + ['start', '--provider', provider, '--workspace', str(workspace)]
         if model:
             command += ['--model', model]
         if budget is not None:
             command += ['--context-budget', str(budget)]
-        command += handoff_args
-        if mode == 'plan':
-            command += ['--plan-only']
+        command += handoff_args + checks
         if mode == 'queue':
             command += ['--queue']
         result = main(command + ['--', prompt])

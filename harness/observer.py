@@ -269,6 +269,8 @@ def snapshot(store, task_id=None):
             goal_text = data.get('goal') if runtime_version == 3 else None
             tasks.append({'id': task['id'], 'provider': task['provider'], 'status': state,
                           'runtime_version': runtime_version, 'reason_code': reason_code,
+                          'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
+                          'recoverable': data.get('recoverable', False),
                           # v3 contract (§4.1): goal · done · done_fixed · turns · verdicts · resumes; absent (None) on v2 tasks.
                           'done': data.get('done') if runtime_version == 3 else None,
                           'done_fixed': data.get('done_fixed') if runtime_version == 3 else None,
@@ -299,7 +301,7 @@ def snapshot(store, task_id=None):
                                      'outbox': [{'id': m['id'], 'status': m['status'], 'attempts': m['attempts'],
                                                  'error': m.get('error'), 'ack': m.get('ack')}
                                                 for m in data.get('memory', {}).get('outbox', [])]},
-                          'metrics': {'calls': len(calls), 'model_seconds': round(sum(c.get('seconds', 0) for c in calls), 1),
+                          'metrics': {'calls': len(calls), 'model_seconds': round(sum(c.get('seconds') or 0 for c in calls), 1),
                                       'input_tokens': usage_input, 'output_tokens': usage_output, 'by_phase': by_phase,
                                       'elapsed_seconds': max(0, round((ended-started).total_seconds()))},
                           'recorded_status': task['status'], 'revision': task['revision'],
@@ -513,7 +515,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
             if self.headers.get('Host') != authority or self.headers.get('Origin') != origin or not self.valid_token():
                 self.respond(403, '{}')
                 return
-            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/approve', '/assess'):
+            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/verify', '/assess'):
                 self.respond(404, '{}')
                 return
             store = Store(home)
@@ -525,40 +527,23 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 if self.path == '/start':
                     prompt, root, provider = body.get('prompt'), body.get('workspace'), body.get('provider')
                     checks = body.get('checks')
-                    simplified = body.get('simplified', False)
                     done = body.get('done', [])
                     max_turns = body.get('max_turns', 8)
                     if (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 24000
                             or not isinstance(root, str) or provider not in ('codex', 'claude')
-                            or not isinstance(checks, list) or not checks or len(checks) > 12
+                            or not isinstance(checks, list) or len(checks) > 12
                             or type(body.get('public_web', False)) is not bool
-                            or type(body.get('review_plan', False)) is not bool
-                            or type(simplified) is not bool or not isinstance(done, list)
-                            or type(max_turns) is not int):
-                        raise ValueError('Provide a request, repository, provider and verification command arrays')
+                            or not isinstance(done, list) or type(max_turns) is not int or not 1 <= max_turns <= 100):
+                        raise ValueError('Provide a request, repository, provider and optional verification commands')
                     if not shutil.which(provider):
                         raise ValueError('Selected CLI is not installed')
-                    if simplified:
-                        # Validate before cloning so a bad completion definition costs nothing (same rule as the CLI).
-                        from .simple_loop import completion_items, initialize
-                        completion_items(done, [], 'user')
-                        if not 1 <= max_turns <= 100:
-                            raise ValueError('max-turns must be between 1 and 100')
+                    from .simple_loop import completion_items
+                    completion_items(done, [], 'user')
                     from .development import create
-                    task = create(store, root, provider, prompt, [json.dumps(c) for c in checks])
-                    task['data'].setdefault('options', {}).update(timeout=None, max_attempts=3, public_web=body.get('public_web', False))
+                    task = create(store, root, provider, prompt, [json.dumps(c) for c in checks], done or None, max_turns)
+                    task['data']['options'].update(public_web=body.get('public_web', False))
                     task['data']['presentation'] = {'title': prompt.strip().splitlines()[0][:240]}
-                    if simplified:
-                        # Runtime v3 preview path (goal → executor → fixed checks → one verifier); explicit opt-in like `start --simplified`.
-                        task['data']['options'].update(max_turns=max_turns, done=done or None)
-                        task['data']['plan_requested'] = False
-                        task['data']['review_plan'] = False
-                        initialize(store, task, done or None, max_turns)
-                        store.save(task, 'received', 'options_recorded', task['data']['options'])
-                    else:
-                        task['data']['plan_requested'] = True
-                        task['data']['review_plan'] = bool(body.get('review_plan', False))
-                        store.save(task, 'received', 'execution_plan_requested', {'layer': 'control', 'note': 'New task queued for planning'})
+                    store.save(task, 'received', 'options_recorded', task['data']['options'])
                     self.respond(200, json.dumps({'task_id': task['id'], 'worker_running': store.locked('worker')}))
                     return
                 task_id = body.get('task_id')
@@ -567,7 +552,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 # Hold the write reservation through revision validation and enqueue/control.
                 store.db.execute('BEGIN IMMEDIATE')
                 task = store.get(task_id)
-                if self.path in ('/feedback', '/approve', '/assess') and body.get('revision') != task['revision']:
+                if self.path in ('/feedback', '/verify', '/assess') and body.get('revision') != task['revision']:
                     self.respond(409, json.dumps({'error': 'Task changed; refresh and review before submitting'}))
                     return
                 if self.path == '/feedback':
@@ -588,19 +573,36 @@ def serve(home, port=0, open_browser=True, lang='en'):
                             return
                     message_id = store.enqueue(task_id, text, None) if text.strip() else None
                     self.respond(200, json.dumps({'queued': message_id, 'done': bool(done), 'worker_running': store.locked('worker')}))
-                elif self.path == '/approve':
-                    from .planning import approve
-                    approve(store, task)
-                    self.respond(200, json.dumps({'queued': True, 'worker_running': store.locked('worker')}))
-                elif self.path == '/assess':
-                    from .manager import request_assessment
-                    request_assessment(store, task)
+                elif self.path in ('/verify', '/assess'):
+                    from .verifier import request_verification
+                    from .simple_loop import migrate
+                    try:
+                        with store.lock('task:' + task_id):
+                            if migrate(store, task):
+                                request_verification(store, task)
+                    except RuntimeError:
+                        self.respond(409, json.dumps({'error': 'Task is executing; pause and wait for a safe boundary before verifying.'}))
+                        return
                     self.respond(200, json.dumps({'queued': True, 'worker_running': store.locked('worker')}))
                 elif self.path == '/switch':
                     request = store.route(task_id, body.get('provider'), body.get('model') or None)
                     self.respond(200, json.dumps({'queued': request, 'worker_running': store.locked('worker')}))
                 else:
                     store.set_paused(task_id, self.path == '/pause')
+                    if self.path == '/continue':
+                        try:
+                            with store.lock('task:' + task_id):
+                                task = store.get(task_id)
+                                from .simple_loop import migrate
+                                if task['data'].get('runtime_version') != 3:
+                                    migrate(store, task)
+                                elif (task['status'] == 'interrupted' or task['status'] == 'needs_input'
+                                      and task['data'].get('reason_code') in ('provider_wait', 'connection_wait', 'process_error')):
+                                    task['data'].pop('retry_at', None)
+                                    task['data'].update(recoverable=True, retry_count=0, reason='', reason_code='')
+                                    store.save(task, 'received', 'continue_requested')
+                        except RuntimeError:
+                            pass  # The current owner sees the persisted Continue control.
                     self.respond(200, json.dumps({'saved': True, 'worker_running': store.locked('worker')}))
             except (ValueError, TypeError, AttributeError, KeyError) as error:
                 self.respond(400, json.dumps({'error': str(error)}))

@@ -3,8 +3,9 @@ import copy
 import json
 
 from . import context, providers
-from .manager import evidence_bundle
+from .evidence import evidence_bundle, native_tool_trace
 from .telemetry import recorder
+from . import recovery
 
 SCHEMA = providers.obj({
     'items': {'type': 'array', 'items': providers.obj({
@@ -19,7 +20,7 @@ def fixed_checks(task):
     """Require one host result per immutable command, with successful exit codes."""
     commands = task['data']['development']['checks']
     evidence = task['data'].get('evidence', [])
-    return bool(commands) and len(evidence) == len(commands) and all(
+    return len(evidence) == len(commands) and all(
         row.get('argv') == argv and row.get('passed') is True
         and type(row.get('exit_code')) is int and row['exit_code'] == 0
         and row.get('timed_out') is False
@@ -97,21 +98,44 @@ def evaluate(engine, task, lease_fds=()):
         'planner suggestions. A trace omission is not proof of misconduct. question is only an '
         'essential decision or resource that only the user can supply. Respect executor capabilities '
         'and host check results. A supported negative research finding can complete research. '
+        'You have read-only workspace tools and a sandboxed shell. Actively try to DISPROVE completion: '
+        'inspect the actual implementation and run small independent counterexamples for untested '
+        'input ranges, precision, cancellation, overflow, invalid values and other goal-specific invariants. '
+        'Do not edit files, weaken the fixed checks or merely restate the executor report. '
+        'For each met item cite concrete observations; for behavioural requirements cite an actual '
+        'counterexample check or test you ran and its result. If you cannot obtain essential evidence, '
+        'use unclear with a targeted missing observation rather than inventing support. '
+        'Never demand success on inputs the user excluded. A passing example is not coverage of an entire range. '
+        'Keep verification proportional to the actual task. Do not escalate a business calculation into '
+        'representation-limit or resource-exhaustion stress unless that operating range was explicitly '
+        'requested. Check meaningful precision and cancellation boundaries, not arbitrary machine maxima. '
+        'When a missing domain decision is essential, ask for it instead of repeatedly expanding the task. '
+        'State material limits in the evidence and never claim exhaustive mathematical correctness. '
         'Reply in the user request language.\n' + json.dumps(payload, ensure_ascii=False))
     alias = task['provider'] + ':verifier'
-    store.save(task, 'verifying', 'model_started',
-               {'phase': 'verifying', 'alias': alias, 'layer': 'control'})
-    engine.notify('verifying', task['id'])
-    adapter = providers.Provider(task['provider'], store.home, data['options'].get('model'))
-    adapter.on_event = recorder(store, task['id'], task['provider'], alias)
-    # No workspace tools, no executor session and no semantic repair call.
-    answer, metadata = adapter.call(task['id'], prompt, SCHEMA, None, lease_fds=lease_fds)
-    data = task['data']
-    data['sessions'][alias] = metadata['session']
-    data.setdefault('session_metadata', {})[alias] = metadata
-    context.record(task, alias, metadata)
-    store.save(task, 'verifying', 'model_finished',
-               dict(metadata, phase='verifying', alias=alias, layer='control'))
+    saved = recovery.owned_record(store, task)
+    reused = False
+    if saved and task['data'].get('verification_binding') == {'tree': tree, 'binding': binding}:
+        try:
+            answer, metadata = providers.read_result(saved)
+            reused = True
+        except recovery.ProviderFailure as error:
+            if error.metadata:
+                recovery.record_metadata(store, task, dict(error.metadata, interrupted=True, usage_complete=False), 'verifying', recovered=True)
+            if error.retry_at or saved.get('status') == 'returned':
+                raise
+    if not reused:
+        task['data']['verification_binding'] = {'tree': tree, 'binding': binding}
+        task['data'].pop('active_call', None)
+        store.save(task, 'verifying', 'model_started',
+                   {'phase': 'verifying', 'alias': alias, 'layer': 'control'})
+        engine.notify('verifying', task['id'])
+        adapter = providers.Provider(task['provider'], store.home, data['options'].get('model'))
+        adapter.on_event = recorder(store, task['id'], task['provider'], alias)
+        adapter.on_call = recovery.track(store, task, 'verifying')
+        adapter.read_only = True
+        answer, metadata = adapter.call(task['id'], prompt, SCHEMA, None, workspace=task['workspace'], lease_fds=lease_fds)
+    recovery.record_metadata(store, task, metadata, 'verifying', recovered=reused)
     current_binding = {'goal': task['data'].get('goal', task['prompt']),
                        'feedback': task['data'].get('feedback', []),
                        'done': task['data'].get('done', []),
@@ -121,11 +145,44 @@ def evaluate(engine, task, lease_fds=()):
     try:
         result, outcome = assess(answer, done)
     except ValueError as error:
+        task['data']['reason_code'] = 'verifier_rejected'
         store.save(task, 'verifying', 'verifier_rejected',
                    {'answer': answer, 'reason': str(error), 'layer': 'control'})
         raise
+    trace = native_tool_trace(task, alias)
+    observed_probe = False
+    for item in trace['records']:
+        if item.get('tool_type') == 'command_execution' and item.get('exit_code') == 0:
+            observed_probe = True
+        if item.get('tool_type') == 'tool_result' and item.get('name') == 'Bash' and not item.get('is_error'):
+            observed_probe = True
+        try:
+            event = json.loads(item['record'])
+        except ValueError:
+            continue
+        if event.get('type') == 'command_execution' and event.get('exit_code') == 0:
+            observed_probe = True
+        if event.get('type') == 'tool_result' and event.get('name') == 'Bash' and not event.get('is_error'):
+            observed_probe = True
+    if outcome == 'verified' and not observed_probe:
+        result['question'] = 'Independent verification could not obtain a successful tool observation. Inspect the verifier log or its sandbox configuration.'
+        outcome = 'needs_input'
+        task['data']['reason_code'] = 'verification_unavailable'
     verdict = dict(result, tree=tree, turn=task['data'].get('turns', 0),
-                   outcome=outcome, done_fixed=binding['done_fixed'])
+                   outcome=outcome, done_fixed=binding['done_fixed'], observations=trace)
     task['data'].setdefault('verdicts', []).append(verdict)
+    task['data'].pop('active_call', None)
     store.save(task, 'verifying', 'verdict', dict(verdict, layer='control'))
     return verdict
+
+
+def request_verification(store, task):
+    data = task['data']
+    if not data.get('executor_result'):
+        raise ValueError('There is no executor result to verify yet; resume the task first')
+    data['development']['phase'] = 'checking'
+    data['verification_only'] = True
+    data.pop('active_call', None)
+    data.pop('retry_at', None)
+    data.update(reason='', reason_code='')
+    store.save(task, 'received', 'verification_requested')
