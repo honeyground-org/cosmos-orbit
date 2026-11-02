@@ -40,11 +40,21 @@ def doctor():
     return output
 
 
+def native_capabilities(provider, public_web=False):
+    """Describe the actual native adapter, not the host CLI's full capabilities."""
+    return {'file_read_write': True, 'shell': provider == 'codex',
+            'public_web': bool(public_web), 'host_fixed_checks': True,
+            'additional_host_commands': False,
+            'scope': 'isolated workspace; no commits, deployment or external writes',
+            'verification': 'Orbit runs the fixed checks after the executor returns. '
+                            'Their recorded exit codes and output are authoritative for those checks.'}
+
+
 class Provider:
-    def __init__(self, name, home, model=None, timeout=180):
+    def __init__(self, name, home, model=None, timeout=None):
         if name not in ('codex', 'claude') or not shutil.which(name):
             raise ValueError('Install and authenticate the selected CLI: ' + name)
-        self.name, self.home, self.model, self.timeout = name, Path(home), model, timeout
+        self.name, self.home, self.model, self.timeout = name, Path(home), model, None
 
     def call(self, task_id, prompt, schema, session=None, workspace=None, lease_fds=()):
         directory = self.home / 'runs' / task_id
@@ -112,9 +122,12 @@ class Provider:
             try:
                 callback = getattr(self, 'on_event', None)
                 if callback is None:
-                    process.communicate(prompt, timeout=self.timeout)
+                    process.communicate(prompt)
                 else:
                     from .telemetry import provider_event
+                    from .process_health import Monitor
+                    monitor = Monitor(process, log_path, error_path, callback, call_id)
+                    monitor.sample(force=True)
                     with log_path.open(encoding='utf-8', errors='replace') as stream:
                         pending, dropping = '', False
                         def drain():
@@ -139,20 +152,21 @@ class Provider:
                                         pending, dropping = '', False
                                 chunk = stream.read(262144)
                         first = True
-                        deadline = time.monotonic() + self.timeout
                         while True:
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                raise subprocess.TimeoutExpired(command, self.timeout)
+                            monitor.sample()
                             try:
-                                process.communicate(prompt if first else None, timeout=min(.25, remaining))
+                                process.communicate(prompt if first else None, timeout=.25)
                                 drain()
+                                monitor.sample(force=True)
                                 break
                             except subprocess.TimeoutExpired:
                                 first = False
                                 drain()
             except BaseException:
-                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:

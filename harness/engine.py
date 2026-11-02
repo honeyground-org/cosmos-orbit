@@ -23,7 +23,7 @@ def contract_hash(contract):
 
 
 class Engine:
-    def __init__(self, store, model=None, timeout=180, notify=None):
+    def __init__(self, store, model=None, timeout=None, notify=None):
         self.store, self.model, self.timeout = store, model, timeout
         self.notify = notify or (lambda *_: None)
 
@@ -339,7 +339,8 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
                     self._execute(task)
             except (Exception, KeyboardInterrupt) as error:
                 task = self.store.get(task_id)
-                task['data']['reason'] = type(error).__name__ + ': ' + str(error)
+                from .failures import record
+                record(task, error)
                 self.store.save(task, 'interrupted', 'interrupted', {'reason': task['data']['reason']})
                 if isinstance(error, KeyboardInterrupt):
                     raise
@@ -404,9 +405,8 @@ Payload:\n''' + json.dumps({'contract': contract, 'files': files,
         if not options:
             return
         if ('max_attempts' in options and not 1 <= options['max_attempts'] <= 10
-                or 'timeout' in options and not 1 <= options['timeout'] <= 3600
                 or 'context_budget' in options and options['context_budget'] < 1000):
-            raise ValueError('Invalid attempt, timeout or context budget')
+            raise ValueError('Invalid attempt or context budget')
         with self.store.lock('task:' + task_id):
             task = self.store.get(task_id)
             task['data'].setdefault('options', {}).update(options)

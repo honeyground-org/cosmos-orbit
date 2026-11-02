@@ -71,3 +71,41 @@ Orbit는 터미널 실행을 표시하는 장식이 아니라, 사용자 목적�
 - 구현: `harness/manager.py`, `harness/development.py`, `harness/context.py`
 - 공동 작업 상태: `/Users/sean/development/projects/docs/domains/local-brain/tracker.md`
 - 위키: `/Users/sean/sean_wikis/01 Projects/local-harness/Runtime management audit 2026-10-29.md`
+
+## 후속 사용자 결정: 시간 제한 폐지와 무출력 관측
+
+정상 동작을 시간 경과만으로 종료하지 않는다. 실행·계획·관리자 평가·고정 검사에서 기존 시간 한도를 제거했다. 기존 --timeout 값은 호환 입력으로만 남고 종료 조건으로 쓰지 않는다. 이전 1200초 제한으로 중단된 하이닉스는 과거 중단 기록이며 자동 재실행하지 않았다.
+
+실행 소유자는 5초마다 실제 프로세스 poll, OS 상태, 프로세스 그룹 CPU, stdout/stderr 크기 변화, TCP 상태를 관측한다. task.process_health와 runtime.process_health를 터미널/status/뷰에서 공유한다. 무출력은 alive_silent이며 장애 판정이 아니다. OS 정지는 process_stopped, 실제 종료는 종료 코드로 기록한다. 소유자가 없거나 15초 이상 관측이 낡거나 새 호출에 이전 표본만 남으면 not_current로 표시한다. 원격 모델의 응답/추론 진행은 관측할 근거가 없으면 unverified다. TCP ESTABLISHED도 모델 정상의 증거로 확대하지 않는다.
+
+진단 표본은 작업 진척 이벤트·빛의 데이터 이동으로 취급하지 않는다. 작업 흐름과 푸터에서 제외하고 CLI events 원장에는 남긴다. 실패 원문은 failure.detail에 보존하고 사용자 상태 문장은 짧게 분리했다. 짧은 ps/lsof 진단 제한은 진단을 보호할 뿐 작업을 종료하지 않는다. 기존 MCP 전송 오류 처리와 실행 시도 한도는 별도이며, 단계의 경과시간 한도와 다르다.
+
+검증: 실제 무출력 subprocess가 이전 1초 한도를 넘어 6초 후 정상 반환; 5초 생존 표본 확인; exit 9 오류 반환; SIGSTOP/SIGCONT 관측 구별; 이전 호출·실행자 없는 표본의 freshness 무효화; 고정 검사 1.4초 실행이 기존 1초 설정에도 통과. 실제 격리 관측 서버(8789) 브라우저에서 PID·무출력·OS·CPU·원격 미확인 표시, 카운트다운 없음, JS 오류 0 확인. 현재 실사용 워커/8788 서버에 적용했다.
+
+
+## 2026-10-30 completion-management repair
+
+A four-arm live development comparison exposed unnecessary executor loops and invalid manager
+verdicts after passing fixed checks. This change separates planner suggestions from binding user
+goals/corrections, supplies recorded Git changed paths plus bounded native tool evidence, and gives
+planning/execution/evaluation the actual native tool capabilities. Claude remains file-tool-only;
+this change does not silently broaden permissions or claim full interactive CLI compatibility.
+
+A rejected manager assessment is recorded and gets one fresh assessment against the same evidence
+and explicit validation error. Implementation is not replayed for a response-contract error.
+Completion still requires all user criteria met with evidence, empty gaps/action/question, passing
+fixed checks and the same verified tree. A second invalid response remains interrupted.
+
+Private controlled probes cover contradictory verdicts, missing criteria, failed/stale checks,
+repair without executor replay, tool evidence excluding reasoning, and capability reporting.
+Fresh live verification repeats the original two fixtures with both providers, including planning.
+Results are recorded after those runs finish; prior benchmark failures remain preserved.
+
+The first repair validation exposed an implementation error: `Store.save` replaces `task.data`,
+so a stale local reference could record an evaluation event without persisting the evaluation
+in the task body. That run was stopped on this concrete fault, not on elapsed time, and retained
+as failed validation. The implementation now refreshes the reference after saving call metadata.
+The private probe reloads the task from SQLite and checks both evaluation and objective progress;
+it also verifies that a second invalid manager response interrupts after exactly two calls.
+
+Final live verification: all four runs reached persisted concluded/needs_review with one implementation and three CLI calls each. CLI projections confirmed current evidence. Extra boundary checks still failed two Decimal cases in Claude CSV. A separate recovery fixture included those failures in fixed checks: failed checks -> continue -> one native repair -> passing checks -> concluded (143.157 seconds). This validates evidence-driven repair, not autonomous discovery of all missing cases. The idle local worker was refreshed; interrupted research was preserved.

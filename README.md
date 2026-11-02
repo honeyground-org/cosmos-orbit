@@ -111,7 +111,7 @@ submodules are not copied; submodule repositories are rejected in this pilot.
 cosmos-orbit start --development --provider codex --workspace /path/to/repo \
   --handoff-file /path/to/HANDOFF.md \
   --check '["python3", "-m", "unittest", "discover"]' \
-  --timeout 600 --plan-only 'Implement the remaining change described in the handoff.'
+  --plan-only 'Implement the remaining change described in the handoff.'
 cosmos-orbit status TASK_ID
 cosmos-orbit resume TASK_ID
 ```
@@ -144,10 +144,23 @@ check start/finish events drive the live layer interactions. Idle sessions do no
 Use `result TASK_ID` or the task inspector to read a published result snapshot without an editor.
 Native turns report remaining work and a next action separately from verification. After the
 fixed checks, a manager call in a separate fresh context evaluates the original goal, corrections,
-plan acceptance items, current file excerpts, report and check outputs. It uses the selected engine;
+current file excerpts, recorded changed paths, bounded native tool evidence, report and check outputs. It uses the selected engine;
 it does not silently introduce another provider. The manager cannot execute tools or alter checks.
 
-The manager records an evidence assessment for every requirement. `continue` supplies a concrete
+The manager records an evidence assessment for every user requirement. Planner-generated acceptance
+items describe proposed methods; they do not silently add mandatory deliverables. Planning, execution
+and evaluation receive the actual native adapter capabilities. In particular, Claude file-only execution
+returns to Orbit for fixed checks instead of being sent back to run unavailable shell commands.
+The manager receives the recorded Git changed-path list independently of bounded file excerpts.
+Native tool evidence is limited to the latest executor call and explicitly bounded; it does not prove
+that no unobserved action occurred. Reasoning blocks are excluded.
+
+A structurally inconsistent manager verdict receives one fresh assessment using the same evidence
+and validation error, without replaying implementation. Both responses and usage are recorded.
+Failed checks, stale files, missing criteria and unsupported completion remain rejected; a second
+invalid assessment preserves the interruption for inspection. There is no time-based cutoff.
+
+`continue` supplies a concrete
 next action and strategy to the next native turn. `concluded` requires all criteria to be met with
 cited evidence and current passing checks before **needs_review**. `needs_input` records an essential
 question. Unsupported completion claims are rejected; a repeated unchanged tree and next action,
@@ -160,7 +173,7 @@ results are labelled as lacking manager assessment until evaluated. `evaluation_
 `evaluation_finished` events, executor/manager sessions and per-criterion evidence appear in status
 and the browser. The file evidence bundle is bounded; omitted content remains unverified.
 
-After each native turn Orbit records command exit codes, timeout outcomes and private output logs.
+After each native turn Orbit records command exit codes and private output logs.
 `status` shows the private workspace, base commit, changed paths, a tracked-files patch and separately
 listed untracked files. Inspect those files and the patch before transferring selected changes to
 your original repository. The engine-room inspector shows the same evidence. The current manager
@@ -426,7 +439,7 @@ For an interrupted batch with conflicting external changes, `recover --keep-curr
 the pending proposal and preserves every current file. The proposal and original contents remain
 in the event journal. Submit feedback to replan; no automatic rollback overwrites external work.
 
-Attempt, timeout and context-budget options are persisted per task. Explicit options on a later
+Attempt and context-budget options are persisted per task. Legacy `--timeout` values are accepted for compatibility but never impose an execution deadline. Explicit options on a later
 `resume` or `feedback` update that task; omitted options retain their stored values.
 
 ## Pilot boundaries
@@ -532,3 +545,18 @@ package remains `harness`. Existing private state at `~/.local/share/local-harne
 `HARNESS_HOME`, `HARNESS_INSTALL_DIR`, and `HARNESS_BIN_DIR` settings remain supported. Renaming
 the product does not move, reset or publish existing tasks. The installer reuses its existing private
 virtual environment and replaces the legacy distribution, preserving task storage.
+
+### Process observation without output
+
+Native execution, planning, manager evaluation and fixed verification commands have no elapsed-time
+cutoff. A quiet CLI is not killed for taking too long. While an owned process runs, Orbit samples its
+exit state, process-group OS states and CPU usage, and stdout/stderr size changes every five seconds.
+`status`, `watch` and the browser expose the latest observation, PID and silent duration. Observations
+older than 15 seconds, or without an active owner, are labelled not current; they are not proof of a
+live remote model. CPU activity and log changes are observations, not evidence of task progress.
+
+A CLI exit/error preserves the interrupted task for a resume decision. An OS-stopped process is
+reported separately. Silence alone does not trigger automatic termination or replay. Brief timeouts
+on diagnostic commands remain so a failed diagnostic cannot block the observer; they do not kill
+the task. Remote provider connection and reasoning progress remain unverified unless the CLI
+provides evidence. Existing pause requests still take effect at safe call boundaries.

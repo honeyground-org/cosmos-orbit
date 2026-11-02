@@ -11,6 +11,10 @@ def recorder(store, task_id, provider, alias=None):
 def provider_event(event):
     """Only expose tool lifecycle and public messages; never reasoning or tool output."""
     kind = event.get('type')
+    if kind in ('error', 'connection_error') or (event.get('item') or {}).get('type') == 'error':
+        return [('provider_issue', {'layer': 'execution', 'direction': 'in',
+                                   'note': 'CLI reported an error; inspect the local provider log',
+                                   'terminal': False})]
     item = event.get('item') or {}
     if kind in ('item.started', 'item.completed') and isinstance(item, dict):
         tool = item.get('type')

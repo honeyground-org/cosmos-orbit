@@ -11,6 +11,7 @@ from .context import limit_for
 from .providers import doctor
 from .store import Store
 from .workspace import verify
+from . import failures
 
 
 def show(task):
@@ -22,7 +23,7 @@ def show(task):
             'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
             'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
             'attempts': data['attempt'], 'evidence': data['evidence'],
-            'reason': data['reason'], 'feedback': data['feedback'],
+            'reason': failures.describe(data), 'failure': failures.details(data), 'feedback': data['feedback'],
             'sessions': data['sessions'], 'context': data.get('context_measurements', {}),
             'context_limits': {key: limit_for(data, key, data.get('peers', {}).get(key[5:], {}).get('provider')
                                              if key.startswith('peer:') else key.split(':')[0])
@@ -91,7 +92,7 @@ def main(argv=None):
     for command in (start, resume, feedback):
         command.add_argument('--max-attempts', type=int)
         command.add_argument('--model', help='Optional model on the selected CLI; no cross-provider fallback')
-        command.add_argument('--timeout', type=int)
+        command.add_argument('--timeout', type=int, help='Deprecated compatibility option; elapsed time never stops a task')
         command.add_argument('--context-budget', type=int,
                              help='Handoff before the next call at this measured context size; default Claude 500k, Codex min(500k, 80%% window)')
     for name in ('status', 'events', 'messages', 'handoff', 'pause'):
@@ -208,10 +209,10 @@ def main(argv=None):
             prompt = prompt or ''
             if not prompt.strip() or len(prompt) > 24000:
                 raise ValueError('Request must be nonempty and at most 24000 characters')
-            initial_options = dict(model=None, timeout=180, max_attempts=3, context_budget=None)
+            initial_options = dict(model=None, timeout=None, max_attempts=3, context_budget=None)
             initial_options.update({k: v for k, v in options.items() if v is not None})
-            if not 1 <= initial_options['max_attempts'] <= 10 or not 1 <= initial_options['timeout'] <= 3600 or (initial_options['context_budget'] is not None and initial_options['context_budget'] < 1000):
-                raise ValueError('Invalid attempt, timeout or context budget')
+            if not 1 <= initial_options['max_attempts'] <= 10 or (initial_options['context_budget'] is not None and initial_options['context_budget'] < 1000):
+                raise ValueError('Invalid attempt or context budget')
             provider = args.provider or store.preference('provider')
             if provider is None:
                 installed = [name for name in ('codex', 'claude') if shutil.which(name)]
@@ -299,6 +300,8 @@ def main(argv=None):
             from .observer import snapshot
             projected = snapshot(store, args.id)['tasks'][0]
             result['operation'] = projected['operation']
+            result['process_health'] = projected['process_health']
+            result['runtime'] = projected['runtime']
             result['observed_status'] = projected['status']
         elif args.command == 'events':
             result = store.events(args.id)

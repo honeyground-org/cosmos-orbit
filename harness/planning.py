@@ -11,13 +11,15 @@ def prepare(engine, task):
     data = task['data']
     prompt = ('Produce a concrete execution plan, not implementation. Preserve the full user goal. '
               'Separate collection, analysis, verification and presentation where relevant. '
+              'Acceptance must restate user outcomes, not add mandatory logs, reports or optional checks. '
+              'Do not prescribe commands the executor cannot run. Orbit performs fixed checks after execution. '
               'Do not claim any step is done. State capability/data limits. Reply in the language of the request. '
               'Fixed verification commands cannot be replaced by the executor. A check passing is not objective completion.\n'
               + json.dumps({'request': data.get('mission_goal', task['prompt']), 'title': data.get('presentation', {}).get('title'),
                             'feedback': data['feedback'], 'latest_result': data.get('last_summary'),
                             'reason': data.get('reason'), 'checks': data['development']['checks'],
                             'public_web_allowed': data['options'].get('public_web', False),
-                            'execution': 'isolated repository, native tools; public web only if allowed'}, ensure_ascii=False))
+                            'executor_capabilities': providers.native_capabilities(task['provider'], data['options'].get('public_web', False))}, ensure_ascii=False))
     answer = engine._call(task, 'planning', prompt, SCHEMA)
     if (not isinstance(answer.get('goal'), str) or not answer['goal'].strip()
             or any(not isinstance(answer.get(k), list) or any(not isinstance(v, str) for v in answer[k])

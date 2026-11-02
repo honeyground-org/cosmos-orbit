@@ -14,6 +14,7 @@ from .store import Store, now
 from .commands import browser_guide
 from .context import limit_for
 from .workspace import verify
+from . import failures
 
 ACTIVE = {'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing'}
 ATTENTION = {'needs_review', 'blocked', 'interrupted', 'needs_input', 'stale', 'unattended'}
@@ -144,9 +145,9 @@ def snapshot(store, task_id=None):
                                  'context_limit': limit_for(data, alias, provider),
                                  'context_source': data.get('context_measurements', {}).get(alias, {}).get('source', 'unavailable'),
                                  'handoff_count': data.get('handoff_counts', {}).get(alias, 0)})
-            rows = store.db.execute('SELECT * FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 24', (task['id'],)).fetchall()
+            rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind!='process_observation' ORDER BY seq DESC LIMIT 24", (task['id'],)).fetchall()
             events = [event_view(r) for r in rows]
-            event_count = store.db.execute('SELECT COUNT(*) FROM events WHERE task_id=?', (task['id'],)).fetchone()[0]
+            event_count = store.db.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind!='process_observation'", (task['id'],)).fetchone()[0]
             response_rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind='provider_message' ORDER BY seq DESC LIMIT 6", (task['id'],)).fetchall()
             layer_activity = {}
             for layer, kinds_for_layer in {
@@ -157,13 +158,23 @@ def snapshot(store, task_id=None):
                 placeholders = ','.join('?' for _ in kinds_for_layer)
                 row = store.db.execute("SELECT * FROM events WHERE task_id=? AND (json_extract(payload,'$.layer')=? OR kind IN (" + placeholders + ")) ORDER BY seq DESC LIMIT 1", (task['id'], layer, *kinds_for_layer)).fetchone()
                 layer_activity[layer] = event_view(row) if row else None
-            call_state = store.db.execute("SELECT kind,at FROM events WHERE task_id=? AND kind IN ('model_started','model_finished','interrupted') ORDER BY seq DESC LIMIT 1", (task['id'],)).fetchone()
+            call_state = store.db.execute("SELECT seq,kind,at FROM events WHERE task_id=? AND kind IN ('model_started','model_finished','interrupted') ORDER BY seq DESC LIMIT 1", (task['id'],)).fetchone()
             runtime = None
             if busy and call_state and call_state['kind'] == 'model_started':
                 elapsed = age_seconds(call_state['at'])
-                timeout = data.get('options', {}).get('timeout', 420)
                 runtime = {'started': call_state['at'], 'elapsed_seconds': elapsed,
-                           'timeout_seconds': timeout, 'remaining_seconds': max(0, timeout - elapsed)}
+                           'timeout_seconds': None, 'remaining_seconds': None}
+            health_row = store.db.execute("SELECT seq,at,payload FROM events WHERE task_id=? AND kind='process_observation' ORDER BY seq DESC LIMIT 1", (task['id'],)).fetchone()
+            process_health = json.loads(health_row['payload']) if health_row else None
+            if process_health:
+                process_health['observation_age_seconds'] = age_seconds(health_row['at'])
+                process_health['fresh'] = (busy and process_health['observation_age_seconds'] <= 15
+                                           and (not call_state or call_state['kind'] != 'model_started'
+                                                or health_row['seq'] > call_state['seq']))
+                if not process_health['fresh']:
+                    process_health['status'] = 'not_current'
+            if runtime:
+                runtime['process_health'] = process_health
             contract = data.get('contract') or {}
             call_rows = store.db.execute("SELECT payload FROM events WHERE task_id=? AND kind IN ('model_finished','peer_response_received')", (task['id'],)).fetchall()
             calls = [json.loads(r['payload']) for r in call_rows]
@@ -195,7 +206,7 @@ def snapshot(store, task_id=None):
                           'routing': store.routing(task['id']), 'last_summary': data.get('last_summary', ''),
                           'files': data.get('development', {}).get('changed_paths', contract.get('files', [])),
                           'development': data.get('development'), 'execution_plan': data.get('execution_plan'),
-                          'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
+                          'process_health': process_health, 'objective_progress': data.get('objective_progress'), 'evaluation': data.get('evaluation'),
                           'memory': {'mode': data.get('memory', {}).get('mode', 'off'),
                                      'project_id': data.get('memory', {}).get('project_id'),
                                      'seconds': (data.get('memory', {}).get('latest') or {}).get('seconds'),
@@ -213,7 +224,7 @@ def snapshot(store, task_id=None):
                                            if k in ('title', 'summary', 'report', 'report_source', 'report_error')},
                           'workspace': task['workspace'], 'updated': task['updated'], 'runtime': runtime,
                           'age': age_seconds(task['updated']), 'busy': busy, 'pause_requested': paused,
-                          'reason': issue or data.get('reason', ''), 'questions': contract.get('questions', []),
+                          'reason': issue or failures.describe(data), 'failure': failures.details(data), 'questions': contract.get('questions', []),
                           'constraints': contract.get('constraints', []), 'steps': contract.get('steps', []),
                           'attempt': data.get('attempt', 0), 'budget': data.get('options', {}).get('max_attempts', 3),
                           'checks': checks, 'sessions': sessions, 'feedback': store.inbox(task['id']),
@@ -222,7 +233,7 @@ def snapshot(store, task_id=None):
                           'responses': [event_view(r) for r in reversed(response_rows)],
                           'layer_activity': layer_activity,
                           'attention': state in ATTENTION})
-        rows = store.db.execute('SELECT * FROM events ORDER BY seq DESC LIMIT 20').fetchall()
+        rows = store.db.execute("SELECT * FROM events WHERE kind!='process_observation' ORDER BY seq DESC LIMIT 20").fetchall()
         global_events = [event_view(r) for r in rows]
         cursor = store.db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
     finally:
@@ -281,6 +292,12 @@ def terminal(data, lang='en', width=110):
         rows.append('  ' + operation['phase'] + ' · ' + operation['title'])
         rows.append('  ' + clean(operation['reason']))
         rows.append('  다음: ' + clean(operation['next_action']))
+        if task.get('process_health'):
+            h = task['process_health']
+            rows.append('  process: ' + h['status'] + ' | PID ' + str(h['pid'])
+                        + ' | observed ' + str(h['observation_age_seconds']) + 's ago'
+                        + ' | silent ' + str(h['output_silent_seconds']) + 's'
+                        + ' | TCP: ' + str(h.get('tcp_states')) + ' | remote: unverified')
         if task['reason'] or task['questions']:
             rows.append('  ' + fit(task['reason'] or task['questions'][0], max(20, width - 2)))
         for session in task['sessions']:
@@ -369,7 +386,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                     if before <= 0:
                         raise ValueError('Invalid event cursor')
                     store.get(task_id)
-                    rows = store.db.execute('SELECT * FROM events WHERE task_id=? AND seq<? ORDER BY seq DESC LIMIT 100', (task_id, before)).fetchall()
+                    rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND seq<? AND kind!='process_observation' ORDER BY seq DESC LIMIT 100", (task_id, before)).fetchall()
                     self.respond(200, json.dumps({'events': [event_view(row) for row in rows]}, ensure_ascii=False))
                 except (ValueError, KeyError):
                     self.respond(400, json.dumps({'error': '작업 또는 기록 위치를 확인할 수 없습니다.'}, ensure_ascii=False))
@@ -412,7 +429,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                         raise ValueError('Selected CLI is not installed')
                     from .development import create
                     task = create(store, root, provider, prompt, [json.dumps(c) for c in checks])
-                    task['data'].setdefault('options', {}).update(timeout=420, max_attempts=3, public_web=body.get('public_web', False))
+                    task['data'].setdefault('options', {}).update(timeout=None, max_attempts=3, public_web=body.get('public_web', False))
                     task['data']['plan_requested'] = True
                     task['data']['review_plan'] = bool(body.get('review_plan', False))
                     task['data']['presentation'] = {'title': prompt.strip().splitlines()[0][:240]}

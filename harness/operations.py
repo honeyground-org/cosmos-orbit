@@ -59,6 +59,9 @@ def describe(task, worker_running):
         if state == 'evaluating':
             title, reason = '관리자 평가 중', '원래 목표와 산출물 근거를 대조하고 다음 작업을 결정합니다.'
             next_action = '평가에 따라 추가 실행, 결론 검토 또는 필수 입력 대기로 전환합니다.'
+        elif latest and latest['kind'] == 'provider_issue':
+            tone, title = 'problem', 'CLI 오류 보고'
+            reason = 'CLI가 오류를 보고했습니다. 프로세스 관측과 로그에서 복구 또는 종료 여부를 확인해야 합니다.'
         elif latest and latest['kind'] == 'provider_tool_started':
             reason = (latest.get('tool') or '도구') + ' 응답을 기다리고 있습니다.'
         elif latest and latest['kind'] == 'check_started':
@@ -70,6 +73,15 @@ def describe(task, worker_running):
         tone, title = 'waiting', '실행 대기' if worker_running else '워커 대기'
         reason = '워커가 작업을 가져갈 차례를 기다립니다.' if worker_running else '워커가 꺼져 있어 접수된 작업을 실행할 수 없습니다.'
         next_action = next_action or ('워커가 자동으로 이어갑니다.' if worker_running else '같은 저장소 설정으로 cosmos-orbit worker를 실행하세요.')
+    health = task.get('process_health')
+    if task['busy'] and health:
+        if not health.get('fresh'):
+            reason += ' 프로세스 관측이 갱신되지 않아 현재 생존 상태는 확인되지 않았습니다.'
+        elif health['status'] == 'process_stopped':
+            tone, title = 'problem', '프로세스 정지 감지'
+            reason = '운영체제에서 일시 정지된 프로세스를 관측했습니다. 경과 시간 때문에 종료하지 않습니다.'
+        elif health['status'] == 'alive_silent':
+            reason += ' 프로세스 생존을 확인했으나 새 출력은 없습니다. 원격 모델의 진행 상태는 확인되지 않았습니다.'
     return {'phase': phase, 'tone': tone, 'title': title, 'reason': reason,
             'next_action': next_action, 'last_activity': latest,
             'worker_running': worker_running}
