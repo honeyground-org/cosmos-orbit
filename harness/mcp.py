@@ -8,6 +8,13 @@ import tempfile
 import time
 
 
+class ToolError(RuntimeError):
+    """A failed tool call with its structured details preserved for the caller."""
+    def __init__(self, value):
+        self.value = value
+        super().__init__('MCP tool failed: ' + json.dumps(value, ensure_ascii=False)[:1000])
+
+
 class Client:
     def __init__(self, argv, cwd, timeout=10, env=None, lease_fds=()):
         if (not isinstance(argv, list) or not argv or len(argv) > 100
@@ -94,10 +101,10 @@ class Client:
         if name not in self.tools:
             raise ValueError('MCP tool is unavailable: ' + name)
         result = self.request('tools/call', {'name': name, 'arguments': arguments})
-        if result.get('isError'):
-            raise RuntimeError('MCP tool failed: ' + json.dumps(result.get('content', []))[:1000])
         value = result.get('structuredContent')
         if isinstance(value, dict):
+            if result.get('isError'):
+                raise ToolError(value)
             return value
         content = result.get('content', [])
         if not isinstance(content, list) or any(not isinstance(c, dict) for c in content):
@@ -107,9 +114,12 @@ class Client:
             raise ValueError('MCP text content must be a string')
         text = '\n'.join(parts)
         try:
-            return json.loads(text)
+            value = json.loads(text)
         except ValueError:
-            return text
+            value = text
+        if result.get('isError'):
+            raise ToolError(value)
+        return value
 
     def close(self):
         if self.process is not None:

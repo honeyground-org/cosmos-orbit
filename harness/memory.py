@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from .mcp import Client
+from .mcp import Client, ToolError
 
 
 def digest(value):
@@ -304,7 +304,13 @@ def flush(store, task, lease_fds=()):
                 if (advertised.get('contract') != 'orbit-1' or 'json' not in support.get('formats', [])
                         or any(support.get(k) is not True for k in ('idempotency_key', 'expected_sha', 'project_id'))):
                     raise ValueError('Brain does not advertise safe structured writes; checkpoint retained locally')
-                result = client.call('remember', item['arguments'])
+                try:
+                    result = client.call('remember', item['arguments'])
+                except ToolError as error:
+                    result = error.value
+                    if (not isinstance(result, dict) or result.get('contract') != 'orbit-1'
+                            or result.get('result') != 'conflict'):
+                        raise
                 if isinstance(result, dict) and result.get('result') == 'conflict':
                     item.update(status='conflict', ack=result, attempts=5)
                     store.save(task, task['status'], 'memory_write_conflict', {'id': item['id']})
