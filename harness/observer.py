@@ -16,14 +16,20 @@ from .context import limit_for
 from .workspace import verify
 from . import failures
 
-ACTIVE = {'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing'}
-ATTENTION = {'needs_review', 'blocked', 'interrupted', 'needs_input', 'stale', 'unattended'}
+# Runtime v2 (artifact / development with planner and manager) and runtime v3 (goal → executor → fixed checks → one
+# verifier; redesign 2026-11-01 §4.4) share one projection. v3 states: received · working · checking · verifying ·
+# verified · needs_input · stalled · interrupted · paused. Old states stay readable through LABELS (legacy mapping).
+ACTIVE = {'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing', 'working', 'checking'}
+ATTENTION = {'needs_review', 'blocked', 'interrupted', 'needs_input', 'stale', 'unattended', 'stalled'}
+V3_STATES = ('received', 'working', 'checking', 'verifying', 'verified', 'needs_input', 'stalled', 'interrupted', 'paused')
+V3_STAGE = {'received': 0, 'working': 1, 'checking': 2, 'verifying': 3, 'verified': 4}
 LABELS = {
     'en': {'received': 'Queued', 'ready': 'Ready', 'planning': 'Planning', 'running': 'Working',
            'evaluating': 'Manager evaluation', 'applying': 'Applying', 'verifying': 'Verifying', 'repairing': 'Repairing',
            'waiting_peer': 'Waiting for peer', 'completed': 'Verified', 'already_satisfied': 'Already satisfied',
            'needs_review': 'Review changes', 'needs_input': 'Input needed', 'blocked': 'Blocked', 'interrupted': 'Interrupted',
            'stale': 'Evidence changed', 'paused': 'Paused', 'pause_pending': 'Pause requested',
+           'working': 'Working', 'checking': 'Checking', 'verified': 'Verified', 'stalled': 'Work remains',
            'unattended': 'Executor absent', 'idle': 'Idle', 'unbound': 'Not started',
            'title': 'COSMOS ORBIT / OBSERVER', 'scope': 'Runtime-owned sessions only; external sessions are not scanned',
            'worker': 'Worker', 'on': 'online', 'off': 'offline', 'task': 'TASK', 'state': 'STATE',
@@ -47,9 +53,32 @@ def event_view(row):
     note = data.get('note') or data.get('reason') or data.get('text') or data.get('question') or data.get('phase') or ''
     if row['kind'] == 'action_prepared':
         note = ', '.join(c['path'] for c in data.get('changes', []))
-    if row['kind'] == 'verified':
+    if row['kind'] in ('verified', 'checks_recorded'):
         checks = data.get('checks', [])
         note = '%d / %d' % (sum(bool(c.get('passed')) for c in checks), len(checks))
+    # Runtime v3 events carry structured payloads; project one readable line each (the view translates the title).
+    elif row['kind'] == 'goal_fixed':
+        note = '%s · %d' % (data.get('origin', ''), len(data.get('done') or []))
+    elif row['kind'] == 'resumed':
+        note = (data.get('because') or '') + ': ' + ' · '.join(str(s).splitlines()[0][:160] if str(s).strip() else '' for s in data.get('sent') or [])
+    elif row['kind'] == 'stalled':
+        note = data.get('because') or ''
+    elif row['kind'] == 'needs_input':
+        note = (data.get('reason') or 'question') + ': ' + str(data.get('question') or '')
+    elif row['kind'] == 'verdict':
+        items = data.get('items') or []
+        note = '%s · met %d / %d' % (data.get('outcome', ''), sum(1 for i in items if i.get('status') == 'met'), len(items))
+        for key in ('extra', 'missing', 'fix'):
+            if data.get(key):
+                note += ' · %s %d' % (key, len(data[key]))
+    elif row['kind'] == 'verifier_rejected':
+        note = data.get('reason') or ''
+    elif row['kind'] == 'executor_recorded':
+        note = 'finished' if data.get('finished') else 'unfinished'
+    elif row['kind'] == 'completion_verified':
+        note = 'turn %s' % data.get('turn', '')
+    elif row['kind'] == 'context_warning':
+        note = '%s / %s · %s' % (data.get('tokens'), data.get('limit'), data.get('note', ''))
     return {'seq': row['seq'], 'task_id': row['task_id'], 'kind': row['kind'], 'at': row['at'],
             'note': str(note)[:600], 'age': age_seconds(row['at']),
             'layer': data.get('layer'), 'direction': data.get('direction'),
@@ -118,9 +147,21 @@ def snapshot(store, task_id=None):
                         state = 'stale'
                 except (OSError, ValueError) as error:
                     state, issue = 'stale', str(error)
+            runtime_version = data.get('runtime_version', 2)
+            reason_code = data.get('reason_code') or ''
+            if runtime_version == 3 and state == 'verified' and data.get('development'):
+                # Same rule as the CLI status projection: files changed after verification → a human decision.
+                try:
+                    from .development import evidence_current
+                    if not evidence_current(task):
+                        state, reason_code = 'needs_input', 'stale_evidence'
+                except (OSError, ValueError) as error:
+                    state, reason_code, issue = 'needs_input', 'stale_evidence', str(error)
             if state in ACTIVE and not busy:
                 state = 'unattended'
-            if paused and state not in ('completed', 'already_satisfied', 'stale'):
+                if runtime_version == 3:
+                    reason_code = 'unattended'
+            if paused and state not in ('completed', 'already_satisfied', 'stale', 'verified'):
                 state = 'pause_pending' if busy and task['status'] != 'paused' else 'paused'
             messages = store.messages(task['id'])
             sessions = []
@@ -133,7 +174,10 @@ def snapshot(store, task_id=None):
                 peer = alias.startswith('peer:')
                 name = alias[5:] if peer else alias
                 provider = data.get('peers', {}).get(name, {}).get('provider', 'unknown') if peer else alias.split(':')[0]
-                in_flight = any(m['target'] == name and m['status'] == 'in_flight' for m in messages) if peer else (task['status'] in ('planning', 'running') and alias == task['provider'] or task['status'] == 'evaluating' and alias == task['provider'] + ':manager')
+                in_flight = any(m['target'] == name and m['status'] == 'in_flight' for m in messages) if peer else (
+                    task['status'] in ('planning', 'running', 'working') and alias == task['provider']
+                    or task['status'] == 'evaluating' and alias == task['provider'] + ':manager'
+                    or task['status'] == 'verifying' and alias == task['provider'] + ':verifier')
                 session_state = 'running' if in_flight and busy else 'idle' if session_id else 'unbound'
                 sessions.append({'name': name, 'provider': provider, 'id': session_id, 'peer': peer,
                                  'state': session_state, 'managed': True,
@@ -151,10 +195,11 @@ def snapshot(store, task_id=None):
             response_rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind='provider_message' ORDER BY seq DESC LIMIT 6", (task['id'],)).fetchall()
             layer_activity = {}
             for layer, kinds_for_layer in {
-                'control': ('evaluation_started', 'evaluation_finished', 'received', 'execution_plan_ready', 'feedback_applied', 'routing_applied', 'continuation_scheduled'),
+                'control': ('evaluation_started', 'evaluation_finished', 'received', 'execution_plan_ready', 'feedback_applied', 'routing_applied', 'continuation_scheduled',
+                            'goal_fixed', 'resumed', 'stalled', 'needs_input', 'verdict', 'verifier_rejected', 'completion_verified', 'executor_recorded'),
                 'execution': ('model_started', 'model_finished', 'provider_message'),
-                'context': ('memory_context_prepared', 'memory_context_submitted', 'session_checkpoint', 'automatic_checkpoint'),
-                'evidence': ('verified', 'result_published', 'baseline_recorded')}.items():
+                'context': ('memory_context_prepared', 'memory_context_submitted', 'session_checkpoint', 'automatic_checkpoint', 'context_warning'),
+                'evidence': ('verified', 'result_published', 'baseline_recorded', 'checks_recorded', 'check_finished')}.items():
                 placeholders = ','.join('?' for _ in kinds_for_layer)
                 row = store.db.execute("SELECT * FROM events WHERE task_id=? AND (json_extract(payload,'$.layer')=? OR kind IN (" + placeholders + ")) ORDER BY seq DESC LIMIT 1", (task['id'], layer, *kinds_for_layer)).fetchone()
                 layer_activity[layer] = event_view(row) if row else None
@@ -190,6 +235,11 @@ def snapshot(store, task_id=None):
                 visited.append(4)
             usage_input = sum(c.get('usage', {}).get('input_tokens', 0) for c in calls)
             usage_output = sum(c.get('usage', {}).get('output_tokens', 0) for c in calls)
+            by_phase = {}
+            for c in calls:
+                bucket = by_phase.setdefault(c.get('phase') or '-', {'calls': 0, 'seconds': 0.0})
+                bucket['calls'] += 1
+                bucket['seconds'] = round(bucket['seconds'] + (c.get('seconds') or 0), 1)
             stage = {'received': 0, 'planning': 1, 'ready': 2, 'running': 2, 'waiting_peer': 2,
                      'applying': 3, 'verifying': 4, 'evaluating': 4, 'repairing': 2, 'completed': 5,
                      'already_satisfied': 5, 'stale': 4, 'needs_review': 4}.get(task['status'], 1 if not contract else 2)
@@ -199,9 +249,44 @@ def snapshot(store, task_id=None):
                 stage = 3
             if data.get('development') and state in ('blocked', 'interrupted', 'unattended', 'paused', 'pause_pending'):
                 stage = 1 if data.get('plan_requested') else {'verifying': 4, 'applying': 3}.get(data['development'].get('phase'), 2)
+            if runtime_version == 3:
+                # Five stations: goal · working · checking · verifying · verified. A stopped task keeps the furthest station reached.
+                visited = [0]
+                if 'model_started' in kinds or 'executor_recorded' in kinds:
+                    visited.append(1)
+                if 'checks_recorded' in kinds:
+                    visited.append(2)
+                if 'verdict' in kinds or any(c.get('phase') == 'verifying' for c in calls):
+                    visited.append(3)
+                if 'completion_verified' in kinds:
+                    visited.append(4)
+                stage = V3_STAGE.get(state, V3_STAGE.get(task['status'], max(visited)))
+                if state in ('verifying',) or (state == 'unattended' and task['status'] == 'verifying'):
+                    stage = 3
             started = datetime.datetime.fromisoformat(task['created'])
             ended = datetime.datetime.now(datetime.timezone.utc) if busy else datetime.datetime.fromisoformat(task['updated'])
+            executor = data.get('executor_result') or {}
+            goal_text = data.get('goal') if runtime_version == 3 else None
             tasks.append({'id': task['id'], 'provider': task['provider'], 'status': state,
+                          'runtime_version': runtime_version, 'reason_code': reason_code,
+                          # v3 contract (§4.1): goal · done · done_fixed · turns · verdicts · resumes; absent (None) on v2 tasks.
+                          'done': data.get('done') if runtime_version == 3 else None,
+                          'done_fixed': data.get('done_fixed') if runtime_version == 3 else None,
+                          'turns': data.get('turns') if runtime_version == 3 else None,
+                          'max_turns': data.get('max_turns') if runtime_version == 3 else None,
+                          'verdicts': [dict(v, items=[dict(i, evidence=[str(x)[:1200] for x in (i.get('evidence') or [])][:12])
+                                                      for i in (v.get('items') or [])],
+                                            extra=[str(x)[:600] for x in (v.get('extra') or [])][:12],
+                                            missing=[str(x)[:600] for x in (v.get('missing') or [])][:12],
+                                            fix=[str(x)[:600] for x in (v.get('fix') or [])][:12],
+                                            question=str(v.get('question') or '')[:2000])
+                                       for v in (data.get('verdicts') or [])[-6:]] if runtime_version == 3 else None,
+                          'resumes': [dict(r, sent=[str(x)[:600] for x in (r.get('sent') or [])][:12])
+                                      for r in (data.get('resumes') or [])[-12:]] if runtime_version == 3 else None,
+                          'executor_result': {'summary': str(executor.get('summary') or '')[:4000],
+                                              'finished': executor.get('finished'),
+                                              'remaining': [str(x)[:600] for x in (executor.get('remaining') or [])][:20],
+                                              'question': str(executor.get('question') or '')[:2000]} if runtime_version == 3 and executor else None,
                           'stage': stage, 'visited': visited, 'requested_model': data.get('options', {}).get('model'),
                           'routing': store.routing(task['id']), 'last_summary': data.get('last_summary', ''),
                           'files': data.get('development', {}).get('changed_paths', contract.get('files', [])),
@@ -215,10 +300,12 @@ def snapshot(store, task_id=None):
                                                  'error': m.get('error'), 'ack': m.get('ack')}
                                                 for m in data.get('memory', {}).get('outbox', [])]},
                           'metrics': {'calls': len(calls), 'model_seconds': round(sum(c.get('seconds', 0) for c in calls), 1),
-                                      'input_tokens': usage_input, 'output_tokens': usage_output,
+                                      'input_tokens': usage_input, 'output_tokens': usage_output, 'by_phase': by_phase,
                                       'elapsed_seconds': max(0, round((ended-started).total_seconds()))},
                           'recorded_status': task['status'], 'revision': task['revision'],
-                          'goal': data.get('presentation', {}).get('title') or contract.get('goal') or task['prompt'], 'request': data.get('mission_goal', task['prompt']),
+                          'goal': (data.get('presentation', {}).get('title') or (goal_text.strip().splitlines() or [''])[0][:240] if goal_text
+                                   else data.get('presentation', {}).get('title') or contract.get('goal') or task['prompt']),
+                          'request': goal_text if goal_text else data.get('mission_goal', task['prompt']),
                           'project': str(Path(data.get('development', {}).get('source', task['workspace'])).name),
                           'presentation': {k: str(v)[:16000] for k, v in data.get('presentation', {}).items()
                                            if k in ('title', 'summary', 'report', 'report_source', 'report_error')},
@@ -226,7 +313,8 @@ def snapshot(store, task_id=None):
                           'age': age_seconds(task['updated']), 'busy': busy, 'pause_requested': paused,
                           'reason': issue or failures.describe(data), 'failure': failures.details(data), 'questions': contract.get('questions', []),
                           'constraints': contract.get('constraints', []), 'steps': contract.get('steps', []),
-                          'attempt': data.get('attempt', 0), 'budget': data.get('options', {}).get('max_attempts', 3),
+                          'attempt': data.get('turns', 0) if runtime_version == 3 else data.get('attempt', 0),
+                          'budget': data.get('max_turns') if runtime_version == 3 else data.get('options', {}).get('max_attempts', 3),
                           'checks': checks, 'sessions': sessions, 'feedback': store.inbox(task['id']),
                           'messages': [{k: m[k] for k in ('id', 'target', 'question', 'reply', 'status', 'attempts', 'retry_at', 'error', 'updated')}
                                        for m in messages[-30:]], 'events': events, 'event_count': event_count,
@@ -289,16 +377,34 @@ def terminal(data, lang='en', width=110):
         rows.append(marker + fit(task['id'][:10], 12) + fit(t.get(task['status'], task['status']), 22)
                     + fit(task['provider'], 12) + fit(task['goal'], goal_width))
         operation = task['operation']
-        rows.append('  ' + operation['phase'] + ' · ' + operation['title'])
+        if task.get('runtime_version') == 3:
+            stations = ['Goal', 'Working', 'Checking', 'Verifying', 'Verified']
+            rows.append('  ' + stations[min(task['stage'], 4)] + ' · ' + operation['title'] + ' · runtime v3')
+        else:
+            rows.append('  ' + operation['phase'] + ' · ' + operation['title'])
         rows.append('  ' + clean(operation['reason']))
-        rows.append('  다음: ' + clean(operation['next_action']))
+        if operation.get('next_action'):
+            rows.append('  다음: ' + clean(operation['next_action']))
+        if task.get('runtime_version') == 3:
+            # Goal checklist as the terminal twin of the view: ○ not yet reviewed · ✓ met · ✗ unmet · ? unclear
+            last = (task.get('verdicts') or [None])[-1]
+            marks = {'met': '✓', 'unmet': '✗', 'unclear': '?'}
+            statuses = {i['id']: i['status'] for i in (last or {}).get('items', [])}
+            done_line = ' '.join(marks.get(statuses.get(d['id']), '○') + d['id'] for d in task.get('done') or []) or '(no done yet)'
+            rows.append('  done: ' + done_line + ' | turns ' + str(task.get('turns')) + '/' + str(task.get('max_turns'))
+                        + ' | resumes ' + str(len(task.get('resumes') or [])) + ' | verifier calls '
+                        + str((task.get('metrics') or {}).get('by_phase', {}).get('verifying', {}).get('calls', 0)))
+            if task.get('reason_code') or (task['status'] in ('needs_input', 'stalled', 'interrupted')):
+                rows.append('  stop: ' + (task.get('reason_code') or task['status']) + ' — ' + clean(task.get('reason') or ''))
+            if last and last.get('extra'):
+                rows.append('  extra: ' + clean(' · '.join(last['extra']))[:200])
         if task.get('process_health'):
             h = task['process_health']
             rows.append('  process: ' + h['status'] + ' | PID ' + str(h['pid'])
                         + ' | observed ' + str(h['observation_age_seconds']) + 's ago'
                         + ' | silent ' + str(h['output_silent_seconds']) + 's'
                         + ' | TCP: ' + str(h.get('tcp_states')) + ' | remote: unverified')
-        if task['reason'] or task['questions']:
+        if (task['reason'] or task['questions']) and task.get('runtime_version') != 3:
             rows.append('  ' + fit(task['reason'] or task['questions'][0], max(20, width - 2)))
         for session in task['sessions']:
             rows.append('    ' + fit(session['name'], 18) + fit(t[session['state']], 12)
@@ -419,21 +525,40 @@ def serve(home, port=0, open_browser=True, lang='en'):
                 if self.path == '/start':
                     prompt, root, provider = body.get('prompt'), body.get('workspace'), body.get('provider')
                     checks = body.get('checks')
+                    simplified = body.get('simplified', False)
+                    done = body.get('done', [])
+                    max_turns = body.get('max_turns', 8)
                     if (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 24000
                             or not isinstance(root, str) or provider not in ('codex', 'claude')
                             or not isinstance(checks, list) or not checks or len(checks) > 12
                             or type(body.get('public_web', False)) is not bool
-                            or type(body.get('review_plan', False)) is not bool):
+                            or type(body.get('review_plan', False)) is not bool
+                            or type(simplified) is not bool or not isinstance(done, list)
+                            or type(max_turns) is not int):
                         raise ValueError('Provide a request, repository, provider and verification command arrays')
                     if not shutil.which(provider):
                         raise ValueError('Selected CLI is not installed')
+                    if simplified:
+                        # Validate before cloning so a bad completion definition costs nothing (same rule as the CLI).
+                        from .simple_loop import completion_items, initialize
+                        completion_items(done, [], 'user')
+                        if not 1 <= max_turns <= 100:
+                            raise ValueError('max-turns must be between 1 and 100')
                     from .development import create
                     task = create(store, root, provider, prompt, [json.dumps(c) for c in checks])
                     task['data'].setdefault('options', {}).update(timeout=None, max_attempts=3, public_web=body.get('public_web', False))
-                    task['data']['plan_requested'] = True
-                    task['data']['review_plan'] = bool(body.get('review_plan', False))
                     task['data']['presentation'] = {'title': prompt.strip().splitlines()[0][:240]}
-                    store.save(task, 'received', 'execution_plan_requested', {'layer': 'control', 'note': 'New task queued for planning'})
+                    if simplified:
+                        # Runtime v3 preview path (goal → executor → fixed checks → one verifier); explicit opt-in like `start --simplified`.
+                        task['data']['options'].update(max_turns=max_turns, done=done or None)
+                        task['data']['plan_requested'] = False
+                        task['data']['review_plan'] = False
+                        initialize(store, task, done or None, max_turns)
+                        store.save(task, 'received', 'options_recorded', task['data']['options'])
+                    else:
+                        task['data']['plan_requested'] = True
+                        task['data']['review_plan'] = bool(body.get('review_plan', False))
+                        store.save(task, 'received', 'execution_plan_requested', {'layer': 'control', 'note': 'New task queued for planning'})
                     self.respond(200, json.dumps({'task_id': task['id'], 'worker_running': store.locked('worker')}))
                     return
                 task_id = body.get('task_id')
@@ -447,10 +572,22 @@ def serve(home, port=0, open_browser=True, lang='en'):
                     return
                 if self.path == '/feedback':
                     text = body.get('text')
-                    if not isinstance(text, str) or not text.strip() or len(text) > 24000:
+                    done = body.get('done')
+                    if done is not None and (task['data'].get('runtime_version') != 3 or not isinstance(done, list)):
+                        raise ValueError('Completion definitions apply to simplified (runtime v3) tasks only')
+                    if (not isinstance(text, str) or len(text) > 24000) or (not text.strip() and not done):
                         raise ValueError('Nonempty feedback required')
-                    message_id = store.enqueue(task_id, text, None)
-                    self.respond(200, json.dumps({'queued': message_id, 'worker_running': store.locked('worker')}))
+                    if done:
+                        # Explicit replacement of the frozen completion definition (§10 ②): the only way `done` changes.
+                        store.db.rollback()
+                        from .engine import Engine
+                        try:
+                            Engine(store).configure(task_id, {'done': done})
+                        except RuntimeError:
+                            self.respond(409, json.dumps({'error': 'Task is executing; completion definitions change at a safe boundary. Pause first or retry.'}))
+                            return
+                    message_id = store.enqueue(task_id, text, None) if text.strip() else None
+                    self.respond(200, json.dumps({'queued': message_id, 'done': bool(done), 'worker_running': store.locked('worker')}))
                 elif self.path == '/approve':
                     from .planning import approve
                     approve(store, task)

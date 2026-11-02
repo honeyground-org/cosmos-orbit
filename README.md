@@ -22,6 +22,35 @@ The default mode performs bounded UTF-8 text/JSON artifact work. An opt-in repos
 program with SQLite state, a serial queue worker, provider adapters, file reconciliation and
 a deterministic feedback loop. It is not a skill bundle or a workflow document interpreter.
 
+## Simplified loop (preview, 2026-11-02)
+
+Orbit is being reduced to four jobs: **fix the goal, fix the definition of done, keep the executor
+going to the end, and check the completion claim against that definition** (did it do it · what is
+missing · what is wrong · did it drift). Select the preview path explicitly:
+
+```sh
+cosmos-orbit start --simplified --development --provider codex --workspace /path/to/repo \
+  --check '["python3", "-m", "unittest", "discover"]' \
+  --done "D1 …" --done "D2 …" "Your request"      # omit --done: the executor proposes it on turn 1
+cosmos-orbit feedback TASK_ID --queue "…"          # same session resumes; --done replaces the definition
+```
+
+One task is one executor session. There is no planner call and no manager loop. After every executor
+turn the host runs your fixed checks; the independent reviewer is called **once**, only when the
+executor claims completion and every check passes. It returns `items` (met / unmet / unclear with
+evidence), `extra`, `missing`, `fix` and `question`; the host, not the model, derives the outcome.
+Stops are `verified`, `needs_input` (a question, scope drift, a missing definition, or files changed
+after verification), `stalled` (no progress across two resumes, or the turn limit), `interrupted`
+(a CLI error) and `paused`. **No stop is time-based.** States: received · working · checking ·
+verifying · verified · needs_input · stalled · interrupted · paused.
+
+The dashboard and `watch` show, per task, the request text, the completion checklist (✓ met · ✗ unmet
+· ? unclear · ○ not reviewed) with fixed-check exit codes, the reviewer's verdict, the session stream
+and the stop reason as the first line. In the new-task form, tick *Simplified loop* to enter the
+completion definition and turn limit. Existing tasks keep their recorded states and are not migrated;
+the sections below describe the legacy planner/manager path, which remains the default until the
+shared measurement (`scripts/orbit/practicality_ledger.py`) closes.
+
 ## Install
 
 Requires **macOS or Linux, Python 3.9+, and an installed/authenticated Codex CLI or Claude Code**.
