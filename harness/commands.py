@@ -7,8 +7,8 @@ from html import escape
 GROUPS = [
     ('Your own session (hooks)', [
         ('cosmos-orbit hooks install', 'Add the SessionStart, UserPromptSubmit and Stop hooks to Claude Code and Codex once. Inert until a project is on.'),
-        ('cosmos-orbit on   ·   cosmos-orbit off   ·   cosmos-orbit on --global',
-         'Switch this project (Git root) or the default. ORBIT=off overrides one session. Settings persist in the Orbit store.'),
+        ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
+         'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
         ('cosmos-orbit settings', 'Hook installation, default, per-project switches and what applies in this folder.'),
         ('claude --dangerously-skip-permissions   ·   codex',
          'Your normal command. The first substantial prompt becomes the goal; every prompt, correction, evidence and verdict lands in the ledger; the brief returns after compaction and at the next session.')]),

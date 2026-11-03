@@ -14,15 +14,18 @@ This is an interactive preview of the real UI, not a recording. GitHub README pa
 JavaScript, so the preview opens on GitHub Pages.
 
 
-A local companion for **Codex CLI or Claude Code**. Orbit keeps the original goal and every
-correction, records evidence per completion item, checks the completion claim once in a fresh
-context and keeps a replayable ledger. Two entrances, one ledger: attach Orbit to the session you
-already use, or run a request unattended in a private clone. Either engine works alone. Brain is
-optional. Orbit never commits, pushes or deploys task changes.
+A local companion for **Codex CLI or Claude Code**. A CLI session forgets its goal when the
+context is compacted, grades its own work, and ends when its process ends. Orbit is the layer
+that holds what the session cannot hold for itself: the original goal and every correction,
+evidence per completion item, one independent review of the completion claim, and a replayable
+ledger from which handoffs and measurements are generated. Two entrances, one ledger: attach Orbit
+to the session you already use, or run a request unattended in a private clone. Either engine works
+alone. Brain is optional. Orbit never commits, pushes or deploys task changes.
 
 ## Why Orbit does so little
 
-Claude Code and Codex do their best work with the fewest constraints. Every extra rule, planning
+Claude Code and Codex do their best work with the fewest constraints. Orbit does not start your
+session, does not wrap your terminal and does not sit between you and the model. Every extra rule, planning
 call, per-turn manager or wrapper costs tokens and attention, and a harness that over-manages the
 model produces worse results than the CLI on its own. That gap will widen, not narrow, because the
 native CLIs keep improving.
@@ -42,27 +45,40 @@ Everything else is left to the native CLI, and Orbit judges itself by one thing:
 ## Attach Orbit to the session you already use
 
 Requires macOS or Linux, Python 3.9+, Git, and an installed, authenticated provider CLI.
+Install once:
 
 ```sh
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
 ./install.sh
-cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop hooks for Claude Code and Codex (inert until a project is on)
-cosmos-orbit on --global          # default on everywhere, or:
-cosmos-orbit on                   # this project only (Git root)
-cosmos-orbit off                  # this project stays plain
-cosmos-orbit settings             # what applies here, and why
+cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop hooks for Claude Code and Codex
 ```
 
-Then use your normal command: `claude`, `claude --dangerously-skip-permissions` or `codex`.
-Nothing else changes. One Codex detail: its workspace-write sandbox blocks writes outside the
-checkout, so the executor's `cosmos-orbit done/evidence/claim` calls need the Orbit store added to
+The hooks are inert until something is switched on. Then use your normal command: `claude`,
+`claude --dangerously-skip-permissions` or `codex`. Nothing else changes.
+
+### Switches: three scopes, each on or off in one command
+
+| Scope | On | Off | Lasts |
+|---|---|---|---|
+| Every project, every `claude` and `codex` command | `cosmos-orbit on --global` | `cosmos-orbit off --global` | until changed; stored in the Orbit store |
+| One project (its Git root; run inside it, or give `PATH`) | `cosmos-orbit on` | `cosmos-orbit off` | until changed; stored per project |
+| One terminal session | `export ORBIT=on` (or `ORBIT=on claude`) | `export ORBIT=off` or `unset ORBIT` | that shell only |
+
+Precedence, highest first: terminal session → project → global → off. So `on --global` plus
+`off` in one project means "everywhere except here", `off --global` plus `on` in a few projects
+means "only there", and `ORBIT=off` silences one terminal whatever the stored switches say.
+`cosmos-orbit settings` prints the global default, every project switch, the environment, and
+which one applies in the current folder. Outside a Git repository, or wherever the result is off,
+the hooks return nothing and cost nothing. `cosmos-orbit hooks uninstall` removes the hooks; a
+backup of each host file is kept beside it.
+
+One Codex detail: its workspace-write sandbox blocks writes outside the checkout, so the
+executor's `cosmos-orbit done/evidence/claim` calls need the Orbit store added to
 `sandbox_workspace_write.writable_roots` (in `~/.codex/config.toml`, or
-`codex -c 'sandbox_workspace_write.writable_roots=["~/.local/share/local-harness"]'`); the hooks
-themselves run outside that sandbox and need nothing. Codex asks once to trust new hooks. Settings persist in the Orbit store; `ORBIT=off` (or `on`) overrides one
-session. Precedence: environment → project → default → off. In a project that is off, or outside
-a Git repository, the hooks return nothing and cost nothing. `cosmos-orbit hooks uninstall` removes
-them; a backup of each host file is kept beside it.
+`codex -c 'sandbox_workspace_write.writable_roots=["~/.local/share/local-harness"]'`). The hooks
+themselves run outside that sandbox and need nothing. Codex asks once to trust new hooks.
+
 
 What happens in an attached session:
 
