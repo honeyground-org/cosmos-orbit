@@ -104,10 +104,18 @@ def describe_simple(task, worker_running):
                 'reason': task.get('reason') or 'The provider is temporarily unavailable.',
                 'next_action': 'The worker retries automatically at the recorded retry time.',
                 'last_activity': next(iter(task.get('events', [])), None), 'worker_running': worker_running}
-    tone = ('active' if task.get('busy') and phase in ('working', 'checking', 'verifying')
+    attached = task.get('mode') == 'attached'
+    tone = ('active' if (task.get('busy') or attached) and phase in ('working', 'checking', 'verifying')
             else 'complete' if phase == 'verified'
             else 'problem' if phase in ('stalled', 'interrupted')
             else 'waiting')
+    if attached and phase == 'working':
+        reason_key = task.get('reason_code') or 'attached'
+        return {'phase_key': 'phase.working', 'title_key': 'simple.attached', 'reason_key': 'simple.reason.' + reason_key,
+                'phase': 'Working', 'title': 'With your session', 'tone': tone,
+                'reason': task.get('reason') or 'Your own Claude Code or Codex session is the executor; Orbit holds the goal, evidence and the review.',
+                'next_action': (task.get('objective_progress') or {}).get('next_action', ''),
+                'last_activity': next(iter(task.get('events', [])), None), 'worker_running': worker_running}
     titles = {'received': 'Queued', 'working': 'Working', 'checking': 'Checking fixed commands',
               'verifying': 'Reviewing completion', 'verified': 'Completion verified',
               'needs_input': 'Input needed', 'stalled': 'Work remains',

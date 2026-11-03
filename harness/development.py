@@ -82,7 +82,10 @@ def create(store, root, provider, prompt, checks, done=None, max_turns=8):
 def check(store, task, lease_fds=(), simplified=False):
     """Run only the original user-supplied argv, never a command proposed by the model."""
     dev = task['data']['development']
-    if git(task['workspace'], 'rev-parse', 'HEAD').decode().strip() != dev['base']:
+    if task['data'].get('mode') == 'attached':
+        if not dev.get('base'):
+            dev['base'] = git(task['workspace'], 'rev-parse', 'HEAD').decode().strip()
+    elif git(task['workspace'], 'rev-parse', 'HEAD').decode().strip() != dev['base']:
         raise ValueError('Isolated repository HEAD changed; inspect it before continuing')
     from . import recovery
     from .telemetry import recorder

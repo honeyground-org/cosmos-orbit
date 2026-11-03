@@ -33,6 +33,7 @@ class Store:
             seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
             kind TEXT NOT NULL, payload TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS attachments (workspace TEXT PRIMARY KEY, task_id TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS controls (task_id TEXT PRIMARY KEY, paused INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS routing (task_id TEXT PRIMARY KEY, id TEXT NOT NULL,
             provider TEXT NOT NULL, model TEXT, at TEXT NOT NULL);
@@ -196,6 +197,23 @@ class Store:
                 return True
         finally:
             os.close(fd)
+
+    def attach(self, workspace, task_id):
+        """One current attached task per project root; the previous record stays readable."""
+        self.get(task_id)
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO attachments VALUES(?,?,?)', (str(workspace), task_id, now()))
+
+    def attached(self, workspace):
+        row = self.db.execute('SELECT task_id FROM attachments WHERE workspace=?', (str(workspace),)).fetchone()
+        return row[0] if row else None
+
+    def detach(self, workspace):
+        with self.db:
+            self.db.execute('DELETE FROM attachments WHERE workspace=?', (str(workspace),))
+
+    def attachments(self):
+        return [dict(r) for r in self.db.execute('SELECT workspace, task_id, at FROM attachments ORDER BY at DESC')]
 
     def preference(self, key, value=None):
         if value is not None:

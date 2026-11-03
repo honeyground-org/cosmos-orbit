@@ -135,8 +135,15 @@ class Engine:
             raise ValueError('The separate planner is removed. Create a queued task to inspect it without execution.')
         with self.store.lock('task:' + task_id):
             task = self.store.get(task_id)
-            if not migrate(self.store, task):
-                return task
+            if task['data'].get('mode') == 'attached':
+                attached = True
+            else:
+                attached = False
+                if not migrate(self.store, task):
+                    return task
+        if attached:
+            from .attach import run_verification
+            return run_verification(self, task_id)
         if max_attempts is not None:
             self.configure(task_id, {'max_turns': max_attempts})
         return run(self, task_id)

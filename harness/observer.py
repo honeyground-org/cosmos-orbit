@@ -149,7 +149,8 @@ def snapshot(store, task_id=None):
                     state, issue = 'stale', str(error)
             runtime_version = data.get('runtime_version', 2)
             reason_code = data.get('reason_code') or ''
-            if runtime_version == 3 and state == 'verified' and data.get('development'):
+            mode = data.get('mode', 'managed')
+            if runtime_version == 3 and state == 'verified' and data.get('development') and mode != 'attached':
                 # Same rule as the CLI status projection: files changed after verification → a human decision.
                 try:
                     from .development import evidence_current
@@ -157,7 +158,7 @@ def snapshot(store, task_id=None):
                         state, reason_code = 'needs_input', 'stale_evidence'
                 except (OSError, ValueError) as error:
                     state, reason_code, issue = 'needs_input', 'stale_evidence', str(error)
-            if state in ACTIVE and not busy:
+            if state in ACTIVE and not busy and not (mode == 'attached' and state == 'working'):
                 state = 'unattended'
                 if runtime_version == 3:
                     reason_code = 'unattended'
@@ -267,8 +268,17 @@ def snapshot(store, task_id=None):
             ended = datetime.datetime.now(datetime.timezone.utc) if busy else datetime.datetime.fromisoformat(task['updated'])
             executor = data.get('executor_result') or {}
             goal_text = data.get('goal') if runtime_version == 3 else None
+            done_evidence = {key: [{'at': e.get('at'), 'kind': e.get('kind'), 'note': str(e.get('note') or '')[:300],
+                                    'exit_code': e.get('exit_code'), 'argv': ' '.join(e.get('argv') or [])[:160],
+                                    'path': e.get('path'), 'sha256': (e.get('sha256') or '')[:12], 'seconds': e.get('seconds')}
+                                   for e in rows[-5:]] for key, rows in (data.get('done_evidence') or {}).items()} if mode == 'attached' else None
             tasks.append({'id': task['id'], 'provider': task['provider'], 'status': state,
                           'runtime_version': runtime_version, 'reason_code': reason_code,
+                          # Entrance: 'attached' = the user's own CLI session is the executor (no clone, no owned call while working).
+                          'mode': mode, 'host': data.get('host'), 'attached_at': data.get('attached_at'),
+                          'done_evidence': done_evidence, 'prompts_count': len(data.get('prompts') or []),
+                          'briefs': data.get('briefs') if mode == 'attached' else None,
+                          'verification_pending': bool(data.get('verification_pending')),
                           'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
                           'recoverable': data.get('recoverable', False),
                           # v3 contract (§4.1): goal · done · done_fixed · turns · verdicts · resumes; absent (None) on v2 tasks.
@@ -393,6 +403,11 @@ def terminal(data, lang='en', width=110):
             marks = {'met': '✓', 'unmet': '✗', 'unclear': '?'}
             statuses = {i['id']: i['status'] for i in (last or {}).get('items', [])}
             done_line = ' '.join(marks.get(statuses.get(d['id']), '○') + d['id'] for d in task.get('done') or []) or '(no done yet)'
+            if task.get('mode') == 'attached':
+                evidence_counts = ' '.join(k + ':' + str(len(v)) for k, v in (task.get('done_evidence') or {}).items()) or '-'
+                rows.append('  entrance: attached · ' + clean(task['workspace']) + ' | prompts ' + str(task.get('prompts_count', 0))
+                            + ' | briefs ' + str((task.get('briefs') or {}).get('served', 0)) + ' | evidence ' + evidence_counts
+                            + (' | verification pending' if task.get('verification_pending') else ''))
             rows.append('  done: ' + done_line + ' | turns ' + str(task.get('turns')) + '/' + str(task.get('max_turns'))
                         + ' | resumes ' + str(len(task.get('resumes') or [])) + ' | verifier calls '
                         + str((task.get('metrics') or {}).get('by_phase', {}).get('verifying', {}).get('calls', 0)))
@@ -515,7 +530,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
             if self.headers.get('Host') != authority or self.headers.get('Origin') != origin or not self.valid_token():
                 self.respond(403, '{}')
                 return
-            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/verify', '/assess'):
+            if self.path not in ('/feedback', '/pause', '/continue', '/switch', '/start', '/attach', '/verify', '/assess'):
                 self.respond(404, '{}')
                 return
             store = Store(home)
@@ -545,6 +560,19 @@ def serve(home, port=0, open_browser=True, lang='en'):
                     task['data']['presentation'] = {'title': prompt.strip().splitlines()[0][:240]}
                     store.save(task, 'received', 'options_recorded', task['data']['options'])
                     self.respond(200, json.dumps({'task_id': task['id'], 'worker_running': store.locked('worker')}))
+                    return
+                if self.path == '/attach':
+                    prompt, root, host = body.get('prompt'), body.get('workspace'), body.get('provider')
+                    checks, done = body.get('checks') or [], body.get('done') or []
+                    if (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 24000 or not isinstance(root, str)
+                            or host not in ('codex', 'claude') or not isinstance(checks, list) or not isinstance(done, list)):
+                        raise ValueError('Provide a request, repository and host')
+                    from .attach import create, set_switch
+                    from .simple_loop import completion_items
+                    completion_items(done, [], 'user')
+                    task = create(store, root, prompt, host, None, [json.dumps(c) for c in checks], done or None)
+                    switched = set_switch(store, 'on', root)
+                    self.respond(200, json.dumps({'task_id': task['id'], 'workspace': switched['root'], 'orbit': 'on'}))
                     return
                 task_id = body.get('task_id')
                 if not isinstance(task_id, str):
@@ -578,11 +606,21 @@ def serve(home, port=0, open_browser=True, lang='en'):
                     from .simple_loop import migrate
                     try:
                         with store.lock('task:' + task_id):
-                            if migrate(store, task):
+                            if task['data'].get('mode') == 'attached':
+                                if not (task['data'].get('executor_result') or {}).get('finished'):
+                                    raise ValueError('Nothing claimed yet; the executor runs claim first')
+                                task['data'].update(verification_pending=True, reason='', reason_code='')
+                                task['data'].pop('checks_done_for', None)
+                                task['data']['development']['phase'] = 'checking'
+                                store.save(task, 'checking', 'verification_requested', {'turn': task['data'].get('turns', 0)})
+                            elif migrate(store, task):
                                 request_verification(store, task)
                     except RuntimeError:
                         self.respond(409, json.dumps({'error': 'Task is executing; pause and wait for a safe boundary before verifying.'}))
                         return
+                    if task['data'].get('mode') == 'attached' and not store.locked('worker'):
+                        from .recovery import ensure_worker
+                        ensure_worker(store)
                     self.respond(200, json.dumps({'queued': True, 'worker_running': store.locked('worker')}))
                 elif self.path == '/switch':
                     request = store.route(task_id, body.get('provider'), body.get('model') or None)

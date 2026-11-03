@@ -29,7 +29,8 @@ trap 'rm -rf "$WHEEL_DIR"' EXIT HUP INT TERM
 if "$INSTALL_DIR/venv/bin/python" -m pip show local-harness >/dev/null 2>&1; then
   "$INSTALL_DIR/venv/bin/python" -m pip uninstall --yes local-harness
 fi
-"$INSTALL_DIR/venv/bin/python" -m pip install --disable-pip-version-check --upgrade "$WHEEL_DIR"/cosmos_orbit-*.whl
+# Same version number, new code: pip refuses a same-version wheel unless forced (seen 2026-11-03).
+"$INSTALL_DIR/venv/bin/python" -m pip install --disable-pip-version-check --upgrade --force-reinstall --no-deps "$WHEEL_DIR"/cosmos_orbit-*.whl
 "$INSTALL_DIR/venv/bin/cosmos-orbit" --help >/dev/null
 for LAUNCHER in cosmos-orbit harness; do
   ln -sfn "$INSTALL_DIR/venv/bin/$LAUNCHER" "$BIN_DIR/$LAUNCHER"

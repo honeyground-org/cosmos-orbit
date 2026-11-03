@@ -24,6 +24,9 @@ def show(task):
             'done': data.get('done'), 'done_fixed': data.get('done_fixed'), 'turns': data.get('turns'),
             'max_turns': data.get('max_turns'), 'verdicts': data.get('verdicts'), 'resumes': data.get('resumes'),
             'reason_code': data.get('reason_code'),
+            'mode': data.get('mode', 'managed'), 'host': data.get('host'),
+            'done_evidence': data.get('done_evidence'), 'prompts': data.get('prompts'), 'briefs': data.get('briefs'),
+            'verification_pending': data.get('verification_pending', False),
             'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
             'recoverable': data.get('recoverable', False),
             'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
@@ -73,8 +76,52 @@ def main(argv=None):
         command.add_argument('--model')
         command.add_argument('--max-turns', type=int)
         command.add_argument('--context-budget', type=int, help='Advisory context threshold; never stops a task')
-    for name in ('status', 'events', 'pause', 'handoff', 'verify', 'messages'):
+    for name in ('status', 'events', 'pause', 'verify', 'messages'):
         sub.add_parser(name).add_argument('id')
+    handoff_cmd = sub.add_parser('handoff', help='Preserve goal, corrections, evidence and verdicts; --write renders the ledger as Markdown')
+    handoff_cmd.add_argument('id')
+    handoff_cmd.add_argument('--write', metavar='PATH')
+    # Attach Orbit to the user's own CLI session: settings, host hooks and the ledger commands the executor calls.
+    for name, text in (('on', 'Turn Orbit on for this project (or --global default)'), ('off', 'Turn Orbit off for this project (or --global default)')):
+        switch_cmd = sub.add_parser(name, help=text)
+        switch_cmd.add_argument('path', nargs='?')
+        switch_cmd.add_argument('--global', dest='global_default', action='store_true')
+    sub.add_parser('settings', help='Hook installation, default and per-project switches').add_argument('path', nargs='?')
+    hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the SessionStart/UserPromptSubmit/Stop hooks in Claude Code and Codex')
+    hooks_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
+    hooks_cmd.add_argument('--host', action='append', choices=('claude', 'codex'))
+    attach_cmd = sub.add_parser('attach', help='Create the ledger for a request in your current checkout (no clone, no model call)')
+    attach_cmd.add_argument('prompt', nargs='?')
+    attach_cmd.add_argument('--workspace', default='.')
+    attach_cmd.add_argument('--host', choices=('codex', 'claude'))
+    attach_cmd.add_argument('--check', action='append', default=[], metavar='ARGV_JSON')
+    attach_cmd.add_argument('--done', action='append')
+    attach_cmd.add_argument('--max-turns', type=int, default=8)
+    done_cmd = sub.add_parser('done', help='Propose or set the completion definitions of an attached task')
+    done_cmd.add_argument('id')
+    done_cmd.add_argument('text', nargs='+')
+    done_cmd.add_argument('--user', action='store_true', help='Record as fixed by the user')
+    evidence_cmd = sub.add_parser('evidence', help='Record evidence for one completion item: a note, a command actually run, or a file fingerprint')
+    evidence_cmd.add_argument('id')
+    evidence_cmd.add_argument('item')
+    evidence_cmd.add_argument('--note')
+    evidence_cmd.add_argument('--command', dest='argv_json', metavar='ARGV_JSON')
+    evidence_cmd.add_argument('--file')
+    claim_cmd = sub.add_parser('claim', help='Claim completion (fixed checks run now; one independent review follows) or report remaining work')
+    claim_cmd.add_argument('id')
+    claim_cmd.add_argument('--summary', default='')
+    claim_cmd.add_argument('--remaining', action='append', default=[])
+    claim_cmd.add_argument('--question', default='')
+    claim_cmd.add_argument('--wait', action='store_true', help='Run the independent review now instead of in the background worker')
+    brief_cmd = sub.add_parser('brief', help='Print the brief the hooks inject (current checkout or a task ID)')
+    brief_cmd.add_argument('id', nargs='?')
+    detach_cmd = sub.add_parser('detach', help='Close the current attached task without verification; the ledger stays')
+    detach_cmd.add_argument('id', nargs='?')
+    detach_cmd.add_argument('--workspace', default='.')
+    sub.add_parser('lessons', help='Corrections repeated across tasks (guard-rule candidates)').add_argument('--min', type=int, default=2)
+    hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
+    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop'))
+    hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
     result = sub.add_parser('result')
     result.add_argument('id')
     result.add_argument('--file')
@@ -88,6 +135,7 @@ def main(argv=None):
     worker.add_argument('--once', action='store_true')
     worker.add_argument('--background', action='store_true', help='Keep authorised work running after this terminal closes')
     worker.add_argument('--interval', type=float, default=3)
+    worker.add_argument('--idle-exit', type=int, help='Exit after this many quiet seconds (transient worker for one pending review)')
     watch = sub.add_parser('watch')
     watch.add_argument('--once', action='store_true')
     watch.add_argument('--task')
@@ -118,6 +166,23 @@ def main(argv=None):
         print(json.dumps(doctor(), indent=2))
         return 0
     store = Store(args.home)
+    if args.command == 'hook':
+        # Host hook: stdin carries the event JSON; stdout carries one JSON object or nothing. Exit 0 always.
+        from . import attach
+        try:
+            raw = sys.stdin.read(400000) if not sys.stdin.isatty() else ''
+            payload = json.loads(raw) if raw.strip() else {}
+            if not isinstance(payload, dict):
+                payload = {}
+        except ValueError:
+            payload = {}
+        try:
+            output = attach.handle(store, args.event, payload, args.host)
+            if output:
+                print(json.dumps(output, ensure_ascii=False))
+        finally:
+            store.close()
+        return 0
     engine = Engine(store, notify=lambda phase, task_id: print(task_id + ' ' + phase, file=sys.stderr, flush=True))
     options = {key: getattr(args, key, None) for key in ('model', 'max_turns', 'context_budget', 'done')}
     def run_owned(task_id):
@@ -191,10 +256,78 @@ def main(argv=None):
             from .verifier import request_verification
             with store.lock('task:' + args.id):
                 task = store.get(args.id)
-                from .simple_loop import migrate
-                if migrate(store, task):
-                    request_verification(store, task)
+                if task['data'].get('mode') == 'attached':
+                    if not (task['data'].get('executor_result') or {}).get('finished'):
+                        raise ValueError('Nothing claimed yet; run claim first')
+                    task['data'].update(verification_pending=True, reason='', reason_code='')
+                    task['data'].pop('checks_done_for', None)
+                    task['data']['development']['phase'] = 'checking'
+                    store.save(task, 'checking', 'verification_requested', {'turn': task['data'].get('turns', 0)})
+                else:
+                    from .simple_loop import migrate
+                    if migrate(store, task):
+                        request_verification(store, task)
             result = show(run_owned(args.id))
+        elif args.command in ('on', 'off'):
+            from .attach import set_switch, settings_view
+            result = dict(set_switch(store, args.command, args.path, args.global_default), settings=settings_view(store, args.path))
+        elif args.command == 'settings':
+            from .attach import settings_view
+            result = settings_view(store, args.path)
+        elif args.command == 'hooks':
+            from .attach import install_hooks, uninstall_hooks, hook_status
+            hosts = args.host or [name for name in ('claude', 'codex') if shutil.which(name)] or ['claude']
+            if args.action == 'install':
+                result = {'installed': [install_hooks(host, args.home) for host in hosts],
+                          'note': 'Hooks are inert until a project (or the default) is on: cosmos-orbit on [--global]'}
+            elif args.action == 'uninstall':
+                result = {'uninstalled': [uninstall_hooks(host) for host in hosts]}
+            else:
+                result = {host: hook_status(host) for host in hosts}
+        elif args.command == 'attach':
+            from .attach import create, brief_text
+            from .simple_loop import completion_items
+            completion_items(args.done or [], [], 'user')
+            prompt = sys.stdin.read(24001) if args.prompt == '-' else args.prompt
+            host = args.host or store.preference('provider')
+            if host is None:
+                installed = [name for name in ('codex', 'claude') if shutil.which(name)]
+                if len(installed) != 1:
+                    raise ValueError('Choose --host codex|claude')
+                host = installed[0]
+            task = create(store, args.workspace, prompt, host, None, args.check, args.done, args.max_turns)
+            print(brief_text(store, task, 'attach'), file=sys.stderr)
+            result = show(task)
+        elif args.command == 'done':
+            from .attach import set_done
+            result = show(set_done(store, args.id, args.text, 'user' if args.user else 'executor'))
+        elif args.command == 'evidence':
+            from .attach import record_evidence
+            entry = record_evidence(store, args.id, args.item, args.note, args.argv_json, args.file)
+            result = {'id': args.id, 'item': args.item, 'recorded': entry}
+        elif args.command == 'claim':
+            from .attach import claim, run_verification
+            from .recovery import ensure_worker
+            task = claim(store, args.id, args.summary, args.remaining, args.question)
+            if task['data'].get('verification_pending'):
+                task = run_verification(engine, args.id, checks_only=not args.wait)
+                if task['data'].get('verification_pending') and not args.wait:
+                    ensure_worker(store, idle_exit=90)
+                    print('Fixed checks passed; the independent review runs in the background worker.', file=sys.stderr)
+            result = show(task)
+        elif args.command == 'brief':
+            from .attach import brief_text, current_task, project_root
+            task = store.get(args.id) if args.id else current_task(store, project_root()[0])
+            if task is None:
+                raise ValueError('No attached task in this checkout')
+            print(brief_text(store, task, 'brief'))
+            return 0
+        elif args.command == 'detach':
+            from .attach import detach
+            result = detach(store, args.workspace, args.id)
+        elif args.command == 'lessons':
+            from .attach import lessons
+            result = lessons(store, args.min)
         elif args.command == 'status':
             task = store.get(args.id)
             result = show(task)
@@ -218,7 +351,17 @@ def main(argv=None):
         elif args.command == 'switch':
             result = {'queued': store.route(args.id, args.provider, args.model)}
         elif args.command == 'handoff':
-            result = show(engine.handoff(args.id))
+            task = store.get(args.id)
+            if task['data'].get('mode') != 'attached':
+                task = engine.handoff(args.id)
+            result = show(task)
+            if args.write:
+                from .attach import write_handoff
+                result['handoff_file'] = write_handoff(store, task, args.write)
+            elif task['data'].get('mode') == 'attached':
+                from .attach import handoff_markdown
+                print(handoff_markdown(store, task))
+                return 0
         elif args.command == 'recover':
             result = show(engine.recover(args.id))
         elif args.command == 'result':
@@ -279,6 +422,7 @@ def main(argv=None):
                 print(json.dumps({'worker_pid': ensure_worker(store), 'running': True}))
                 return 0
             with store.lock('worker'):
+                last_active = time.time()
                 while True:
                     for item in store.list():
                         task = store.get(item['id'])
@@ -294,7 +438,12 @@ def main(argv=None):
                             except RuntimeError:
                                 pass
                         active = task['status'] in ('received', 'ready', 'running', 'working', 'checking', 'verifying', 'evaluating', 'paused')
+                        if task['data'].get('mode') == 'attached':
+                            active = bool(task['data'].get('verification_pending')) and task['status'] not in ('verified', 'stalled', 'interrupted', 'needs_input')
+                            if not active:
+                                continue
                         if active or task['data'].get('recoverable') or store.inbox(item['id']) or store.routing(item['id']):
+                            last_active = time.time()
                             try:
                                 updated = engine.run(item['id'])
                                 if updated['revision'] != item['revision']:
@@ -302,7 +451,7 @@ def main(argv=None):
                             except RuntimeError as error:
                                 if 'owns this task' not in str(error):
                                     print(str(error), file=sys.stderr)
-                    if args.once:
+                    if args.once or (args.idle_exit and time.time() - last_active > args.idle_exit):
                         break
                     time.sleep(args.interval)
             return 0

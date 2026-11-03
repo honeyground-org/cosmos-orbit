@@ -1,27 +1,39 @@
 """Shared, model-free command reference for terminal and browser.
 
-One native execution loop owns goal preservation, recovery and completion verification. Legacy subcommands still exist in `--help`.
+Two entrances, one ledger: attach to your own Claude Code or Codex session (hooks), or run unattended in a private clone.
 """
 from html import escape
 
 GROUPS = [
-    ('Work', [
+    ('Your own session (hooks)', [
+        ('cosmos-orbit hooks install', 'Add the SessionStart, UserPromptSubmit and Stop hooks to Claude Code and Codex once. Inert until a project is on.'),
+        ('cosmos-orbit on   ·   cosmos-orbit off   ·   cosmos-orbit on --global',
+         'Switch this project (Git root) or the default. ORBIT=off overrides one session. Settings persist in the Orbit store.'),
+        ('cosmos-orbit settings', 'Hook installation, default, per-project switches and what applies in this folder.'),
+        ('claude --dangerously-skip-permissions   ·   codex',
+         'Your normal command. The first substantial prompt becomes the goal; every prompt, correction, evidence and verdict lands in the ledger; the brief returns after compaction and at the next session.')]),
+    ('Inside the session (the executor calls these)', [
+        ("cosmos-orbit done TASK_ID 'D1 …' 'D2 …'", 'Propose one to six completion definitions. The user can replace them with feedback --done.'),
+        ("cosmos-orbit evidence TASK_ID D1 --note '…' [--command '[\"python3\",\"-m\",\"pytest\"]'] [--file path]",
+         'Evidence per item: a command actually run (exit code and output tail), a file fingerprint, or a note.'),
+        ("cosmos-orbit claim TASK_ID --summary '…' [--remaining '…'] [--wait]",
+         'Completion claim: fixed checks run now; a failure returns to you; a pass queues one independent read-only review.'),
+        ('cosmos-orbit feedback TASK_ID "Correction"', 'Keep the original goal and add this correction. Repeated --done explicitly replaces the checklist.'),
+        ('cosmos-orbit brief [TASK_ID]', 'Print what the hooks inject: goal, corrections, checklist, evidence, last verdict, stop reason.'),
+        ('cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md', 'Render the ledger as a Markdown handoff. Nothing is written by hand.')]),
+    ('Unattended (private clone)', [
         ('cosmos-orbit start --provider codex --workspace /path/to/repo "Your request"',
-         'Fix the original goal, execute with the native CLI, check the result and independently test the completion claim. --check and repeated --done are optional.'),
-        ('cosmos-orbit worker --background', 'Continue authorised queued work and recover interrupted calls after the terminal closes.'),
-        ('cosmos-orbit resume TASK_ID', 'Continue after a pause. Interrupted calls are reconciled with retained files and the owned native session.')]),
+         'Fix the goal, execute with the native CLI in an isolated clone, run fixed checks and independently test the completion claim.'),
+        ('cosmos-orbit worker --background', 'Continue authorised queued work, pending reviews and interrupted calls after the terminal closes.'),
+        ('cosmos-orbit resume TASK_ID   ·   cosmos-orbit pause TASK_ID', 'Continue after a pause, or stop at a safe boundary. A user pause is never cleared by recovery.')]),
     ('Inspect', [
-        ('cosmos-orbit dashboard', 'Inspect the same goals, calls, checks, recovery and conclusions shown in the terminal.'),
-        ('cosmos-orbit watch --once', 'Read one model-free terminal snapshot.'),
-        ('cosmos-orbit status TASK_ID', 'Read completion evidence, retry time, work location and process state.'),
-        ('cosmos-orbit verify TASK_ID', 'Recheck a saved result without rerunning implementation. Missing evidence is not completion.')]),
-    ('Steer', [
-        ('cosmos-orbit feedback TASK_ID "Updated instruction"', 'Keep the original goal and add this correction. Repeated --done explicitly replaces the checklist.'),
-        ('cosmos-orbit pause TASK_ID', 'Stop at a safe boundary. A user pause is never cleared by automatic recovery.'),
-        ('cosmos-orbit handoff TASK_ID', 'Preserve goal, feedback and current evidence before choosing a fresh executor session.')])
+        ('cosmos-orbit dashboard', 'The same goals, evidence, checks, reviews and stop reasons as the terminal, for both entrances.'),
+        ('cosmos-orbit watch --once   ·   cosmos-orbit status TASK_ID', 'One model-free snapshot, or the full record of one task.'),
+        ('cosmos-orbit verify TASK_ID', 'Recheck a claimed result now: fixed checks plus one independent review. Missing evidence is not completion.'),
+        ('cosmos-orbit lessons', 'Corrections repeated across tasks: candidates for a guard rule, counted from the ledger.')])
 ]
-NOTE = ('Use --home PATH consistently for the app, worker and observers. '
-        'Viewing help or observing a task never starts model work. See --help for engine switching, memory and historical records.')
+NOTE = ('Use --home PATH (or HARNESS_HOME) consistently for hooks, worker and observers. '
+        'Viewing help, briefs or the dashboard never starts model work; the only model call after a claim is the one review.')
 
 
 def terminal_guide():

@@ -29,6 +29,9 @@ def evidence_bundle(task):
                                   'limits': 'Excludes ignored files and external paths; not a full access audit.'},
             'native_tool_trace': native_tool_trace(task),
             'file_limits': 'At most 20 files, 8000 characters per file and 48000 total. Omitted content is not verified.',
+            'executor_evidence': {key: [{k: v for k, v in row.items() if k != 'output_tail'} | {'output_tail': str(row.get('output_tail') or '')[-1200:]}
+                                        for row in rows[-5:]] for key, rows in (data.get('done_evidence') or {}).items()},
+            'executor_evidence_note': 'Records the executor made with cosmos-orbit evidence; claims to check, not proof.',
             'report': data.get('presentation', {}).get('report'),
             'executor_report': data.get('last_summary'),
             'executor_progress': data.get('objective_progress'),

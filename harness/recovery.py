@@ -172,8 +172,10 @@ def resume_session(record):
     return session
 
 
-def ensure_worker(store):
-    """Starting the app resumes authorised queued work; read-only observers never call this."""
+def ensure_worker(store, idle_exit=None):
+    """Starting the app resumes authorised queued work; read-only observers never call this.
+
+    idle_exit (seconds): a transient worker for one pending review exits after that quiet period."""
     if store.locked('worker'):
         return None
     log = store.home / 'worker.log'
@@ -182,7 +184,10 @@ def ensure_worker(store):
     env['PYTHONPATH'] = package_root + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
     with log.open('ab') as output:
         os.chmod(log, 0o600)
-        process = subprocess.Popen([sys.executable, '-m', 'harness.cli', '--home', str(store.home), 'worker'],
+        command = [sys.executable, '-m', 'harness.cli', '--home', str(store.home), 'worker']
+        if idle_exit:
+            command += ['--idle-exit', str(int(idle_exit))]
+        process = subprocess.Popen(command,
                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                                    cwd=store.home, env=env, start_new_session=True)
     for _ in range(100):
