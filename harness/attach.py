@@ -1,6 +1,6 @@
 """Attach Orbit to the user's own Claude Code or Codex session.
 
-One task record ("ledger") per project at a time. Host hooks (SessionStart · UserPromptSubmit · Stop) read the
+One task record ("ledger") per project at a time. Host hooks (SessionStart · UserPromptSubmit · Stop · PreCompact) read the
 current task and return a short brief; the executor is the user's own session, so Orbit never calls a model here
 except for the one independent review after a completion claim. Nothing in this module changes task files.
 """

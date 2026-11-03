@@ -6,7 +6,7 @@ from html import escape
 
 GROUPS = [
     ('Your own session (hooks)', [
-        ('cosmos-orbit hooks install', 'Add the SessionStart, UserPromptSubmit and Stop hooks to Claude Code and Codex once. Inert until a project is on.'),
+        ('cosmos-orbit hooks install', 'Add the four hooks (SessionStart, UserPromptSubmit, Stop, PreCompact) to Claude Code and Codex once. Inert until something is switched on.'),
         ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
          'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
         ('cosmos-orbit context [200k | on | off] [--global]   ·   export ORBIT_HANDOFF_AT=250k',

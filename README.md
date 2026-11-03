@@ -73,7 +73,7 @@ Install once:
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
 ./install.sh
-cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop hooks for Claude Code and Codex
+cosmos-orbit hooks install        # four hooks for Claude Code and Codex: SessionStart · UserPromptSubmit · Stop · PreCompact
 ```
 
 The hooks are inert until something is switched on. Then use your normal command: `claude`,

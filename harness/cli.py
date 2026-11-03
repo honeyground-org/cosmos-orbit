@@ -87,7 +87,7 @@ def main(argv=None):
         switch_cmd.add_argument('path', nargs='?')
         switch_cmd.add_argument('--global', dest='global_default', action='store_true')
     sub.add_parser('settings', help='Hook installation, default and per-project switches').add_argument('path', nargs='?')
-    hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the SessionStart/UserPromptSubmit/Stop hooks in Claude Code and Codex')
+    hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the four hooks (SessionStart/UserPromptSubmit/Stop/PreCompact) in Claude Code and Codex')
     hooks_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
     hooks_cmd.add_argument('--host', action='append', choices=('claude', 'codex'))
     attach_cmd = sub.add_parser('attach', help='Create the ledger for a request in your current checkout (no clone, no model call)')
