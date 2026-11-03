@@ -27,6 +27,22 @@ _SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-
                      r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
 
 
+# A go-ahead is any combination of these, ignoring spaces, punctuation and politeness endings.
+_GO = sorted({
+    'ok', 'okay', 'k', 'yes', 'yep', 'yeah', 'sure', 'go', 'goahead', 'goon', 'on', 'continue', 'proceed', 'next', 'done',
+    'soundsgood', 'lgtm', 'thanks', 'thankyou', 'please', 'keepgoing', 'carryon',
+    '좋아', '좋아요', '좋습니다', '응', '네', '예', '그래', '그래요', '오케이', 'ㅇㅋ', 'ㄱㄱ', '확인', '알겠어', '알겠습니다',
+    '계속', '계속해', '계속해줘', '계속해요', '계속해주세요', '계속진행', '계속진행해', '진행', '진행해', '진행해줘', '진행해요',
+    '진행해주세요', '진행부탁해', '진행부탁해요', '진행부탁합니다', '부탁해', '부탁해요', '부탁합니다', '이어서', '이어서진행',
+    '이어서진행해', '이어서해', '이어서해줘', '그렇게해', '그렇게해줘', '그렇게해주세요', '고마워', '고마워요', '감사', '감사합니다',
+}, key=len, reverse=True)
+_GO_ONLY = re.compile('^(?:' + '|'.join(re.escape(w) for w in _GO) + ')+$')
+
+
+def _compact(text):
+    return re.sub(r'[\W_]+', '', text.lower())
+
+
 def classify(text):
     """'system' | 'requirement' | 'question' | 'trivial'. Only a person's words can set or change a goal:
     host notifications (background tasks, monitors, slash-command echoes) arrive through the same hook and are
@@ -35,7 +51,7 @@ def classify(text):
     if _SYSTEM.match(stripped):
         return 'system'
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
-    if not bare or bare in _TRIVIAL:
+    if not bare or bare in _TRIVIAL or _GO_ONLY.match(_compact(stripped) or ' '):
         return 'trivial'
     if stripped.endswith(('?', '？')) and not _REQUEST.search(stripped.lower()):
         return 'question'  # an information question; a request phrased as a question falls through

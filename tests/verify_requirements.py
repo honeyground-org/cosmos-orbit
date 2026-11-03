@@ -88,6 +88,11 @@ def main():
         check('request phrased as a question → requirement: ' + text, requirements.classify(text) == 'requirement')
     for text in ('안돼', 'no', '아니'):
         check('short refusal → requirement: ' + text, requirements.classify(text) == 'requirement')
+    # found by the second independent review: go-aheads with punctuation, spacing or politeness endings
+    for text in ('좋아, 계속해', 'ok, continue', '계속 해', '네 진행해주세요', '진행 부탁해', 'go ahead', 'sounds good', 'lgtm', 'Yes, please.'):
+        check('go-ahead variant → trivial: ' + text, requirements.classify(text) == 'trivial')
+    for text in ('계속해서 CSV도 추가해', 'ok, but also handle tabs', '좋아, 근데 음수는 막아줘'):
+        check('a go-ahead plus a change stays a requirement (control): ' + text, requirements.classify(text) == 'requirement')
     for text in ('How are totals rounded?', '왜 실패했어?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
