@@ -93,6 +93,9 @@ def main():
         check('go-ahead variant → trivial: ' + text, requirements.classify(text) == 'trivial')
     for text in ('계속해서 CSV도 추가해', 'ok, but also handle tabs', '좋아, 근데 음수는 막아줘'):
         check('a go-ahead plus a change stays a requirement (control): ' + text, requirements.classify(text) == 'requirement')
+    # found by the third independent review: other request endings
+    for text in ('음수는 막아줘?', '보여줘?', '내보내줘?', '합계도 표시할 수 있을까?', 'PDF export too?', 'What about tabs?'):
+        check('request ending in a question mark → requirement: ' + text, requirements.classify(text) == 'requirement')
     for text in ('How are totals rounded?', '왜 실패했어?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 

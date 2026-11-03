@@ -86,6 +86,27 @@ def main():
     check('the invitation has one taker (control)', task_of(store, root, 'F') is None
           and store.get(d['id'])['data']['handoff_state'].get('adopted_by') == 'E')
 
+    # found by the independent review: a session that ended and then resumes is live again
+    root3 = make_repo(base, 'repo-resume')
+    attach.set_switch(store, 'on', root3)
+    prompt(store, root3, 'R', 'Build the resume-safe exporter please')
+    r_task = task_of(store, root3, 'R')
+    attach.handle(store, 'session-end', {'cwd': str(root3), 'session_id': 'R'}, 'claude')
+    prompt(store, root3, 'R', 'Also export to CSV')                     # `claude --resume` keeps the session id
+    check('a resumed session keeps its task', task_of(store, root3, 'R')['id'] == r_task['id'])
+    check('…and is live again: a new session does not take it (control for the review finding)', task_of(store, root3, 'S') is None)
+    # one taker even when two new sessions race for the invitation
+    with store.lock('task:' + r_task['id']):
+        t = store.get(r_task['id'])
+        t['data']['handoff_state'] = {'session': 'R', 'state': 'told', 'tokens': 210000, 'limit': 200000}
+        store.save(t, t['status'], 'test_setup', {})
+    with store.lock('task:' + r_task['id']):
+        busy = attach.resolve_task(store, root3, 'T1')                    # the task is locked by someone else
+    check('a locked invitation is never adopted without the lock', busy is None and store.session_task('T1') is None)
+    first = attach.resolve_task(store, root3, 'T2')
+    second = attach.resolve_task(store, root3, 'T3')
+    check('the invitation has exactly one taker', first is not None and first['id'] == r_task['id'] and second is None)
+
     print('③ tasks created before session binding: the creator owns them')
     root2 = make_repo(base, 'repo2')
     attach.set_switch(store, 'on', root2)

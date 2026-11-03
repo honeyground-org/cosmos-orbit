@@ -269,6 +269,8 @@ def resolve_task(store, root, session, source=None):
         try:
             task = store.get(row['task_id'])
             if task['data'].get('mode') == 'attached' and Path(task['workspace']).resolve() == root:
+                if row.get('ended'):
+                    store.bind_session(session, task['id'], root)  # it came back (resume): live again, nobody else takes it
                 return task
         except ValueError:
             pass
@@ -289,18 +291,19 @@ def resolve_task(store, root, session, source=None):
         state = task['data'].get('handoff_state') or {}
         if task['data'].get('mode') == 'attached' and state.get('state') in ('checkpointed', 'told'):
             invited.append((state.get('at') or task['updated'], task))
-    if invited:
-        task = sorted(invited, key=lambda pair: pair[0])[-1][1]
+    for _, candidate in sorted(invited, key=lambda pair: pair[0], reverse=True):
         try:
-            with store.lock('task:' + task['id']):
-                task = store.get(task['id'])
-                task['data']['handoff_state']['state'] = 'adopted'
-                task['data']['handoff_state']['adopted_by'] = session
+            with store.lock('task:' + candidate['id']):
+                task = store.get(candidate['id'])
+                state = task['data'].get('handoff_state') or {}
+                if state.get('state') not in ('checkpointed', 'told'):
+                    continue                             # another new session took this invitation first
+                state.update(state='adopted', adopted_by=session)
                 store.save(task, task['status'], 'handoff_adopted', {'session': session, 'layer': 'context'})
+                store.bind_session(session, task['id'], root)
+                return store.get(task['id'])
         except (RuntimeError, ValueError):
-            pass
-        store.bind_session(session, task['id'], root)
-        return store.get(task['id'])
+            continue                                     # busy: never adopt without the lock
     latest = current_task(store, root)
     if latest is None:
         return None
