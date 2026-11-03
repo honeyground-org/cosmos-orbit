@@ -98,6 +98,12 @@ def main():
         check('request ending in a question mark → requirement: ' + text, requirements.classify(text) == 'requirement')
     for text in ('How are totals rounded?', '왜 실패했어?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
+    # found by the fourth independent review: scope added with no request verb at all
+    for text in ('PDF도?', '탭도 되나요?', '모바일도 가능해?', '이미지도?', 'PDF는요?', 'And PDF?', 'and tabs?'):
+        check('scope added without a request verb → requirement: ' + text, requirements.classify(text) == 'requirement')
+    for text in ('Is negative input rejected?', '어느 정도 걸려?', '속도?', '해상도는 얼마야?', 'And how are totals rounded?',
+                 'And is it fast?', '이건 왜 이래?'):
+        check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
     for text in ('<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event</summary>\n</task-notification>',
                  '<system-reminder>x</system-reminder>', '<local-command-caveat>x</local-command-caveat>', '<command-name>/model</command-name>'):

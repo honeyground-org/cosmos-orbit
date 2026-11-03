@@ -256,16 +256,52 @@ def current_task(store, root):
     return task
 
 
-def resolve_task(store, root, session, source=None):
+NO_TASK = ''  # a session row with no task: the session was seen without one, so it never inherits another's later
+
+
+def _transcript_facts(path, limit=2_000_000):
+    """(replied, lineage) from the head of a Claude Code transcript or a Codex rollout file: whether the
+    conversation already has an assistant reply (None when unknown), and the session ids its entries carry
+    (a conversation resumed under a new id keeps its earlier entries)."""
+    lineage = set()
+    if not path:
+        return None, lineage
+    try:
+        with open(path, 'rb') as stream:
+            data = stream.read(limit)
+    except OSError:
+        return None, lineage
+    replied = False
+    for line in data.decode('utf-8', 'replace').splitlines():
+        if '"assistant"' not in line and '"sessionId"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue                                     # the last line of the read may be cut
+        if not isinstance(event, dict):
+            continue
+        if event.get('sessionId'):
+            lineage.add(event['sessionId'])
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if (event.get('type') == 'assistant' and not event.get('isSidechain')) or (
+                event.get('type') == 'response_item' and payload.get('type') == 'message' and payload.get('role') == 'assistant'):
+            replied = True
+    return replied, lineage
+
+
+def resolve_task(store, root, session, source=None, transcript=None):
     """The task this session works on. Several sessions can be open in one project at once, and a new session
-    (a new terminal, or /clear) does not say which session it follows. So a session inherits a task only when
-    that is unambiguous: a handoff checkpoint invited the next session (one taker), or nobody else is working
-    on the project's latest task (its sessions ended — Claude Code reports SessionEnd)."""
+    (a new terminal, or /clear) does not say which session it follows. So only a session Orbit sees for the
+    first time, at the start of its conversation, may inherit a task, and only when that is unambiguous: a
+    handoff checkpoint invited the next session (one taker), or nobody else is working on the project's latest
+    task (its sessions ended — Claude Code reports SessionEnd). A session seen before without a task, or one
+    already in conversation when Orbit first sees it (the switch was turned on mid-session), starts its own."""
     root = Path(root).resolve()
     if not session:
         return current_task(store, root)
     row = store.session_task(session)
-    if row:
+    if row and row['task_id']:
         try:
             task = store.get(row['task_id'])
             if task['data'].get('mode') == 'attached' and Path(task['workspace']).resolve() == root:
@@ -283,7 +319,28 @@ def resolve_task(store, root, session, source=None):
                 and not store.task_sessions(task['id']):
             store.bind_session(session, task['id'], root)
             return task
-    invited = []
+    if row:
+        return None                                      # seen before without a task: it never inherits one later
+    replied, lineage = _transcript_facts(transcript)
+    for earlier in sorted(lineage - {session}):
+        # The same conversation resumed under a new id: its own task, not another session's.
+        bound = store.session_task(earlier)
+        if not bound or not bound['task_id']:
+            continue
+        try:
+            task = store.get(bound['task_id'])
+        except ValueError:
+            continue
+        if task['data'].get('mode') == 'attached' and Path(task['workspace']).resolve() == root and task['status'] not in CLOSED:
+            store.bind_session(session, task['id'], root)
+            return task
+    # The host says when a conversation is new (startup, /clear); without SessionStart (switch turned on
+    # mid-session, a Codex /new) the transcript tells: no assistant reply yet. A resume or a compaction is not new.
+    fresh = source in ('startup', 'clear') or (source is None and not replied)
+    if not fresh:
+        store.bind_session(session, NO_TASK, root)       # already in conversation when first seen: never inherits
+        return None
+    invited, busy = [], False
     for item in store.list():
         if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:
             continue
@@ -303,21 +360,22 @@ def resolve_task(store, root, session, source=None):
                 store.bind_session(session, task['id'], root)
                 return store.get(task['id'])
         except (RuntimeError, ValueError):
-            continue                                     # busy: never adopt without the lock
+            busy = True                                  # never adopt without the lock; try again on its next event
     latest = current_task(store, root)
-    if latest is None:
-        return None
-    owners = store.task_sessions(latest['id'])
-    if not owners:
-        prompts = latest['data'].get('prompts') or []
-        creator = next((p.get('session') for p in prompts if p.get('session')), None)
-        if creator and creator != session:
-            store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
-            owners = store.task_sessions(latest['id'])
-    if not [r for r in owners if not r['ended'] and r['session'] != session]:
-        store.bind_session(session, latest['id'], root)
-        return latest
-    return None  # another live session owns the project's latest task; this one starts its own
+    if latest is not None:
+        owners = store.task_sessions(latest['id'])
+        if not owners:
+            prompts = latest['data'].get('prompts') or []
+            creator = next((p.get('session') for p in prompts if p.get('session')), None)
+            if creator and creator != session:
+                store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
+                owners = store.task_sessions(latest['id'])
+        if not [r for r in owners if not r['ended'] and r['session'] != session]:
+            store.bind_session(session, latest['id'], root)
+            return latest
+    if not busy:
+        store.bind_session(session, NO_TASK, root)       # nothing to inherit now, so nothing later either
+    return None  # this session starts its own task
 
 
 def _head(root):
@@ -925,7 +983,7 @@ def _handle(store, event, payload, host):
         if session:
             store.end_session(session)  # the event that frees its task for the next session
         return None
-    task = resolve_task(store, root, session, payload.get('source'))
+    task = resolve_task(store, root, session, payload.get('source'), payload.get('transcript_path'))
     from . import continuity
 
     def watched(current, source=None):

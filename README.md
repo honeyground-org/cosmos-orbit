@@ -105,8 +105,10 @@ themselves run outside that sandbox and need nothing. Codex asks once to trust n
 Several sessions can be open in one project at once. Each session works on its own task: a new
 terminal or a `/clear` only takes over an existing task when a handoff checkpoint invited it (one
 taker) or when the sessions that held it have ended (Claude Code reports SessionEnd; Codex does not,
-so a Codex task stays with its session until a handoff). Prompts from one session never land in
-another session's task. Host notifications are ignored.
+so a Codex task stays with its session until a handoff). Only a session that is new when Orbit first
+sees it can take over; a session already open without a task — or one that was mid-conversation when the
+switch was turned on — starts its own. A conversation resumed under a new id keeps its own task. Prompts
+from one session never land in another session's task. Host notifications are ignored.
 
 What happens in an attached session:
 

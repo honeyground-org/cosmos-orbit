@@ -172,6 +172,8 @@ def main():
 
     print('⑤ growth guard: a session that starts big is not handed off at once (anti-thrash)')
     t3 = base / 's3.jsonl'
+    # `claude --resume` of s6 under a new id: the transcript keeps s6's entries (the lineage that finds its task)
+    t3.write_text(json.dumps({'type': 'user', 'sessionId': 's6', 'message': {'role': 'user', 'content': 'earlier'}}) + '\n')
     claude_turn(t3, 190_000)
     pay3 = {'cwd': str(root), 'session_id': 's3', 'transcript_path': str(t3)}
     attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's6'}, 'claude')

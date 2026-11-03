@@ -24,6 +24,15 @@ _REQUEST = re.compile(
     r"\bcan you\b|\bcould you\b|\bwould you\b|\bwill you\b|\bplease\b|\balso\b|\badd\b|\bmake\b|\bsupport\b|"
     r"\bchange\b|\bshould\b|\blet's\b|\bfix\b|\bupdate\b|\binclude\b|\bremove\b|\bhandle\b|\binstead\b|"
     r"\btoo\s*\?|\bas well\b|\bhow about\b|\bwhat about\b)")
+# Scope added with no request verb at all: Korean "PDF도?" / "탭도 되나요?" ("…too?") and "PDF는요?" ("what about…?"),
+# English "And PDF?". The word before 도 must be a word plus the particle, not a noun that ends in 도 (정도, 속도 …).
+_ALSO_KO = re.compile(r'(\S+)도\s*(?:[?？]|(?:되|돼|가능|있|할|해|같이|포함|넣)[^?？]*[?？])')
+_NOT_PARTICLE = {'정도', '속도', '온도', '빈도', '용도', '의도', '시도', '각도', '밀도', '농도', '한도', '고도', '강도', '태도',
+                 '제도', '지도', '포도', '적도', '보도', '난이도', '정확도', '만족도', '신뢰도', '완성도', '중요도', '우선도',
+                 '인지도', '해상도', '민감도', '선명도', '어느정도'}
+_WHAT_ABOUT_KO = re.compile(r'\S(?:은|는)요\s*[?？]\s*$')
+_AND_ELLIPSIS = re.compile(r'^and\s+(?!(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|how|what|why|'
+                           r'when|where|who|which|whose|whom)\b)[^?]{1,60}\?\s*$')
 _SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
                      r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
 
@@ -44,6 +53,13 @@ def _compact(text):
     return re.sub(r'[\W_]+', '', text.lower())
 
 
+def _adds_scope(text):
+    lowered = text.lower()
+    if _AND_ELLIPSIS.match(lowered) or _WHAT_ABOUT_KO.search(text):
+        return True
+    return any(m.group(1).lstrip('(\'"') + '도' not in _NOT_PARTICLE for m in _ALSO_KO.finditer(text))
+
+
 def classify(text):
     """'system' | 'requirement' | 'question' | 'trivial'. Only a person's words can set or change a goal:
     host notifications (background tasks, monitors, slash-command echoes) arrive through the same hook and are
@@ -54,7 +70,7 @@ def classify(text):
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
     if not bare or bare in _TRIVIAL or _GO_ONLY.match(_compact(stripped) or ' '):
         return 'trivial'
-    if stripped.endswith(('?', '？')) and not _REQUEST.search(stripped.lower()):
+    if stripped.endswith(('?', '？')) and not _REQUEST.search(stripped.lower()) and not _adds_scope(stripped):
         return 'question'  # an information question; a request phrased as a question falls through
     return 'requirement'  # when unsure, count it: a missed change costs more than one `done --keep`
 

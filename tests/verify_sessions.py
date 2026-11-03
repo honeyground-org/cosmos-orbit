@@ -41,6 +41,19 @@ def prompt(store, root, session, text, source=None):
     return attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': text}, 'claude')
 
 
+def invite(store, task):
+    with store.lock('task:' + task['id']):
+        t = store.get(task['id'])
+        t['data']['handoff_state'] = {'session': 'x', 'state': 'told', 'tokens': 210000, 'limit': 200000}
+        store.save(t, t['status'], 'test_setup', {})
+
+
+def transcript(base, name, entries):
+    path = base / (name + '.jsonl')
+    path.write_text(''.join(json.dumps(e) + '\n' for e in entries), encoding='utf-8')
+    return str(path)
+
+
 def task_of(store, root, session):
     return attach.resolve_task(store, root, session)
 
@@ -73,8 +86,10 @@ def main():
     c = task_of(store, root, 'C')
     check('a new terminal while B is live does not inherit B (control)', c is None)
     attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 'B'}, 'claude')
-    c = task_of(store, root, 'C')
-    check('after SessionEnd of B, a new session continues B', c is not None and c['id'] == b['id'])
+    check('C, open since before B ended, still does not inherit B (control: it was seen without a task)',
+          task_of(store, root, 'C') is None)
+    c2 = task_of(store, root, 'C2')
+    check('after SessionEnd of B, a new session continues B', c2 is not None and c2['id'] == b['id'])
     prompt(store, root, 'D', 'Generate thumbnails for the video')
     d = task_of(store, root, 'D')
     with store.lock('task:' + d['id']):
@@ -106,6 +121,44 @@ def main():
     first = attach.resolve_task(store, root3, 'T2')
     second = attach.resolve_task(store, root3, 'T3')
     check('the invitation has exactly one taker', first is not None and first['id'] == r_task['id'] and second is None)
+
+    # found by the fourth independent review: an open session without a task took a later handoff invitation
+    root4 = make_repo(base, 'repo-open')
+    attach.set_switch(store, 'on', root4)
+    attach.handle(store, 'session-start', {'cwd': str(root4), 'session_id': 'OB', 'source': 'startup'}, 'claude')
+    prompt(store, root4, 'OA', 'Generate the product video with the new storyboard')
+    oa = task_of(store, root4, 'OA')
+    invite(store, oa)
+    prompt(store, root4, 'OB', 'Reduce indexing CPU when many sessions start')
+    ob = task_of(store, root4, 'OB')
+    check("an open session without a task never takes another session's invitation (review counterexample)",
+          ob is not None and ob['id'] != oa['id'] and store.get(oa['id'])['data']['handoff_state'].get('state') == 'told')
+    fresh = attach.resolve_task(store, root4, 'OA2', 'clear')
+    check('…while the new session the invitation was for still takes it (control)', fresh is not None and fresh['id'] == oa['id'])
+
+    # a session already in conversation when Orbit first sees it (the switch turned on mid-session)
+    prompt(store, root4, 'OC', 'Render the storyboard thumbnails in a grid')
+    oc = task_of(store, root4, 'OC')
+    invite(store, oc)
+    talked = transcript(base, 'talked', [{'type': 'user', 'sessionId': 'MID', 'message': {'role': 'user', 'content': 'hi'}},
+                                         {'type': 'assistant', 'sessionId': 'MID', 'message': {'role': 'assistant', 'content': []}}])
+    mid = attach.handle(store, 'prompt', {'cwd': str(root4), 'session_id': 'MID', 'prompt': 'Translate the README into Spanish',
+                                          'transcript_path': talked}, 'claude')
+    check('a session already in conversation when first seen does not take an invitation',
+          task_of(store, root4, 'MID')['id'] != oc['id'] and store.get(oc['id'])['data']['handoff_state'].get('state') == 'told')
+    codex_fresh = transcript(base, 'codex-new', [{'type': 'session_meta', 'payload': {'id': 'CX'}},
+                                                 {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': []}}])
+    cx = attach.resolve_task(store, root4, 'CX', None, codex_fresh)
+    check('a Codex /new session (rollout with no reply yet) takes it (control)', cx is not None and cx['id'] == oc['id'])
+
+    # a conversation resumed under a new session id keeps its own task
+    resumed = transcript(base, 'resumed', [{'type': 'user', 'sessionId': 'OA2', 'message': {'role': 'user', 'content': 'x'}},
+                                           {'type': 'assistant', 'sessionId': 'OA2', 'message': {'role': 'assistant', 'content': []}}])
+    again = attach.resolve_task(store, root4, 'OA3', 'resume', resumed)
+    check('a conversation resumed under a new id finds its own task', again is not None and again['id'] == oa['id'])
+    stranger = transcript(base, 'stranger', [{'type': 'assistant', 'sessionId': 'NEVER-SEEN', 'message': {'role': 'assistant', 'content': []}}])
+    other = attach.resolve_task(store, root4, 'OA4', 'resume', stranger)
+    check('…and an unrelated resumed conversation does not (control)', other is None)
 
     print('③ tasks created before session binding: the creator owns them')
     root2 = make_repo(base, 'repo2')
