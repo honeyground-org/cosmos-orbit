@@ -142,8 +142,10 @@ revise what "done" means, or the review checks yesterday's task. Orbit makes tha
 a habit:
 
 1. Each prompt is classified without a model. A go-ahead (`continue`, `진행해`) or a question is only
-   recorded. Anything else is a **requirement change**: it joins the corrections that bind the
-   independent review, and the session gets one short notice, not the whole brief again.
+   recorded. Host notifications that arrive through the same hook (background tasks, monitors,
+   slash-command echoes) are ignored: only a person's words set or change a goal. Anything else is a
+   **requirement change**: it joins the corrections that bind the independent review, and the
+   session gets one short notice, not the whole brief again.
 2. Until the result and verification goals are revised, a completion claim is refused and the Stop
    hook asks the executor once to revise them. The executor understands the change, so it writes
    the revision:

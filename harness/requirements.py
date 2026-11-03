@@ -18,9 +18,17 @@ _TRIVIAL = {
 }
 
 
+_SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
+                     r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
+
+
 def classify(text):
-    """'requirement' | 'question' | 'trivial'. A question or a go-ahead does not change what must be delivered."""
+    """'system' | 'requirement' | 'question' | 'trivial'. Only a person's words can set or change a goal:
+    host notifications (background tasks, monitors, slash-command echoes) arrive through the same hook and are
+    ignored. A question or a go-ahead does not change what must be delivered."""
     stripped = (text or '').strip()
+    if _SYSTEM.match(stripped):
+        return 'system'
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
     if len(bare) <= 2 or bare in _TRIVIAL:
         return 'trivial'

@@ -84,6 +84,26 @@ def main():
     for text in ('고쳐서 반영해줘', 'Also support CSV export', '그런 요구가 있을때마다 결과 목표와 검증 목표를 업데이트 해야 합니다.'):
         check('requirement: ' + text, requirements.classify(text) == 'requirement')
 
+    for text in ('<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event</summary>\n</task-notification>',
+                 '<system-reminder>x</system-reminder>', '<local-command-caveat>x</local-command-caveat>', '<command-name>/model</command-name>'):
+        check('system: ' + text[:24].replace('\n', ' '), requirements.classify(text) == 'system')
+
+    print('①-b host notifications never create or change a task')
+    root0 = make_repo(base, 'repo-notify')
+    attach.set_switch(store, 'on', root0)
+    note = '<task-notification>\n<task-id>bgl256s2f</task-id>\n<summary>Background command completed</summary>\n</task-notification>'
+    check('notification with no task → silent, no task created', attach.handle(store, 'prompt', {'cwd': str(root0), 'session_id': 'n1', 'prompt': note}, 'claude') is None
+          and attach.current_task(store, root0) is None)
+    attach.handle(store, 'prompt', {'cwd': str(root0), 'session_id': 'n1', 'prompt': 'Refactor the notifier module into two files'}, 'claude')
+    t0 = attach.current_task(store, root0)
+    attach.set_done(store, t0['id'], ['two files'])
+    attach.handle(store, 'prompt', {'cwd': str(root0), 'session_id': 'n1', 'prompt': note}, 'claude')
+    t0 = store.get(t0['id'])
+    check('notification during a task → not a requirement, not a prompt', not t0['data'].get('requirements_pending') and len(t0['data']['prompts']) == 1)
+    store.enqueue(t0['id'], note, None)
+    t0 = attach.drain_inbox(store, t0)
+    check('queued notification is consumed and ignored', not store.inbox(t0['id']) and not t0['data'].get('requirements_pending'))
+
     print('② attached: a change is recorded, binds the review, and gets one short notice')
     root = make_repo(base, 'repo')
     attach.set_switch(store, 'on', root)

@@ -342,6 +342,8 @@ def _apply_prompt(store, task, text, session=None):
     data = task['data']
     prompts = data.setdefault('prompts', [])
     kind = requirements.classify(text)
+    if kind == 'system':
+        return  # a host notification, not the user's words
     prompts.append({'at': now(), 'text': text[:600], 'session': session, 'kind': kind})
     del prompts[:-30]
     if session:
@@ -882,6 +884,9 @@ def _handle(store, event, payload, host):
         return None
     if event == 'prompt':
         text = (payload.get('prompt') or '').strip()
+        from .requirements import classify
+        if classify(text) == 'system':
+            return None  # background-task and monitor notifications never create or change a task
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
         if task is None or task['status'] in CLOSED:
