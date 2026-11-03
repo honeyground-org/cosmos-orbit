@@ -104,6 +104,11 @@ def main():
     for text in ('Is negative input rejected?', '어느 정도 걸려?', '속도?', '해상도는 얼마야?', 'And how are totals rounded?',
                  'And is it fast?', '이건 왜 이래?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
+    # found by the fifth independent review: the same "what about X?" without the polite 요
+    for text in ('PDF는?', '엑셀은?', '다크 모드는?', '모바일은?', '그리고 다크 모드는요?'):
+        check('"what about X?" with a bare 은/는 → requirement: ' + text, requirements.classify(text) == 'requirement')
+    for text in ('결과는?', '속도는?', '이유는?', '테스트 결과는요?', '지금 체크아웃된 브랜치 이름은?', '왜 실패했는지 원인은?'):
+        check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
     for text in ('<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event</summary>\n</task-notification>',
                  '<system-reminder>x</system-reminder>', '<local-command-caveat>x</local-command-caveat>', '<command-name>/model</command-name>'):

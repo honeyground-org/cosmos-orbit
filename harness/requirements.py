@@ -30,7 +30,12 @@ _ALSO_KO = re.compile(r'(\S+)도\s*(?:[?？]|(?:되|돼|가능|있|할|해|같�
 _NOT_PARTICLE = {'정도', '속도', '온도', '빈도', '용도', '의도', '시도', '각도', '밀도', '농도', '한도', '고도', '강도', '태도',
                  '제도', '지도', '포도', '적도', '보도', '난이도', '정확도', '만족도', '신뢰도', '완성도', '중요도', '우선도',
                  '인지도', '해상도', '민감도', '선명도', '어느정도'}
-_WHAT_ABOUT_KO = re.compile(r'\S(?:은|는)요\s*[?？]\s*$')
+# "PDF는?" / "다크 모드는요?" ("what about…?") is scope in a short message; "결과는?" ("the result?") asks for information.
+_WHAT_ABOUT_KO = re.compile(r'(\S+?)(?:은|는)(?:요)?\s*[?？]\s*$')
+_INFO_NOUNS = {'결과', '이유', '원인', '상태', '상황', '진행', '진행상황', '현황', '속도', '시간', '비용', '가격', '차이', '방법',
+               '문제', '에러', '오류', '로그', '출력', '답', '값', '크기', '용량', '버전', '경로', '위치', '이름', '날짜', '기간',
+               '순서', '의미', '뜻', '범위', '기준', '근거', '목적', '목표', '계획', '일정', '성능', '정확도', '점수', '개수',
+               '뭐', '무엇', '어디', '언제', '누구', '이건', '그건', '저건', '지금', '다음', '나머지', '전체', '총합', '합계'}
 _AND_ELLIPSIS = re.compile(r'^and\s+(?!(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|how|what|why|'
                            r'when|where|who|which|whose|whom)\b)[^?]{1,60}\?\s*$')
 _SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
@@ -55,7 +60,10 @@ def _compact(text):
 
 def _adds_scope(text):
     lowered = text.lower()
-    if _AND_ELLIPSIS.match(lowered) or _WHAT_ABOUT_KO.search(text):
+    if _AND_ELLIPSIS.match(lowered):
+        return True
+    about = _WHAT_ABOUT_KO.search(text)
+    if about and len(text.split()) <= 3 and about.group(1) not in _INFO_NOUNS:
         return True
     return any(m.group(1).lstrip('(\'"') + '도' not in _NOT_PARTICLE for m in _ALSO_KO.finditer(text))
 
