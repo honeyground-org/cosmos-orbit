@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import uuid
 
-DEFAULT_LIMIT = 500000
+DEFAULT_LIMIT = 200000  # see continuity.py: the measured handoff point
 
 
 def positive(value):
@@ -80,6 +80,10 @@ def limit_for(data, key, provider):
 def record(task, key, metadata):
     measurement = dict(metadata.get('context') or {'tokens': None, 'source': 'unavailable', 'window': None})
     measurement['session'] = metadata.get('session')
+    previous = task['data'].get('context_measurements', {}).get(key, {})
+    starts = task['data'].setdefault('context_start', {})
+    if measurement['session'] != previous.get('session') or starts.get(key) is None:
+        starts[key] = measurement.get('tokens')  # where this session started; growth, not size, triggers a handoff
     task['data'].setdefault('context_measurements', {})[key] = measurement
     task['data'].setdefault('context_tokens', {})[key] = measurement.get('tokens')
 
@@ -92,15 +96,17 @@ def checkpoint(store, task, key, phase, reason='threshold'):
     if not previous:
         return None
     provider = data.get('peers', {}).get(key[5:], {}).get('provider') if key.startswith('peer:') else task['provider']
+    verdict = dict((data.get('verdicts') or [None])[-1] or {})
+    verdict.pop('observations', None)  # tool traces are evidence for the reviewer, not context for the executor
+    development = data.get('development') or {}
+    executor = data.get('executor_result') or {}
     packet = {'id': uuid.uuid4().hex, 'session_key': key, 'from_session': previous,
-              'reason': reason, 'goal': data.get('mission_goal') or (data.get('contract') or {}).get('goal', task['prompt']),
-              'execution_plan': data.get('execution_plan'),
+              'reason': reason, 'goal': data.get('goal') or data.get('mission_goal') or (data.get('contract') or {}).get('goal', task['prompt']),
               'objective_progress': data.get('objective_progress'),
               'done': data.get('done'), 'done_fixed': data.get('done_fixed'),
-              'verdict': (data.get('verdicts') or [None])[-1],
-              'evaluation': data.get('evaluation'),
-              'contract': data.get('contract'), 'contract_hash': data.get('contract_hash'),
-              'development': data.get('development'),
+              'verdict': verdict or None,
+              'executor_result': {'summary': executor.get('summary', ''), 'remaining': executor.get('remaining', [])} if executor else None,
+              'development': {k: development.get(k) for k in ('source', 'base', 'checks', 'changed_paths')} if development else None,
               'memory_scope': data.get('memory', {}).get('project_id'),
               'recent_feedback': data.get('feedback', [])[-8:],
               'feedback_total': len(data.get('feedback', [])),

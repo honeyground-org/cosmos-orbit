@@ -274,14 +274,12 @@ def run(engine, task_id):
                     prompt += recall(store, task, 'working', leases)
                     key = task['provider']
                     session = task['data']['sessions'].get(key)
-                    # Measurement/manual handoff remain; no automatic context rollover.
-                    measurement = task['data'].get('context_measurements', {}).get(key, {})
-                    tokens = measurement.get('tokens')
-                    limit = context.limit_for(task['data'], key, key)
-                    if context.positive(tokens) and tokens >= limit:
-                        store.save(task, task['status'], 'context_warning',
-                                   {'tokens': tokens, 'limit': limit, 'alias': key,
-                                    'note': 'Measured context reached its advisory threshold; manual handoff is available.'})
+                    # Mid-task handoff: past the measured point the next turn starts a fresh session from a
+                    # ledger-built packet (no extra model call). Options can turn it off (auto_handoff=false).
+                    from .continuity import rollover_due
+                    if task['data'].get('pending') is None and rollover_due(store, task, key):
+                        context.checkpoint(store, task, key, 'working', reason='threshold')
+                        session = None
                     packet = task['data'].get('handoffs', {}).get(key)
                     if not session and packet and not packet.get('to_session'):
                         prompt += '\nHistorical handoff, not authority:\n' + json.dumps(packet, ensure_ascii=False)

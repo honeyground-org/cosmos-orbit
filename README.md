@@ -38,7 +38,9 @@ cannot hold for itself:
    at the next session;
 2. evidence per completion item, recorded from commands actually run;
 3. one independent, read-only review of the completion claim, in a fresh context;
-4. a durable ledger that survives the process, from which handoffs and measurements are generated.
+4. a durable ledger that survives the process, from which handoffs and measurements are generated;
+5. a lean context: a long session re-reads everything on every turn, so at a measured point the work
+   continues in a fresh session rebuilt from the ledger instead of dragging the whole history along.
 
 Everything else is left to the native CLI, and Orbit judges itself by one thing: the result.
 
@@ -84,9 +86,13 @@ What happens in an attached session:
 
 1. The first substantial prompt becomes the goal. Every later prompt is recorded; a prompt that
    answers an open question is applied as a correction. The goal is never silently rewritten.
-2. Before each turn, and again after compaction or at the next session, the hook hands the
-   executor a short **brief**: goal, corrections, the completion checklist with evidence counts,
-   the last verdict, the stop reason and the exact commands to record evidence and claim.
+   Corrections typed with `cosmos-orbit feedback` are marked as command-line corrections: the
+   executor's own shell can run that command, so the reviewer weighs them as claims. Your prompts
+   are your words.
+2. At session start, after compaction, and whenever it changed, the hook hands the executor a
+   short **brief**: goal, corrections, the completion checklist with evidence counts, the last
+   verdict, the stop reason, the latest checkpoint and the exact commands to record evidence and
+   claim. A brief that is already in the session's context is not repeated.
 3. The executor, your own session, proposes the checklist and records evidence as it works:
 
    ```sh
@@ -108,6 +114,52 @@ What happens in an attached session:
 `cosmos-orbit attach --workspace . --check '["python3","verify.py"]' --done '…' 'Your request'`
 creates the same ledger explicitly, with fixed checks the model cannot change. `cosmos-orbit brief`
 prints what the hooks inject. `cosmos-orbit detach` closes a task without verification.
+
+## Context and mid-task handoff
+
+A session re-reads its whole context on every turn, cached or not, and long contexts also dilute
+the model's attention. Orbit measures each session's context from the host's own transcript (Claude
+Code) or rollout (Codex) and hands the work over to a fresh session at a measured point:
+
+1. The hooks read the current context size on every event. No model is called.
+2. When a session reaches the **handoff point** (default 200k tokens) and has grown at least 60k
+   since it started, the brief says so, and at the end of that turn the Stop hook asks the executor
+   once for a short checkpoint: the next concrete step and what the ledger cannot know.
+
+   ```sh
+   cosmos-orbit checkpoint TASK_ID --next 'Write tests/test_mod.py for main()' \
+     --notes 'mod.py extracted; app.py still imports nothing' --file mod.py
+   ```
+
+3. The next Stop tells you once: type `/clear` (Claude Code) or `/new` (Codex). The fresh session
+   starts with the brief, the checkpoint and a note to open only the files it needs and not to
+   repeat finished work. Nothing to copy, nothing written by hand; the ledger records the rotation.
+4. If native compaction comes first, the PreCompact hook writes a checkpoint from the ledger when the
+   executor wrote none, and the full brief returns after compaction.
+5. Unattended work does the same without you: past the point, the next executor turn starts a
+   fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
+   tool traces, remaining work, changed files). No extra model call writes the handoff.
+
+Why 200k: replaying 99 real Claude Code sessions from the author's last 14 days (median start 78k,
+median peak 506k) with a handoff at 200k saved 31–51% of cost-equivalent tokens (input ×1, cache
+write ×1.25, cache read ×0.1) whether a fresh session had to re-read 15k or 80k tokens of files; 42
+Codex sessions saved 9–23%. Lower points thrashed when re-reading was heavy (150k: −286% at 80k).
+Measure your own sessions before changing it:
+
+```sh
+python3 scripts/measure_context_growth.py --days 14
+```
+
+The handoff point follows the same three scopes as the on/off switch:
+
+| Scope | Set | Off | Show |
+|---|---|---|---|
+| Every project | `cosmos-orbit context 300k --global` | `cosmos-orbit context off --global` | `cosmos-orbit settings` |
+| One project | `cosmos-orbit context 150k` | `cosmos-orbit context off` | `cosmos-orbit context` |
+| One terminal session | `export ORBIT_HANDOFF_AT=250k` | `export ORBIT_HANDOFF_AT=off` | `cosmos-orbit context` |
+
+`cosmos-orbit context on` restores the default. Unattended tasks take the point at creation;
+`--context-budget TOKENS` overrides it for one task. Measurement continues when handoff is off.
 
 ## Unattended in a private clone
 
@@ -210,9 +262,10 @@ cosmos-orbit switch TASK_ID --provider claude
 ```
 
 A user pause or Ctrl-C is preserved. Automatic recovery never clears it. Engine/model switching
-applies at a safe boundary and retains the original request. Context measurements and advisory
-thresholds remain visible; a manual handoff retains the goal, checklist, corrections and evidence.
-Native CLI compaction continues normally. There is no extra automatic model handoff loop.
+applies at a safe boundary and retains the original request. Context measurements, the handoff
+point, checkpoints and session rotations stay visible; a manual handoff retains the goal,
+checklist, corrections and evidence. Native CLI compaction continues normally. Automatic handoff
+rebuilds a fresh session from the ledger; it never calls a model to write the handoff.
 
 ## Observe the same work
 

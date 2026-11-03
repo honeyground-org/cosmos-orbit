@@ -79,6 +79,16 @@ def event_view(row):
         note = 'turn %s' % data.get('turn', '')
     elif row['kind'] == 'context_warning':
         note = '%s / %s · %s' % (data.get('tokens'), data.get('limit'), data.get('note', ''))
+    elif row['kind'] in ('handoff_recommended', 'handoff_asked', 'handoff_told'):
+        note = '%sk / %sk' % ((data.get('tokens') or 0) // 1000, (data.get('limit') or 0) // 1000) if data.get('limit') else '%sk' % ((data.get('tokens') or 0) // 1000)
+    elif row['kind'] == 'session_rotated':
+        note = '%s · previous peak %sk%s' % (data.get('reason') or '', (data.get('from_peak') or 0) // 1000, ' · checkpoint' if data.get('checkpoint') else '')
+    elif row['kind'] == 'checkpoint_recorded':
+        note = '%s · %sk tokens · files %s' % (data.get('kind') or '', (data.get('tokens') or 0) // 1000, data.get('files', 0))
+    elif row['kind'] == 'compacted':
+        note = '%s · %sk' % (data.get('trigger') or '', (data.get('tokens') or data.get('from') or 0) // 1000)
+    elif row['kind'] == 'automatic_checkpoint':
+        note = 'fresh session from the ledger · %s' % ((data.get('measurement') or {}).get('tokens') or '')
     return {'seq': row['seq'], 'task_id': row['task_id'], 'kind': row['kind'], 'at': row['at'],
             'note': str(note)[:600], 'age': age_seconds(row['at']),
             'layer': data.get('layer'), 'direction': data.get('direction'),
@@ -190,9 +200,9 @@ def snapshot(store, task_id=None):
                                  'context_limit': limit_for(data, alias, provider),
                                  'context_source': data.get('context_measurements', {}).get(alias, {}).get('source', 'unavailable'),
                                  'handoff_count': data.get('handoff_counts', {}).get(alias, 0)})
-            rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind!='process_observation' ORDER BY seq DESC LIMIT 24", (task['id'],)).fetchall()
+            rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind NOT IN ('process_observation','context_measured','brief_skipped') ORDER BY seq DESC LIMIT 24", (task['id'],)).fetchall()
             events = [event_view(r) for r in rows]
-            event_count = store.db.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind!='process_observation'", (task['id'],)).fetchone()[0]
+            event_count = store.db.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND kind NOT IN ('process_observation','context_measured','brief_skipped')", (task['id'],)).fetchone()[0]
             response_rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND kind='provider_message' ORDER BY seq DESC LIMIT 6", (task['id'],)).fetchall()
             layer_activity = {}
             for layer, kinds_for_layer in {
@@ -279,6 +289,12 @@ def snapshot(store, task_id=None):
                           'done_evidence': done_evidence, 'prompts_count': len(data.get('prompts') or []),
                           'briefs': data.get('briefs') if mode == 'attached' else None,
                           'verification_pending': bool(data.get('verification_pending')),
+                          'context_live': __import__('harness.continuity', fromlist=['context_view']).context_view(data) if mode == 'attached' else None,
+                          'handoff_state': data.get('handoff_state') if mode == 'attached' else None,
+                          'checkpoints': [dict(c, next=str(c.get('next'))[:600], notes=str(c.get('notes'))[:800])
+                                          for c in (data.get('checkpoints') or [])[-5:]],
+                          'session_log': (data.get('session_log') or [])[-8:] if mode == 'attached' else None,
+                          'handoff_total': sum((data.get('handoff_counts') or {}).values()),
                           'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
                           'recoverable': data.get('recoverable', False),
                           # v3 contract (§4.1): goal · done · done_fixed · turns · verdicts · resumes; absent (None) on v2 tasks.
@@ -333,7 +349,7 @@ def snapshot(store, task_id=None):
                           'responses': [event_view(r) for r in reversed(response_rows)],
                           'layer_activity': layer_activity,
                           'attention': state in ATTENTION})
-        rows = store.db.execute("SELECT * FROM events WHERE kind!='process_observation' ORDER BY seq DESC LIMIT 20").fetchall()
+        rows = store.db.execute("SELECT * FROM events WHERE kind NOT IN ('process_observation','context_measured','brief_skipped') ORDER BY seq DESC LIMIT 20").fetchall()
         global_events = [event_view(r) for r in rows]
         cursor = store.db.execute('SELECT COALESCE(MAX(seq),0) FROM events').fetchone()[0]
     finally:
@@ -405,6 +421,12 @@ def terminal(data, lang='en', width=110):
             done_line = ' '.join(marks.get(statuses.get(d['id']), '○') + d['id'] for d in task.get('done') or []) or '(no done yet)'
             if task.get('mode') == 'attached':
                 evidence_counts = ' '.join(k + ':' + str(len(v)) for k, v in (task.get('done_evidence') or {}).items()) or '-'
+                live = task.get('context_live') or {}
+                if live.get('tokens'):
+                    rows.append('  context: %dk / handoff %s | sessions %d | checkpoints %d%s' % (
+                        live['tokens'] // 1000, ('%dk' % (live['limit'] // 1000)) if live.get('limit') else 'off',
+                        len(task.get('session_log') or []), len(task.get('checkpoints') or []),
+                        ' | ' + (task.get('handoff_state') or {}).get('state', '') if task.get('handoff_state') else ''))
                 rows.append('  entrance: attached · ' + clean(task['workspace']) + ' | prompts ' + str(task.get('prompts_count', 0))
                             + ' | briefs ' + str((task.get('briefs') or {}).get('served', 0)) + ' | evidence ' + evidence_counts
                             + (' | verification pending' if task.get('verification_pending') else ''))
@@ -509,7 +531,7 @@ def serve(home, port=0, open_browser=True, lang='en'):
                     if before <= 0:
                         raise ValueError('Invalid event cursor')
                     store.get(task_id)
-                    rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND seq<? AND kind!='process_observation' ORDER BY seq DESC LIMIT 100", (task_id, before)).fetchall()
+                    rows = store.db.execute("SELECT * FROM events WHERE task_id=? AND seq<? AND kind NOT IN ('process_observation','context_measured','brief_skipped') ORDER BY seq DESC LIMIT 100", (task_id, before)).fetchall()
                     self.respond(200, json.dumps({'events': [event_view(row) for row in rows]}, ensure_ascii=False))
                 except (ValueError, KeyError):
                     self.respond(400, json.dumps({'error': '작업 또는 기록 위치를 확인할 수 없습니다.'}, ensure_ascii=False))

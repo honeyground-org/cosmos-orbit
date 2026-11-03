@@ -75,7 +75,7 @@ def main(argv=None):
     for command in (start, resume, feedback):
         command.add_argument('--model')
         command.add_argument('--max-turns', type=int)
-        command.add_argument('--context-budget', type=int, help='Advisory context threshold; never stops a task')
+        command.add_argument('--context-budget', type=int, help='Mid-task handoff point in tokens (default: cosmos-orbit context); never stops a task')
     for name in ('status', 'events', 'pause', 'verify', 'messages'):
         sub.add_parser(name).add_argument('id')
     handoff_cmd = sub.add_parser('handoff', help='Preserve goal, corrections, evidence and verdicts; --write renders the ledger as Markdown')
@@ -119,6 +119,15 @@ def main(argv=None):
     detach_cmd.add_argument('id', nargs='?')
     detach_cmd.add_argument('--workspace', default='.')
     sub.add_parser('lessons', help='Corrections repeated across tasks (guard-rule candidates)').add_argument('--min', type=int, default=2)
+    checkpoint_cmd = sub.add_parser('checkpoint', help='Record the next step and working notes so a fresh session can continue')
+    checkpoint_cmd.add_argument('id')
+    checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
+    checkpoint_cmd.add_argument('--notes', default='')
+    checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
+    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: on | off | 200k [PATH] [--global]')
+    context_cmd.add_argument('value', nargs='?')
+    context_cmd.add_argument('path', nargs='?')
+    context_cmd.add_argument('--global', dest='global_default', action='store_true')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
     hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
@@ -223,8 +232,12 @@ def main(argv=None):
             configure(store, memory_config, args.memory, directories=args.native_memory_dir,
                       remember=args.remember, project=args.project_id)
             task = create(store, args.workspace, provider, prompt, args.check, args.done, limit)
+            from .continuity import resolve_threshold
+            handoff_at = args.context_budget
+            if handoff_at is None:
+                handoff_at = resolve_threshold(store, memory_config['workspace'])[0] or None
             task['data']['options'] = {'model': args.model, 'public_web': args.public_web,
-                                      'context_budget': args.context_budget}
+                                      'context_budget': handoff_at, 'auto_handoff': bool(handoff_at)}
             task['data']['memory'] = memory_config['data']['memory']
             if imported:
                 task['data']['imported_handoff'] = imported
@@ -245,6 +258,14 @@ def main(argv=None):
                 if 'owns this task' not in str(error):
                     raise
             result = show(run_owned(args.id))
+        elif args.command == 'feedback' and store.get(args.id)['data'].get('mode') == 'attached':
+            from .attach import cli_feedback
+            if args.done:
+                engine.configure(args.id, {'done': args.done})
+            task = cli_feedback(store, args.id, args.text)
+            result = show(task)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         elif args.command == 'feedback':
             engine.configure(args.id, options)
             task = engine.feedback(args.id, args.text, args.provider)
@@ -328,6 +349,25 @@ def main(argv=None):
         elif args.command == 'lessons':
             from .attach import lessons
             result = lessons(store, args.min)
+        elif args.command == 'checkpoint':
+            from .continuity import record_checkpoint
+            result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files),
+                      'handoff_file': str(store.home / 'runs' / args.id / 'handoff.md')}
+        elif args.command == 'context':
+            from .attach import project_root, current_task
+            from . import continuity
+            if args.value is not None and args.path is None and ('/' in args.value or Path(args.value).expanduser().is_dir()):
+                args.path, args.value = args.value, None  # `cosmos-orbit context PATH` shows that project
+            root = project_root(args.path)[0]
+            if args.value is not None:
+                changed = continuity.set_threshold(store, args.value, root, args.global_default)
+            else:
+                changed = None
+            task = current_task(store, root)
+            result = dict(continuity.threshold_view(store, root), root=str(root), changed=changed,
+                          task=task['id'] if task else None,
+                          measured=continuity.context_view(task['data']) if task else None,
+                          checkpoints=len(task['data'].get('checkpoints') or []) if task else 0)
         elif args.command == 'status':
             task = store.get(args.id)
             result = show(task)

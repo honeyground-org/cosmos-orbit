@@ -20,7 +20,8 @@ from .store import now
 DEFAULT_KEY = 'auto'            # preference: 'on' | 'off'  (global default)
 PROJECT_PREFIX = 'project:'     # preference per project root: 'on' | 'off'
 HOOK_MARK = 'cosmos-orbit hook'  # identifies Orbit entries inside host hook files
-HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600))
+HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600),
+               ('PreCompact', 'pre-compact', 30))
 CLOSED = ('verified', 'stalled', 'interrupted')
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 BRIEF_LIMIT = 2400
@@ -89,7 +90,8 @@ def settings_view(store, path=None):
             'default': normalise(store.preference(DEFAULT_KEY)) or 'off', 'projects': projects,
             'here': {'root': str(root), 'git': is_git, 'orbit': value, 'source': source,
                      'task': current, 'effective': value == 'on' and is_git},
-            'environment': os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT')}
+            'environment': os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT'),
+            'handoff': __import__('harness.continuity', fromlist=['threshold_view']).threshold_view(store, root)}
 
 
 # ---------------------------------------------------------------- host hooks
@@ -102,15 +104,30 @@ def host_hook_file(host):
     raise ValueError('Host must be claude or codex')
 
 
+def _same_code(found):
+    """True when an installed console script imports exactly this package (compared by file content)."""
+    try:
+        target = Path(found).resolve()
+        mine = Path(__file__).resolve()
+        for candidate in target.parent.parent.glob('lib/python*/site-packages/harness/attach.py'):
+            if candidate.resolve() == mine or candidate.read_bytes() == mine.read_bytes():
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def launcher():
-    """The code that is running now: a checkout's bin/ launcher, else the installed console script.
+    """The shortest command that runs this exact code: `cosmos-orbit` on PATH when it is current, else the checkout.
 
     An installed launcher may carry older code than the checkout the hooks run from (seen 2026-11-03: the
     executor was told to call `cosmos-orbit done`, the installed copy did not know the command)."""
+    found = shutil.which('cosmos-orbit')
+    if found and _same_code(found):
+        return ['cosmos-orbit']
     checkout = Path(__file__).resolve().parents[1] / 'bin' / 'cosmos-orbit'
     if checkout.is_file():
         return [sys.executable, str(checkout)]
-    found = shutil.which('cosmos-orbit')
     if found:
         return [found]
     return [sys.executable, '-m', 'harness.cli']
@@ -129,8 +146,17 @@ def orbit_command(store=None):
     return ' '.join(parts)
 
 
+def hook_launcher():
+    """Hooks need an absolute command: the installed script when it carries this code, else this checkout."""
+    found = shutil.which('cosmos-orbit')
+    if found and _same_code(found):
+        return [found]
+    checkout = Path(__file__).resolve().parents[1] / 'bin' / 'cosmos-orbit'
+    return [sys.executable, str(checkout)] if checkout.is_file() else [sys.executable, '-m', 'harness.cli']
+
+
 def hook_entries(host, home=None):
-    base = ' '.join(shlex.quote(p) for p in launcher())
+    base = ' '.join(shlex.quote(p) for p in hook_launcher())
     if home:
         base += ' --home ' + shlex.quote(str(home))
     entries = {}
@@ -322,6 +348,26 @@ def record_prompt(store, task, text, session=None):
         else:
             store.save(task, task['status'], 'prompt_recorded', {'chars': len(text), 'session': session})
     return task
+
+
+def cli_feedback(store, task_id, text):
+    """A correction typed on the command line. In an attached session the executor's own shell can run this,
+    so it is recorded as source 'cli' and the reviewer weighs it as a claim; the user's prompts are source 'prompt'."""
+    text = (text or '').strip()
+    if not text or len(text) > 24000:
+        raise ValueError('Feedback must be nonempty and at most 24000 characters')
+    with store.lock('task:' + task_id):
+        task = store.get(task_id)
+        data = task['data']
+        data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
+                                                 'at': now(), 'source': 'cli'})
+        status = task['status']
+        if status == 'needs_input':
+            data.update(reason='', reason_code='', verification_pending=False)
+            data['development']['phase'] = 'ready'
+            status = 'working'
+        store.save(task, status, 'feedback_applied', {'source': 'cli', 'chars': len(text)})
+    return store.get(task_id)
 
 
 def set_done(store, task_id, texts, origin='executor'):
@@ -546,7 +592,7 @@ def _local(stamp, with_date=True):
         return str(stamp or '')[:16]
 
 
-def brief_text(store, task, event='prompt'):
+def brief_text(store, task, event='prompt', for_digest=False):
     data = task['data']
     prefix = orbit_command(store)
     tid = task['id']
@@ -609,34 +655,82 @@ def brief_text(store, task, event='prompt'):
         lines.append('REMAINING (your last claim): ' + _one_line(' · '.join(remaining), 400))
     if event == 'session-start' and len(data.get('prompts') or []) > 1:
         lines.append('RECENT PROMPTS: ' + ' · '.join('"' + _one_line(p['text'], 100) + '"' for p in data['prompts'][-3:]))
+    from .continuity import handoff_lines
+    continuity = handoff_lines(data, prefix, tid, closed=task['status'] in CLOSED)
+    if for_digest:
+        state = (data.get('handoff_state') or {})
+        continuity = [line.split(':')[0] for line in continuity] + [str(state.get('session')) + str(state.get('state'))]
+    lines.extend(continuity)
+    tail = []
     if task['status'] == 'verified':
-        lines.append('VERIFIED. A new request starts a new task; corrections to this one: %s feedback %s "…"' % (prefix, tid))
+        tail.append('VERIFIED. The next substantial request starts a new task.')
     elif task['status'] == 'stalled':
-        lines.append('CLOSED (%s). Attach a new request: %s attach "…"' % (data.get('reason_code') or 'stalled', prefix))
+        tail.append('CLOSED (%s). Attach a new request: %s attach "…"' % (data.get('reason_code') or 'stalled', prefix))
     else:
-        lines.append('RECORD evidence per item: %s evidence %s D1 --note "…" [--command \'["python3","-m","pytest"]\'] [--file path]' % (prefix, tid))
-        lines.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] · correction: %s feedback %s "…"' % (prefix, tid, prefix, tid))
-        lines.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
-    text = '\n'.join(lines)
-    if len(text) > BRIEF_LIMIT:
-        text = text[:BRIEF_LIMIT - 1] + '…'
-    return text
+        tail.append('RECORD evidence per D item (C items are Orbit\'s fixed checks): %s evidence %s D1 --note "…" [--command \'["python3","-m","pytest"]\'] [--file path]' % (prefix, tid))
+        tail.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] · '
+                    'a D item you defined is wrong: %s done %s \'D1 …\' (G0, the original goal, always binds)' % (prefix, tid, prefix, tid))
+        tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
+    return _fit(lines, tail, BRIEF_LIMIT)
 
 
-def serve_brief(store, task, event):
-    briefs = task['data'].get('briefs') or {}
-    if (event == 'prompt' and briefs.get('last_revision') == task['revision'] and briefs.get('last_at')
-            and time.time() - _epoch(briefs['last_at']) < 60):
-        return None  # the session-start brief seconds ago is still in context
+def _fit(lines, tail, limit):
+    """Keep the header and the action lines whole; shorten the middle (longest lines first) to fit."""
+    head, middle = lines[:2], list(lines[2:])
+    def size():
+        return len('\n'.join(head + middle + tail))
+    while size() > limit and middle:
+        longest = max(range(len(middle)), key=lambda i: len(middle[i]))
+        overflow = size() - limit
+        if len(middle[longest]) - overflow >= 120:
+            middle[longest] = middle[longest][:len(middle[longest]) - overflow - 1] + '…'
+        else:
+            middle[longest] = middle[longest][:119] + '…' if len(middle[longest]) > 120 else ''
+            middle = [m for m in middle if m]
+            if size() > limit and all(len(m) <= 120 for m in middle):
+                middle.pop(0)
+    text = '\n'.join(head + middle + tail)
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def brief_digest(store, task):
+    return hashlib.sha256(brief_text(store, task, 'digest', for_digest=True).encode('utf-8')).hexdigest()[:16]
+
+
+def serve_brief(store, task, event, session=None):
+    """Full brief at session start and whenever its content changed for this session; otherwise nothing.
+
+    A brief that is already in the session's context costs tokens on every later turn if it is repeated."""
+    data = task['data']
+    briefs = data.get('briefs') or {}
+    digest = brief_digest(store, task)
+    session = session or (data.get('context_live') or {}).get('session')
+    seen = (briefs.get('digests') or {}).get(session) if session else None
+    if event == 'prompt' and session and seen == digest and not data.get('context_dropped'):
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                task['data'].setdefault('briefs', {}).setdefault('skipped', 0)
+                task['data']['briefs']['skipped'] += 1
+                store.save(task, task['status'], 'brief_skipped', {'event': event, 'reason': 'unchanged'})
+        except (RuntimeError, ValueError):
+            pass
+        return None
     text = brief_text(store, task, event)
     try:
         with store.lock('task:' + task['id']):
             task = store.get(task['id'])
             briefs = task['data'].setdefault('briefs', {'served': 0, 'last_at': None})
             briefs['served'] = briefs.get('served', 0) + 1
+            briefs['chars'] = briefs.get('chars', 0) + len(text)
             briefs['last_at'] = now()
-            briefs['last_revision'] = task['revision'] + 1
-            store.save(task, task['status'], 'brief_served', {'event': event, 'chars': len(text)})
+            if session:
+                digests = briefs.setdefault('digests', {})
+                digests[session] = digest
+                for old in list(digests)[:-20]:
+                    digests.pop(old, None)
+            task['data'].pop('context_dropped', None)
+            store.save(task, task['status'], 'brief_served', {'event': event, 'chars': len(text), 'session': session})
     except (RuntimeError, ValueError):
         pass  # The worker may own the task during verification; the brief is still served.
     return text
@@ -669,28 +763,65 @@ def _handle(store, event, payload, host):
         return None
     task = current_task(store, root)
     session = payload.get('session_id')
+    from . import continuity
+
+    def watched(current, source=None):
+        try:
+            return continuity.observe(store, current, payload, host, event, source)
+        except RuntimeError:
+            return store.get(current['id'])  # the worker owns the task this instant; measure next time
+
     if event == 'session-start':
         if task is None:
             return None
-        return _context('SessionStart', serve_brief(store, task, 'session-start'))
+        task = watched(task, payload.get('source'))
+        return _context('SessionStart', serve_brief(store, task, 'session-start', session))
+    if event == 'pre-compact':
+        if task is None or task['status'] in CLOSED:
+            return None
+        task = watched(task, 'compact')
+        try:
+            continuity.auto_checkpoint(store, task, payload.get('trigger') or 'auto')
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                task['data']['context_dropped'] = True
+                store.save(task, task['status'], 'compacted', {'trigger': payload.get('trigger') or 'auto', 'layer': 'context',
+                                                               'tokens': (task['data'].get('context_live') or {}).get('tokens')})
+        except (RuntimeError, ValueError) as error:
+            hook_log(store, 'pre-compact checkpoint skipped: ' + str(error))
+        return None
     if event == 'prompt':
         text = (payload.get('prompt') or '').strip()
         if text.startswith('/') or not text:
-            return _context('UserPromptSubmit', serve_brief(store, task, 'prompt')) if task else None
+            return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
         if task is None or task['status'] in CLOSED:
             if len(text) < MIN_TASK_PROMPT:
-                return _context('UserPromptSubmit', serve_brief(store, task, 'prompt')) if task else None
+                return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
             task = create(store, root, text, host, session)
         else:
             try:
                 task = record_prompt(store, task, text, session)
             except RuntimeError:
                 hook_log(store, 'prompt not recorded (task busy) ' + task['id'])
-        return _context('UserPromptSubmit', serve_brief(store, task, 'prompt'))
+        task = watched(task)
+        return _context('UserPromptSubmit', serve_brief(store, task, 'prompt', session))
     if event == 'stop':
-        if task is None or payload.get('stop_hook_active'):
+        if task is None:
             return None
-        return stop_decision(store, task, payload)
+        task = watched(task)  # measure every stop, including the one after a block
+        if payload.get('stop_hook_active'):
+            # Never block twice in a row; a message to the user does not continue the turn, so it may go now
+            # (this is the stop right after the checkpoint the executor was asked for).
+            return context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED,
+                                    message_only=True)
+        primary = stop_decision(store, task, payload)
+        if primary and primary.get('decision') == 'block':
+            return primary  # the context decision waits for the next stop
+        settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
+        secondary = context_decision(store, store.get(task['id']), settle=settle)
+        if primary and secondary and 'systemMessage' in secondary:
+            return {'systemMessage': primary['systemMessage'] + '\n' + secondary['systemMessage']}
+        return primary or secondary
     return None
 
 
@@ -734,6 +865,53 @@ def stop_decision(store, task, payload):
             hint = ('Propose the completion definitions first: `%s done %s \'D1 …\' \'D2 …\'`, then record evidence and claim. ' % (prefix, task['id'])) + hint
         return {'decision': 'block', 'reason': 'Orbit: this reads like a completion claim for task %s, but nothing was claimed and nothing is verified. ' % task['id'] + hint}
     return None
+
+
+def context_decision(store, task, settle=False, message_only=False):
+    """At the handoff point: one checkpoint request to the executor, then one message to the user.
+
+    settle: the executor has just claimed (or the task is closed). The ledger already holds the whole state,
+    so no checkpoint is requested; the user is told once that a fresh context continues lean."""
+    data = task['data']
+    live = data.get('context_live') or {}
+    state = data.get('handoff_state') or {}
+    if not live.get('session') or state.get('session') != live.get('session'):
+        return None
+    prefix = orbit_command(store)
+    closed = task['status'] in CLOSED or settle
+    if state.get('state') == 'recommended' and not closed:
+        reply = {'decision': 'block', 'reason': (
+            "Orbit: this session's context is %s tokens (handoff point %s). Record a checkpoint now so a fresh session can "
+            "continue without re-reading it: %s checkpoint %s --next '<the next concrete step>' --notes '<approach, decisions "
+            "and anything the ledger does not already hold>' [--file <file in progress>]. Keep it short; goal, corrections, "
+            "evidence and verdicts are already in the ledger. Then end the turn."
+            % (_k(live.get('tokens')), _k(state.get('limit')), prefix, task['id']))}
+        new_state = 'asked'
+    elif state.get('state') in ('checkpointed',) or (state.get('state') == 'recommended' and closed):
+        checkpointed = state.get('state') == 'checkpointed'
+        reply = {'systemMessage': (
+            'Orbit: context %s tokens ≥ handoff point %s for task %s. %sType /clear (Claude Code) or /new (Codex) to continue '
+            'in a fresh context; %s automatically. Change the point: cosmos-orbit context 300k · turn off: cosmos-orbit context off'
+            % (_k(live.get('tokens')), _k(state.get('limit')), task['id'],
+               'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''),
+               'the brief and checkpoint return' if checkpointed else 'the brief returns'))}
+        new_state = 'told'
+    else:
+        return None
+    if message_only and 'decision' in reply:
+        return None
+    try:
+        with store.lock('task:' + task['id']):
+            task = store.get(task['id'])
+            task['data'].setdefault('handoff_state', {})['state'] = new_state
+            store.save(task, task['status'], 'handoff_' + new_state, {'tokens': live.get('tokens'), 'layer': 'context'})
+    except (RuntimeError, ValueError):
+        return None
+    return reply
+
+
+def _k(value):
+    return '%dk' % round(value / 1000) if isinstance(value, (int, float)) and value else '?'
 
 
 # ---------------------------------------------------------------- projections
@@ -788,6 +966,23 @@ def handoff_markdown(store, task):
     changed = (data.get('development') or {}).get('changed_paths') or []
     lines += ['', '## Changed files since attach (%d)' % len(changed), '']
     lines += ['- `%s`' % p for p in changed[:60]] or ['- not measured yet (measured at each claim)']
+    checkpoints = data.get('checkpoints') or []
+    if checkpoints:
+        lines += ['', '## Latest checkpoint', '']
+        row = checkpoints[-1]
+        lines.append('- %s · %s · %s tokens · by %s' % (_local(row['at']), row.get('kind'), _k(row.get('tokens')), row.get('by')))
+        lines.append('- Next: ' + row['next'])
+        if row.get('notes'):
+            lines.append('- Notes: ' + row['notes'])
+        if row.get('files'):
+            lines.append('- Files in progress: ' + ', '.join('`%s`' % f['path'] for f in row['files']))
+        if row.get('changed'):
+            lines.append('- Changed since attach: ' + ', '.join('`%s`' % p for p in row['changed'][:30]))
+    sessions = data.get('session_log') or []
+    if sessions:
+        lines += ['', '## Sessions (%d)' % len(sessions), '']
+        lines += ['- %s · %s · started at %s · peak %s tokens' % (_local(r.get('started')), r.get('reason'), _k(r.get('start')), _k(r.get('peak')))
+                  for r in sessions[-8:]]
     prompts = data.get('prompts') or []
     lines += ['', '## Recent prompts (%d recorded)' % len(prompts), '']
     lines += ['- %s %s' % (_local(p['at'], False), _one_line(p['text'], 200)) for p in prompts[-8:]] or ['- none']

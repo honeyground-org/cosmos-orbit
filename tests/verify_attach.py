@@ -186,6 +186,15 @@ def main():
     finally:
         providers.Provider = original
 
+    print('④-b command-line corrections are marked as such; the brief does not invite the executor to write them')
+    fb = attach.cli_feedback(store, task2['id'], 'D3 is outdated; parts 2 and 3 are in scope')
+    check('cli feedback recorded with source cli, task keeps working', fb['data']['feedback'][-1]['source'] == 'cli' and fb['status'] == 'working', fb['data']['feedback'][-1])
+    brief = attach.brief_text(store, fb)
+    check('executor brief has no feedback invitation', ' feedback ' + task2['id'] not in brief and ' done ' + task2['id'] in brief)
+    from harness import verifier
+    import inspect
+    check('reviewer is told cli corrections are claims', 'source "cli"' in inspect.getsource(verifier.evaluate))
+
     print('⑤ projections: handoff, status snapshot, lessons, detach')
     path = attach.write_handoff(store, store.get(tid), base / 'HANDOFF.md')
     text = Path(path).read_text()
@@ -193,7 +202,8 @@ def main():
     from harness.observer import snapshot, terminal
     snap = snapshot(store, tid)['tasks'][0]
     check('snapshot: attached · verified · evidence · briefs', snap['mode'] == 'attached' and snap['status'] == 'verified'
-          and snap['done_evidence']['D1'][-1]['exit_code'] == 0 and snap['briefs']['served'] >= 3)
+          and snap['done_evidence']['D1'][-1]['exit_code'] == 0 and snap['briefs']['served'] >= 2, snap['briefs'])
+    check('unchanged brief is not repeated in the same session', (snap['briefs'] or {}).get('skipped', 0) >= 1, snap['briefs'])
     snap2 = snapshot(store, task2['id'])['tasks'][0]
     check('snapshot: attached working is not unattended', snap2['status'] == 'working' and snap2['operation']['title_key'] == 'simple.attached')
     rendered = terminal(snapshot(store), 'en')
@@ -221,7 +231,7 @@ def main():
         attach.install_hooks(host)
         attach.install_hooks(host)  # idempotent
         status = attach.hook_status(host)
-        check(host + ' installed once', status['installed'] and status['events'] == ['SessionStart', 'UserPromptSubmit', 'Stop'])
+        check(host + ' installed once', status['installed'] and status['events'] == ['SessionStart', 'UserPromptSubmit', 'Stop', 'PreCompact'], status)
     data = json.loads((base / 'claude' / 'settings.json').read_text())
     ours = [e for e in data['hooks']['Stop'] if attach._is_ours(e)]
     check('claude: existing Stop hook kept, ours added exactly once', len(data['hooks']['Stop']) == 2 and len(ours) == 1 and data['other'] == 1)
