@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -41,10 +42,10 @@ def prompt(store, root, session, text, source=None):
     return attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': text}, 'claude')
 
 
-def invite(store, task):
+def invite(store, task, session):
     with store.lock('task:' + task['id']):
         t = store.get(task['id'])
-        t['data']['handoff_state'] = {'session': 'x', 'state': 'told', 'tokens': 210000, 'limit': 200000}
+        t['data']['handoff_state'] = {'session': session, 'state': 'told', 'tokens': 210000, 'limit': 200000}
         store.save(t, t['status'], 'test_setup', {})
 
 
@@ -128,7 +129,7 @@ def main():
     attach.handle(store, 'session-start', {'cwd': str(root4), 'session_id': 'OB', 'source': 'startup'}, 'claude')
     prompt(store, root4, 'OA', 'Generate the product video with the new storyboard')
     oa = task_of(store, root4, 'OA')
-    invite(store, oa)
+    invite(store, oa, 'OA')
     prompt(store, root4, 'OB', 'Reduce indexing CPU when many sessions start')
     ob = task_of(store, root4, 'OB')
     check("an open session without a task never takes another session's invitation (review counterexample)",
@@ -139,7 +140,7 @@ def main():
     # a session already in conversation when Orbit first sees it (the switch turned on mid-session)
     prompt(store, root4, 'OC', 'Render the storyboard thumbnails in a grid')
     oc = task_of(store, root4, 'OC')
-    invite(store, oc)
+    invite(store, oc, 'OC')
     talked = transcript(base, 'talked', [{'type': 'user', 'sessionId': 'MID', 'message': {'role': 'user', 'content': 'hi'}},
                                          {'type': 'assistant', 'sessionId': 'MID', 'message': {'role': 'assistant', 'content': []}}])
     mid = attach.handle(store, 'prompt', {'cwd': str(root4), 'session_id': 'MID', 'prompt': 'Translate the README into Spanish',
@@ -159,6 +160,39 @@ def main():
     stranger = transcript(base, 'stranger', [{'type': 'assistant', 'sessionId': 'NEVER-SEEN', 'message': {'role': 'assistant', 'content': []}}])
     other = attach.resolve_task(store, root4, 'OA4', 'resume', stranger)
     check('…and an unrelated resumed conversation does not (control)', other is None)
+
+    # Codex reports no SessionEnd: a second handoff must still work (the first adoption ends the inviter)
+    root5 = make_repo(base, 'repo-chain')
+    attach.set_switch(store, 'on', root5)
+    attach.handle(store, 'prompt', {'cwd': str(root5), 'session_id': 'X1', 'prompt': 'Port the exporter to the new API'}, 'codex')
+    x1 = task_of(store, root5, 'X1')
+    invite(store, x1, 'X1')
+    x2 = attach.resolve_task(store, root5, 'X2', 'startup')
+    invite(store, x2, 'X2')
+    x3 = attach.resolve_task(store, root5, 'X3', 'startup')
+    check('Codex: a second handoff in a row is taken by the next new session', x2 and x3 and x2['id'] == x1['id'] == x3['id'])
+
+    # found by the fifth independent review: several new sessions at once after SessionEnd → exactly one takes it
+    for label, setup in (('after SessionEnd', 'end'), ('with a handoff invitation', 'invite')):
+        rootp = make_repo(base, 'repo-race-' + setup)
+        attach.set_switch(store, 'on', rootp)
+        owner = 'P0-' + setup
+        prompt(store, rootp, owner, 'Write the race-safe importer please')
+        p0 = task_of(store, rootp, owner)
+        if setup == 'end':
+            attach.handle(store, 'session-end', {'cwd': str(rootp), 'session_id': owner}, 'claude')
+        else:
+            invite(store, p0, owner)
+        at = time.time() + 1.5
+        script = ('import sys,time,json; sys.path.insert(0, %r); from harness import attach; from harness.store import Store;'
+                  's=Store(%r); time.sleep(max(0, %r - time.time())); t=attach.resolve_task(s, %r, sys.argv[1], "startup");'
+                  'print(json.dumps(t and t["id"]))') % (str(ROOT), str(base / 'home'), at, str(rootp))
+        procs = [subprocess.Popen([sys.executable, '-c', script, 'N%d-%s' % (i, setup)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for i in range(10)]
+        outs = [p.communicate()[0].strip() for p in procs]
+        took = [o for o in outs if o and o != 'null']
+        live = [r['session'] for r in store.task_sessions(p0['id']) if not r['ended']]
+        check('ten new sessions at once %s → exactly one takes the task' % label, len(took) == 1 and len(live) == 1, (outs, live))
 
     print('③ tasks created before session binding: the creator owns them')
     root2 = make_repo(base, 'repo2')

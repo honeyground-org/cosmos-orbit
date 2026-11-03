@@ -257,6 +257,11 @@ def current_task(store, root):
 
 
 NO_TASK = ''  # a session row with no task: the session was seen without one, so it never inherits another's later
+SESSION_LOCK_WAIT = 2.0  # seconds; the sessions lock is held only for one check and one write
+
+
+def _live_owners(store, task_id, session, *also_ignore):
+    return [r for r in store.task_sessions(task_id) if not r['ended'] and r['session'] != session and r['session'] not in also_ignore]
 
 
 def _transcript_facts(path, limit=2_000_000):
@@ -350,29 +355,37 @@ def resolve_task(store, root, session, source=None, transcript=None):
             invited.append((state.get('at') or task['updated'], task))
     for _, candidate in sorted(invited, key=lambda pair: pair[0], reverse=True):
         try:
-            with store.lock('task:' + candidate['id']):
+            with store.lock('task:' + candidate['id']), store.lock('sessions:' + candidate['id'], timeout=SESSION_LOCK_WAIT):
                 task = store.get(candidate['id'])
                 state = task['data'].get('handoff_state') or {}
                 if state.get('state') not in ('checkpointed', 'told'):
                     continue                             # another new session took this invitation first
+                if _live_owners(store, task['id'], session, state.get('session')):
+                    continue                             # a new session already took the task after its owner ended
                 state.update(state='adopted', adopted_by=session)
                 store.save(task, task['status'], 'handoff_adopted', {'session': session, 'layer': 'context'})
                 store.bind_session(session, task['id'], root)
+                if state.get('session') and state['session'] != session:
+                    store.end_session(state['session'])  # handed off; Codex reports no SessionEnd, so say it here
                 return store.get(task['id'])
         except (RuntimeError, ValueError):
             busy = True                                  # never adopt without the lock; try again on its next event
     latest = current_task(store, root)
     if latest is not None:
-        owners = store.task_sessions(latest['id'])
-        if not owners:
-            prompts = latest['data'].get('prompts') or []
-            creator = next((p.get('session') for p in prompts if p.get('session')), None)
-            if creator and creator != session:
-                store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
-                owners = store.task_sessions(latest['id'])
-        if not [r for r in owners if not r['ended'] and r['session'] != session]:
-            store.bind_session(session, latest['id'], root)
-            return latest
+        try:
+            # Check and bind as one step: several new sessions can start at once (a multiplexer restoring panes).
+            # A short lock of its own, not the task lock, which a running review holds for minutes.
+            with store.lock('sessions:' + latest['id'], timeout=SESSION_LOCK_WAIT):
+                if not store.task_sessions(latest['id']):
+                    prompts = latest['data'].get('prompts') or []
+                    creator = next((p.get('session') for p in prompts if p.get('session')), None)
+                    if creator and creator != session:
+                        store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
+                if not _live_owners(store, latest['id'], session):
+                    store.bind_session(session, latest['id'], root)
+                    return latest
+        except RuntimeError:
+            busy = True
     if not busy:
         store.bind_session(session, NO_TASK, root)       # nothing to inherit now, so nothing later either
     return None  # this session starts its own task
