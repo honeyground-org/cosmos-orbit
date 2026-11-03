@@ -142,11 +142,19 @@ class Provider:
             if callback:
                 callback(record)
         persist('prepared')
-        with log_path.open('w', encoding='utf-8') as stdout, error_path.open('w', encoding='utf-8') as stderr:
+        # The prompt reaches the provider as a file, not a pipe: Python 3.9's communicate(timeout=) stops writing
+        # after its first timeout when retried without input, so a prompt larger than the pipe buffer never got
+        # its end-of-file and the provider waited forever (reviews hung with no output and no network).
+        prompt_path = directory / (call_id + '.prompt.txt')
+        fd = os.open(str(prompt_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(prompt)
+        with log_path.open('w', encoding='utf-8') as stdout, error_path.open('w', encoding='utf-8') as stderr, \
+                prompt_path.open('r', encoding='utf-8') as stdin:
             os.chmod(log_path, 0o600)
             os.chmod(error_path, 0o600)
             runner = [sys.executable, str(Path(__file__).with_name('native_runner.py')), str(receipt), *command]
-            process = subprocess.Popen(runner, cwd=str(workspace or directory), stdin=subprocess.PIPE,
+            process = subprocess.Popen(runner, cwd=str(workspace or directory), stdin=stdin,
                                        stdout=stdout, stderr=stderr, text=True, encoding='utf-8',
                                        start_new_session=True, pass_fds=lease_fds,
                                        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1') if read_only else None)
@@ -157,7 +165,7 @@ class Provider:
             try:
                 callback = getattr(self, 'on_event', None)
                 if callback is None:
-                    process.communicate(prompt)
+                    process.wait()
                 else:
                     from .telemetry import provider_event
                     from .process_health import Monitor
@@ -186,16 +194,14 @@ class Provider:
                                                     callback(kind, dict(payload, call_id=call_id))
                                         pending, dropping = '', False
                                 chunk = stream.read(262144)
-                        first = True
                         while True:
                             monitor.sample()
                             try:
-                                process.communicate(prompt if first else None, timeout=.25)
+                                process.wait(timeout=.25)
                                 drain()
                                 monitor.sample(force=True)
                                 break
                             except subprocess.TimeoutExpired:
-                                first = False
                                 drain()
             except BaseException:
                 try:
@@ -208,6 +214,11 @@ class Provider:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                 raise
+            finally:
+                try:
+                    prompt_path.unlink()
+                except OSError:
+                    pass
         record = json.loads(receipt.read_text())
         callback = getattr(self, 'on_call', None)
         if callback:
