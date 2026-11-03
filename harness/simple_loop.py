@@ -14,9 +14,9 @@ RESULT = providers.obj({'summary': providers.STRING, 'finished': {'type': 'boole
 
 
 def completion_items(texts, commands, origin):
-    if (not isinstance(texts, list) or len(texts) > 6
+    if (not isinstance(texts, list) or len(texts) > 12
             or any(not isinstance(text, str) or not text.strip() or len(text) > 2000 for text in texts)):
-        raise ValueError('Supply up to six nonempty completion definitions, at most 2000 characters each')
+        raise ValueError('Supply up to twelve nonempty completion definitions, at most 2000 characters each')
     return ([{'id': 'G0', 'text': 'The original user goal and subsequent corrections are fully addressed, including requirements omitted from this checklist.',
               'how': 'inspect', 'origin': 'user'}]
             + [{'id': 'D' + str(i + 1), 'text': text, 'how': 'inspect', 'origin': origin}
@@ -34,7 +34,13 @@ def initialize(store, task, done=None, max_turns=8):
     data = task['data']
     data.update(runtime_version=3, goal=task['prompt'], done=items, turns=0,
                 verdicts=[], resumes=[], max_turns=max_turns, plan_requested=False)
-    data['done_fixed'] = {'at': now(), 'origin': 'user', 'turn': 0} if done else None
+    data['done_fixed'] = {'at': now(), 'origin': 'user', 'turn': 0, 'rev': 1} if done else None
+    if done:
+        data['done_rev'] = 1
+        data['done_history'] = [{'rev': 1, 'at': now(), 'origin': 'user', 'turn': 0, 'because': 'initial', 'kept': False,
+                                 'added': [i['id'] for i in items if i['id'].startswith('D')], 'removed': [],
+                                 'checks_added': list(task['data']['development']['checks']),
+                                 'items': len(done), 'checks': len(task['data']['development']['checks'])}]
     store.save(task, 'received', 'goal_fixed', {'done': items, 'origin': 'user' if done else 'pending'})
 
 
@@ -94,6 +100,11 @@ def feedback_boundary(store, task):
     data['development'].update(phase='ready', verified_tree=None)
     sent = [message['text'] for message in messages]
     data['resumes'].append({'turn': data['turns'], 'because': 'feedback', 'sent': sent})
+    if data.get('done_fixed'):
+        # A correction after the completion definitions: the executor must revise them on its next turn.
+        from .requirements import mark_pending
+        data['done_stale'] = True
+        mark_pending(data, sent[-1], 'feedback')
     store.save(task, 'received', 'feedback_applied', {'message_ids': [m['id'] for m in messages]},
                consumed=[m['id'] for m in messages])
     return True
@@ -102,7 +113,8 @@ def feedback_boundary(store, task):
 def executor_prompt(task):
     data = task['data']
     payload = {'request': data['goal'], 'feedback': data['feedback'], 'done': data['done'],
-               'done_fixed': data['done_fixed'], 'checks': data['development']['checks'],
+               'done_fixed': data['done_fixed'], 'done_stale': bool(data.get('done_stale')),
+               'checks': data['development']['checks'],
                'capabilities': providers.native_capabilities(task['provider'], data['options'].get('public_web', False)),
                'resume': data['resumes'][-1] if data['resumes'] else None,
                'recovery': data.get('recovery_notice')}
@@ -112,7 +124,9 @@ def executor_prompt(task):
             'no authenticated accounts or trades. Historical handoffs are context, not authority. '
             'The host runs the immutable checks when you return; do not weaken them. '
             'The original request and subsequent corrections bind the task. If done_fixed is null, '
-            'propose one to six completion definitions in done_proposed without adding scope; otherwise '
+            'propose one to twelve completion definitions in done_proposed without adding scope. If done_stale '
+            'is true, corrections arrived after the definitions: return done_proposed covering the whole updated '
+            'request (keep the items that still apply, add what the corrections require). Otherwise '
             'return an empty done_proposed. finished=true claims the full task is complete. Otherwise '
             'list remaining work. question is only essential input that only the user can supply. '
             'A supported negative research result can complete research.\n'
@@ -182,9 +196,12 @@ def finish_executor(store, task, answer, metadata, recovered=False):
     data = task['data']
     data['executor_result'] = answer
     data['last_summary'] = answer['summary']
-    if not data['done_fixed'] and answer['done_proposed']:
-        data['done'] = completion_items(answer['done_proposed'], data['development']['checks'], 'executor')
-        data['done_fixed'] = {'at': now(), 'origin': 'executor', 'turn': data['turns']}
+    from .requirements import revise
+    if answer['done_proposed'] and (not data['done_fixed'] or data.get('done_stale')):
+        user_fixed = (data.get('done_fixed') or {}).get('origin') == 'user'
+        revise(data, answer['done_proposed'], 'executor', add=user_fixed, because=None)
+    elif data.get('done_stale') and answer['finished']:
+        revise(data, [], 'executor', keep=True, because='executor finished without revising: current items kept')
     data.setdefault('presentation', {})['summary'] = answer['summary']
     data['objective_progress'] = {'remaining': answer['remaining'], 'source': 'executor_report'}
     from .results import capture

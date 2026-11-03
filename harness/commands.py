@@ -15,7 +15,8 @@ GROUPS = [
         ('claude --dangerously-skip-permissions   ·   codex',
          'Your normal command. The first substantial prompt becomes the goal; every prompt, correction, evidence and verdict lands in the ledger; the brief returns after compaction and at the next session.')]),
     ('Inside the session (the executor calls these)', [
-        ("cosmos-orbit done TASK_ID 'D1 …' 'D2 …'", 'Propose one to six completion definitions. The user can replace them with feedback --done.'),
+        ("cosmos-orbit done TASK_ID 'D1 …' [--add] [--keep] [--check ARGV_JSON]",
+         'Write a revision of the result goals and verification goals. Required after every requirement change before a claim; fixed checks are append-only.'),
         ("cosmos-orbit evidence TASK_ID D1 --note '…' [--command '[\"python3\",\"-m\",\"pytest\"]'] [--file path]",
          'Evidence per item: a command actually run (exit code and output tail), a file fingerprint, or a note.'),
         ("cosmos-orbit checkpoint TASK_ID --next '…' [--notes '…'] [--file path]",

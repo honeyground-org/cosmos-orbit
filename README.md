@@ -135,6 +135,36 @@ What happens in an attached session:
 creates the same ledger explicitly, with fixed checks the model cannot change. `cosmos-orbit brief`
 prints what the hooks inject. `cosmos-orbit detach` closes a task without verification.
 
+## When the request changes
+
+Real work keeps growing: a case is added, a feature widens, a rule changes. Every such change has to
+revise what "done" means, or the review checks yesterday's task. Orbit makes that a rule instead of
+a habit:
+
+1. Each prompt is classified without a model. A go-ahead (`continue`, `진행해`) or a question is only
+   recorded. Anything else is a **requirement change**: it joins the corrections that bind the
+   independent review, and the session gets one short notice, not the whole brief again.
+2. Until the result and verification goals are revised, a completion claim is refused and the Stop
+   hook asks the executor once to revise them. The executor understands the change, so it writes
+   the revision:
+
+   ```sh
+   cosmos-orbit done TASK_ID --add 'CSV export writes one row per item' \
+     --check '["python3","-m","pytest","tests/test_csv.py"]'   # new item + new fixed check
+   cosmos-orbit done TASK_ID 'D1 …' 'D2 …'                      # rewrite the executor's own items
+   cosmos-orbit done TASK_ID --keep                              # the current items already cover it
+   ```
+
+3. Fixed checks can only be added, never replaced or removed. Definitions the user fixed can be
+   extended with `--add` but not rewritten by the executor. Up to twelve items.
+4. Every revision is kept with its number, time, origin, reason and what it added; the brief shows
+   `DONE (rev N)`, and the dashboard lists the revisions.
+5. A change that arrives while the review runs is queued, not lost; a verified verdict then reopens
+   the work as `requirements_changed` instead of closing it.
+
+Unattended work follows the same rule: a correction marks the definitions stale, the executor's next
+response proposes the revised set, and Orbit adopts it as a new revision.
+
 ## Context and mid-task handoff
 
 A session re-reads its whole context on every turn, cached or not, and long contexts also dilute
@@ -211,7 +241,7 @@ the completion claim; it does not pretend that a test suite was configured.
 
 1. Keep the **original request and every correction**. The mandatory G0 criterion checks the whole
    request even when an executor's proposed checklist misses something.
-2. Freeze up to six explicit `--done` items, or obtain them from the executor (its first response
+2. Freeze up to twelve explicit `--done` items, or obtain them from the executor (its first response
    unattended, `cosmos-orbit done` attached). There is no separate planner call. A later
    `feedback --done` explicitly replaces the checklist.
 3. Resume the owned native session while work remains (unattended), or hand the brief back to the

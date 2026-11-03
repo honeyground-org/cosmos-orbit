@@ -27,6 +27,8 @@ def show(task):
             'mode': data.get('mode', 'managed'), 'host': data.get('host'),
             'done_evidence': data.get('done_evidence'), 'prompts': data.get('prompts'), 'briefs': data.get('briefs'),
             'verification_pending': data.get('verification_pending', False),
+            'done_rev': data.get('done_rev'), 'done_history': data.get('done_history'),
+            'requirements_pending': data.get('requirements_pending'),
             'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
             'recoverable': data.get('recoverable', False),
             'presentation': data.get('presentation'), 'execution_plan': data.get('execution_plan'),
@@ -97,9 +99,13 @@ def main(argv=None):
     attach_cmd.add_argument('--check', action='append', default=[], metavar='ARGV_JSON')
     attach_cmd.add_argument('--done', action='append')
     attach_cmd.add_argument('--max-turns', type=int, default=8)
-    done_cmd = sub.add_parser('done', help='Propose or set the completion definitions of an attached task')
+    done_cmd = sub.add_parser('done', help='Write a revision of the result goals (D items) and verification goals (fixed checks)')
     done_cmd.add_argument('id')
-    done_cmd.add_argument('text', nargs='+')
+    done_cmd.add_argument('text', nargs='*')
+    done_cmd.add_argument('--add', action='store_true', help='Append to the current items instead of replacing them')
+    done_cmd.add_argument('--keep', action='store_true', help='Confirm the current items still cover the changed request')
+    done_cmd.add_argument('--check', dest='checks', action='append', default=[], metavar='ARGV_JSON',
+                          help='Add a fixed verification command (append-only; existing checks never change)')
     done_cmd.add_argument('--user', action='store_true', help='Record as fixed by the user')
     evidence_cmd = sub.add_parser('evidence', help='Record evidence for one completion item: a note, a command actually run, or a file fingerprint')
     evidence_cmd.add_argument('id')
@@ -321,7 +327,10 @@ def main(argv=None):
             result = show(task)
         elif args.command == 'done':
             from .attach import set_done
-            result = show(set_done(store, args.id, args.text, 'user' if args.user else 'executor'))
+            task = set_done(store, args.id, args.text, 'user' if args.user else 'executor', args.add, args.keep, args.checks)
+            result = show(task)
+            result['done_rev'] = task['data'].get('done_rev')
+            result['revision'] = (task['data'].get('done_history') or [None])[-1]
         elif args.command == 'evidence':
             from .attach import record_evidence
             entry = record_evidence(store, args.id, args.item, args.note, args.argv_json, args.file)

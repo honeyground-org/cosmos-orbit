@@ -57,7 +57,7 @@ def event_view(row):
         checks = data.get('checks', [])
         note = '%d / %d' % (sum(bool(c.get('passed')) for c in checks), len(checks))
     # Runtime v3 events carry structured payloads; project one readable line each (the view translates the title).
-    elif row['kind'] == 'goal_fixed':
+    elif row['kind'] == 'goal_fixed' and not data.get('rev'):
         note = '%s · %d' % (data.get('origin', ''), len(data.get('done') or []))
     elif row['kind'] == 'resumed':
         note = (data.get('because') or '') + ': ' + ' · '.join(str(s).splitlines()[0][:160] if str(s).strip() else '' for s in data.get('sent') or [])
@@ -83,6 +83,12 @@ def event_view(row):
         note = '%sk / %sk' % ((data.get('tokens') or 0) // 1000, (data.get('limit') or 0) // 1000) if data.get('limit') else '%sk' % ((data.get('tokens') or 0) // 1000)
     elif row['kind'] == 'session_rotated':
         note = '%s · previous peak %sk%s' % (data.get('reason') or '', (data.get('from_peak') or 0) // 1000, ' · checkpoint' if data.get('checkpoint') else '')
+    elif row['kind'] in ('requirement_added', 'requirement_asked'):
+        note = ('rev %s · ' % data.get('rev')) + str(data.get('text') or '')[:300]
+    elif row['kind'] in ('goal_fixed', 'done_kept') and data.get('rev'):
+        note = 'rev %s · %s%s%s' % (data.get('rev'), ('+' + ','.join(data.get('added') or [])) if data.get('added') else ('kept' if row['kind'] == 'done_kept' else ''),
+                                    (' · checks +%d' % len(data.get('checks_added') or [])) if data.get('checks_added') else '',
+                                    (' · ' + str(data.get('because'))[:200]) if data.get('because') else '')
     elif row['kind'] == 'checkpoint_recorded':
         note = '%s · %sk tokens · files %s' % (data.get('kind') or '', (data.get('tokens') or 0) // 1000, data.get('files', 0))
     elif row['kind'] == 'compacted':
@@ -299,6 +305,10 @@ def snapshot(store, task_id=None):
                           'recoverable': data.get('recoverable', False),
                           # v3 contract (§4.1): goal · done · done_fixed · turns · verdicts · resumes; absent (None) on v2 tasks.
                           'done': data.get('done') if runtime_version == 3 else None,
+                          'done_rev': data.get('done_rev'),
+                          'done_history': [dict(h, because=str(h.get('because') or '')[:300], removed=[str(x)[:160] for x in h.get('removed') or []])
+                                           for h in (data.get('done_history') or [])[-10:]],
+                          'requirements_pending': data.get('requirements_pending'),
                           'done_fixed': data.get('done_fixed') if runtime_version == 3 else None,
                           'turns': data.get('turns') if runtime_version == 3 else None,
                           'max_turns': data.get('max_turns') if runtime_version == 3 else None,
@@ -430,6 +440,10 @@ def terminal(data, lang='en', width=110):
                 rows.append('  entrance: attached · ' + clean(task['workspace']) + ' | prompts ' + str(task.get('prompts_count', 0))
                             + ' | briefs ' + str((task.get('briefs') or {}).get('served', 0)) + ' | evidence ' + evidence_counts
                             + (' | verification pending' if task.get('verification_pending') else ''))
+            if task.get('requirements_pending'):
+                rows.append('  request changed: ' + clean(task['requirements_pending'].get('text', ''))[:160] + ' → revise the goals (done --add / --keep)')
+            if task.get('done_rev'):
+                done_line = 'rev ' + str(task['done_rev']) + ' ' + done_line
             rows.append('  done: ' + done_line + ' | turns ' + str(task.get('turns')) + '/' + str(task.get('max_turns'))
                         + ' | resumes ' + str(len(task.get('resumes') or [])) + ' | verifier calls '
                         + str((task.get('metrics') or {}).get('by_phase', {}).get('verifying', {}).get('calls', 0)))

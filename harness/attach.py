@@ -323,31 +323,68 @@ def detach(store, root=None, task_id=None):
 
 
 def record_prompt(store, task, text, session=None):
-    """Keep the conversation in the ledger; a prompt answers an open question, it never silently changes the goal."""
+    """Keep the conversation in the ledger. A requirement change binds the review and must revise the goals;
+    a question or a go-ahead is only recorded. If the worker owns the task this instant, the prompt is queued."""
     text = (text or '').strip()
     if not text:
         return task
-    with store.lock('task:' + task['id']):
-        task = store.get(task['id'])
-        data = task['data']
-        prompts = data.setdefault('prompts', [])
-        prompts.append({'at': now(), 'text': text[:600], 'session': session})
-        del prompts[:-30]
-        if session:
-            sessions = data.setdefault('session_ids', [])
-            if session not in sessions:
-                sessions.append(session)
-                del sessions[:-20]
-        if task['status'] == 'needs_input':
-            data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
-                                                     'at': now(), 'source': 'prompt'})
-            data.update(reason='', reason_code='', verification_pending=False)
-            data['development']['phase'] = 'ready'
-            data['resumes'].append({'turn': data.get('turns', 0), 'because': 'feedback', 'sent': [text[:600]]})
-            store.save(task, 'working', 'feedback_applied', {'source': 'prompt', 'chars': len(text)})
-        else:
-            store.save(task, task['status'], 'prompt_recorded', {'chars': len(text), 'session': session})
-    return task
+    try:
+        with store.lock('task:' + task['id']):
+            task = store.get(task['id'])
+            _apply_prompt(store, task, text, session)
+    except RuntimeError:
+        store.enqueue(task['id'], text, None)  # applied by drain_inbox at the next hook, claim or review end
+    return store.get(task['id'])
+
+
+def _apply_prompt(store, task, text, session=None):
+    from . import requirements
+    data = task['data']
+    prompts = data.setdefault('prompts', [])
+    kind = requirements.classify(text)
+    prompts.append({'at': now(), 'text': text[:600], 'session': session, 'kind': kind})
+    del prompts[:-30]
+    if session:
+        sessions = data.setdefault('session_ids', [])
+        if session not in sessions:
+            sessions.append(session)
+            del sessions[:-20]
+    if kind == 'requirement' or task['status'] == 'needs_input':
+        data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
+                                                 'at': now(), 'source': 'prompt', 'kind': kind})
+    status = task['status']
+    if task['status'] == 'needs_input':
+        data.update(reason='', reason_code='', verification_pending=False)
+        data['development']['phase'] = 'ready'
+        data['resumes'].append({'turn': data.get('turns', 0), 'because': 'feedback', 'sent': [text[:600]]})
+        status = 'working'
+    if kind == 'requirement' and data.get('done_fixed'):
+        requirements.mark_pending(data, text, 'prompt')
+        store.save(task, status, 'requirement_added', {'chars': len(text), 'session': session, 'rev': data.get('done_rev') or 0,
+                                                       'text': text[:200], 'layer': 'control'})
+    elif status != task['status']:
+        store.save(task, status, 'feedback_applied', {'source': 'prompt', 'chars': len(text)})
+    else:
+        store.save(task, status, 'prompt_recorded', {'chars': len(text), 'session': session, 'kind': kind})
+
+
+def drain_inbox(store, task):
+    """Apply prompts that arrived while the task was busy, in order. Returns the fresh task."""
+    queued = store.inbox(task['id'])
+    if not queued:
+        return task
+    try:
+        with store.lock('task:' + task['id']):
+            current = store.get(task['id'])
+            for message in queued:
+                _apply_prompt(store, current, message['text'], None)
+                current = store.get(task['id'])
+            with store.db:
+                for message in queued:
+                    store.db.execute('UPDATE inbox SET consumed=1 WHERE id=? AND task_id=?', (message['id'], task['id']))
+            return store.get(task['id'])
+    except RuntimeError:
+        return task
 
 
 def cli_feedback(store, task_id, text):
@@ -370,22 +407,25 @@ def cli_feedback(store, task_id, text):
     return store.get(task_id)
 
 
-def set_done(store, task_id, texts, origin='executor'):
-    from .simple_loop import completion_items
+def set_done(store, task_id, texts, origin='executor', add=False, keep=False, checks=()):
+    """Write a revision of the result goals (D items) and verification goals (fixed checks, append-only)."""
+    from . import requirements
+    commands = parse_checks(checks)
+    task = drain_inbox(store, store.get(task_id))
     with store.lock('task:' + task_id):
         task = store.get(task_id)
         data = task['data']
         if data.get('mode') != 'attached':
             raise ValueError('done applies to attached tasks; use feedback --done for managed tasks')
-        if data.get('done_fixed') and data['done_fixed'].get('origin') == 'user' and origin != 'user':
-            raise ValueError('The user fixed the completion definitions; replace them with feedback --done')
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
-        items = completion_items(list(texts), data['development']['checks'], origin)
-        data['done'] = items
-        data['done_fixed'] = {'at': now(), 'origin': origin, 'turn': data.get('turns', 0)}
-        store.save(task, task['status'], 'goal_fixed', {'done': items, 'origin': origin})
-    return task
+        row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands)
+        if commands:
+            data['development']['verified_tree'] = None  # new checks run at the next claim
+        kind = 'done_kept' if row['kept'] else 'goal_fixed'
+        store.save(task, task['status'], kind, {'done': data['done'], 'origin': origin, 'rev': row['rev'],
+                                                'added': row['added'], 'checks_added': row['checks_added'], 'because': row['because'][:200]})
+    return store.get(task_id)
 
 
 def record_evidence(store, task_id, item_id, note=None, command=None, file=None, by=None):
@@ -438,6 +478,7 @@ def record_evidence(store, task_id, item_id, note=None, command=None, file=None,
 def claim(store, task_id, summary='', remaining=(), question=''):
     """The executor's completion claim. Checks run now; the independent review is queued (or run with wait)."""
     from .simple_loop import stop_for_input
+    drain_inbox(store, store.get(task_id))
     with store.lock('task:' + task_id):
         task = store.get(task_id)
         data = task['data']
@@ -446,6 +487,11 @@ def claim(store, task_id, summary='', remaining=(), question=''):
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
         remaining = [r.strip() for r in remaining if r and r.strip()]
+        pending = data.get('requirements_pending')
+        if pending and not remaining and not question.strip():
+            raise ValueError('The request changed after completion definitions rev %s: "%s". Revise the result and verification goals '
+                             'first (cosmos-orbit done %s --add \'…\' [--check …]) or confirm they still cover it (cosmos-orbit done %s --keep).'
+                             % (pending.get('rev') or 0, pending['text'][:200], task_id, task_id))
         answer = {'summary': (summary or '')[:4000], 'finished': not remaining and not question.strip(),
                   'remaining': remaining, 'question': question.strip(), 'done_proposed': []}
         data['executor_result'] = answer
@@ -517,16 +563,34 @@ def run_verification(engine, task_id, checks_only=False):
             try:
                 verdict = verifier.evaluate(engine, task, leases)
             except ValueError as error:
+                task = store.get(task_id)
                 data = task['data']
                 data.update(verification_pending=False)
                 data['development']['phase'] = 'ready'
                 data.pop('checks_done_for', None)
+                if data.get('requirements_pending') or 'changed during verification' in str(error):
+                    # The binding moved under the review (a new requirement or correction): back to work, not a question.
+                    data.update(reason='The request changed during the review; revise the goals and claim again.', reason_code='requirements_changed')
+                    store.save(task, 'working', 'resumed', {'because': 'requirements_changed', 'turn': data.get('turns', 0)})
+                    return task
                 stop_for_input(store, task, str(error), data.get('reason_code') or 'verifier_rejected')
                 return task
             data = task['data']
             data['development']['phase'] = 'ready'
             data.update(verification_pending=False)
             data.pop('checks_done_for', None)
+            from .requirements import classify, mark_pending
+            arrived = [m for m in store.inbox(task_id) if classify(m['text']) == 'requirement']
+            if verdict['outcome'] == 'verified' and arrived:
+                for message in store.inbox(task_id):
+                    _apply_prompt(store, task, message['text'], None)
+                    task = store.get(task_id)
+                with store.db:
+                    store.db.execute('UPDATE inbox SET consumed=1 WHERE task_id=?', (task_id,))
+                data = task['data']
+                data.update(reason='The request changed during the review; revise the goals and claim again.', reason_code='requirements_changed')
+                store.save(task, 'working', 'resumed', {'because': 'requirements_changed', 'turn': data.get('turns', 0)})
+                return task
             if verdict['outcome'] == 'verified':
                 data.update(reason='', reason_code='')
                 data['objective_progress'] = {'remaining': [], 'next_action': '', 'source': 'runtime'}
@@ -629,9 +693,13 @@ def brief_text(store, task, event='prompt', for_digest=False):
             mark = marks.get(verdict['status'], '○') if verdict else '○'
             count = len(evidence.get(d['id']) or [])
             parts.append('%s %s%s %s' % (d['id'], mark, ' evidence %d' % count if count else '', _one_line(d['text'], 140)))
-        lines.append('DONE: ' + ' · '.join(parts))
+        lines.append(('DONE (rev %s): ' % data['done_rev'] if data.get('done_rev') else 'DONE: ') + ' · '.join(parts))
     else:
-        lines.append("DONE: none yet — propose 1–6 completion definitions: %s done %s 'D1 …' 'D2 …'" % (prefix, tid))
+        lines.append("DONE: none yet — propose 1–12 completion definitions: %s done %s 'D1 …' 'D2 …' [--check '[\"…\"]']" % (prefix, tid))
+    from .requirements import pending_line
+    changed = pending_line(data, prefix, tid)
+    if changed and task['status'] not in CLOSED:
+        lines.append(changed)
     if last:
         unmet = ['%s %s — %s' % (i['id'], i['status'], _one_line('; '.join(i.get('evidence') or []), 200))
                  for i in last.get('items', []) if i.get('status') != 'met']
@@ -671,6 +739,9 @@ def brief_text(store, task, event='prompt', for_digest=False):
         tail.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] · '
                     'a D item you defined is wrong: %s done %s \'D1 …\' (G0, the original goal, always binds)' % (prefix, tid, prefix, tid))
         tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
+    if for_digest:
+        # The user's own words are already in the session; they must not re-send the whole brief on every prompt.
+        lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED'))]
     return _fit(lines, tail, BRIEF_LIMIT)
 
 
@@ -706,6 +777,23 @@ def serve_brief(store, task, event, session=None):
     digest = brief_digest(store, task)
     session = session or (data.get('context_live') or {}).get('session')
     seen = (briefs.get('digests') or {}).get(session) if session else None
+    pending = (data.get('requirements_pending') or {}).get('at') or ''
+    if (event == 'prompt' and session and seen == digest and not data.get('context_dropped')
+            and pending and (briefs.get('pending_seen') or {}).get(session) != pending and task['status'] not in CLOSED):
+        # Only the request changed: one line, not the whole brief again.
+        from .requirements import pending_line
+        line = '[orbit] task %s · %s' % (task['id'], pending_line(data, orbit_command(store), task['id']))
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                briefs = task['data'].setdefault('briefs', {})
+                briefs.setdefault('pending_seen', {})[session] = pending
+                briefs['served_short'] = briefs.get('served_short', 0) + 1
+                briefs['chars'] = briefs.get('chars', 0) + len(line)
+                store.save(task, task['status'], 'brief_served', {'event': event, 'chars': len(line), 'session': session, 'short': True})
+        except (RuntimeError, ValueError):
+            pass
+        return line
     if event == 'prompt' and session and seen == digest and not data.get('context_dropped'):
         try:
             with store.lock('task:' + task['id']):
@@ -727,6 +815,7 @@ def serve_brief(store, task, event, session=None):
             if session:
                 digests = briefs.setdefault('digests', {})
                 digests[session] = digest
+                briefs.setdefault('pending_seen', {})[session] = pending
                 for old in list(digests)[:-20]:
                     digests.pop(old, None)
             task['data'].pop('context_dropped', None)
@@ -766,6 +855,7 @@ def _handle(store, event, payload, host):
     from . import continuity
 
     def watched(current, source=None):
+        current = drain_inbox(store, current)
         try:
             return continuity.observe(store, current, payload, host, event, source)
         except RuntimeError:
@@ -846,6 +936,21 @@ def stop_decision(store, task, payload):
             except (ValueError, OSError) as error:
                 hook_log(store, 'worker start failed: ' + str(error))
         return {'systemMessage': 'Orbit: fixed checks passed; the independent review of task %s runs in the background. The verdict arrives in the next brief or `%s status %s`.' % (task['id'], prefix, task['id'])}
+    pending = data.get('requirements_pending')
+    if pending and not pending.get('asked') and task['status'] not in CLOSED:
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                if task['data'].get('requirements_pending'):
+                    task['data']['requirements_pending']['asked'] = now()
+                    store.save(task, task['status'], 'requirement_asked', {'rev': pending.get('rev'), 'layer': 'control'})
+        except (RuntimeError, ValueError):
+            return None
+        return {'decision': 'block', 'reason': (
+            'Orbit: the user changed the request at %s ("%s"). Before you continue, revise the result goals and, if it needs one, '
+            'the verification: %s done %s --add \'<what the change requires>\' [--check \'["python3","-m","pytest","…"]\'] '
+            '(or the same command with your rewritten items, or with --keep if the current items already cover it). Fixed checks can only be added.'
+            % (requirements_hhmm(pending['at']), pending['text'][:300], prefix, task['id']))}
     message = str(payload.get('last_assistant_message') or '')
     executor = data.get('executor_result') or {}
     d_items = [d for d in data.get('done') or [] if not d['id'].startswith('C') and d['id'] != 'G0']
@@ -912,6 +1017,11 @@ def context_decision(store, task, settle=False, message_only=False):
 
 def _k(value):
     return '%dk' % round(value / 1000) if isinstance(value, (int, float)) and value else '?'
+
+
+def requirements_hhmm(stamp):
+    from .requirements import _hhmm
+    return _hhmm(stamp)
 
 
 # ---------------------------------------------------------------- projections
