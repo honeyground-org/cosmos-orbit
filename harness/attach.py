@@ -272,6 +272,15 @@ def resolve_task(store, root, session, source=None):
                 return task
         except ValueError:
             pass
+    for item in store.list():
+        # Tasks from before session binding list their sessions in the ledger: a member finds its own task.
+        if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:
+            continue
+        task = store.get(item['id'])
+        if task['data'].get('mode') == 'attached' and session in (task['data'].get('session_ids') or []) \
+                and not store.task_sessions(task['id']):
+            store.bind_session(session, task['id'], root)
+            return task
     invited = []
     for item in store.list():
         if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:

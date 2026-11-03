@@ -96,6 +96,17 @@ def main():
         store.save(t, t['status'], 'test_setup', {})
     check('another session does not inherit a legacy task while its creator may be live', task_of(store, root2, 'NEW') is None)
     check('the creator still finds it', task_of(store, root2, 'OLD')['id'] == legacy['id'])
+    old2 = attach.create(store, root2, 'Second legacy task, not the latest', 'claude', None)
+    newer = attach.create(store, root2, 'A newer task by someone else', 'claude', 'OTHER')
+    with store.lock('task:' + old2['id']):
+        t = store.get(old2['id'])
+        t['data']['session_ids'] = ['MEMBER']
+        store.save(t, t['status'], 'test_setup', {})
+    with store.db:
+        store.db.execute('DELETE FROM session_tasks WHERE task_id=?', (old2['id'],))
+    found = task_of(store, root2, 'MEMBER')
+    check('a legacy member finds its own task even when it is not the latest', found is not None and found['id'] == old2['id'],
+          found and found['id'])
 
     print('④ every installed hook event runs through the real command line (exit 0)')
     home = str(base / 'home')
