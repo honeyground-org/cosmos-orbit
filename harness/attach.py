@@ -22,6 +22,7 @@ PROJECT_PREFIX = 'project:'     # preference per project root: 'on' | 'off'
 HOOK_MARK = 'cosmos-orbit hook'  # identifies Orbit entries inside host hook files
 HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600),
                ('PreCompact', 'pre-compact', 30))
+HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10),), 'codex': HOOK_EVENTS}
 CLOSED = ('verified', 'stalled', 'interrupted')
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 BRIEF_LIMIT = 2400
@@ -160,7 +161,7 @@ def hook_entries(host, home=None):
     if home:
         base += ' --home ' + shlex.quote(str(home))
     entries = {}
-    for event, name, timeout in HOOK_EVENTS:
+    for event, name, timeout in HOST_EVENTS.get(host, HOOK_EVENTS):
         entries[event] = {'matcher': '', 'hooks': [{'type': 'command', 'timeout': timeout, 'statusMessage': 'Orbit',
                                                     'command': base + ' hook ' + name + ' --host ' + host}]}
     return entries
@@ -232,8 +233,9 @@ def hook_status(host):
         hooks = _read(path).get('hooks') or {}
     except ValueError as error:
         return {'file': str(path), 'installed': False, 'error': str(error)}
-    present = [event for event, _, _ in HOOK_EVENTS if any(isinstance(e, dict) and _is_ours(e) for e in hooks.get(event) or [])]
-    return {'file': str(path), 'installed': len(present) == len(HOOK_EVENTS), 'events': present,
+    wanted = HOST_EVENTS.get(host, HOOK_EVENTS)
+    present = [event for event, _, _ in wanted if any(isinstance(e, dict) and _is_ours(e) for e in hooks.get(event) or [])]
+    return {'file': str(path), 'installed': len(present) == len(wanted), 'events': present,
             'cli': bool(shutil.which(host))}
 
 
@@ -252,6 +254,58 @@ def current_task(store, root):
     if task['data'].get('mode') != 'attached':
         return None
     return task
+
+
+def resolve_task(store, root, session, source=None):
+    """The task this session works on. Several sessions can be open in one project at once, and a new session
+    (a new terminal, or /clear) does not say which session it follows. So a session inherits a task only when
+    that is unambiguous: a handoff checkpoint invited the next session (one taker), or nobody else is working
+    on the project's latest task (its sessions ended — Claude Code reports SessionEnd)."""
+    root = Path(root).resolve()
+    if not session:
+        return current_task(store, root)
+    row = store.session_task(session)
+    if row:
+        try:
+            task = store.get(row['task_id'])
+            if task['data'].get('mode') == 'attached' and Path(task['workspace']).resolve() == root:
+                return task
+        except ValueError:
+            pass
+    invited = []
+    for item in store.list():
+        if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:
+            continue
+        task = store.get(item['id'])
+        state = task['data'].get('handoff_state') or {}
+        if task['data'].get('mode') == 'attached' and state.get('state') in ('checkpointed', 'told'):
+            invited.append((state.get('at') or task['updated'], task))
+    if invited:
+        task = sorted(invited, key=lambda pair: pair[0])[-1][1]
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                task['data']['handoff_state']['state'] = 'adopted'
+                task['data']['handoff_state']['adopted_by'] = session
+                store.save(task, task['status'], 'handoff_adopted', {'session': session, 'layer': 'context'})
+        except (RuntimeError, ValueError):
+            pass
+        store.bind_session(session, task['id'], root)
+        return store.get(task['id'])
+    latest = current_task(store, root)
+    if latest is None:
+        return None
+    owners = store.task_sessions(latest['id'])
+    if not owners:
+        prompts = latest['data'].get('prompts') or []
+        creator = next((p.get('session') for p in prompts if p.get('session')), None)
+        if creator and creator != session:
+            store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
+            owners = store.task_sessions(latest['id'])
+    if not [r for r in owners if not r['ended'] and r['session'] != session]:
+        store.bind_session(session, latest['id'], root)
+        return latest
+    return None  # another live session owns the project's latest task; this one starts its own
 
 
 def _head(root):
@@ -302,6 +356,8 @@ def create(store, root, prompt, host, session=None, checks=(), done=None, max_tu
     task['data']['development']['phase'] = 'ready'
     store.save(task, 'working', 'attached', {'workspace': str(root), 'host': host, 'session': session, 'checks': len(commands)})
     store.attach(str(root), task['id'])
+    if session:
+        store.bind_session(session, task['id'], root)
     return task
 
 
@@ -852,8 +908,12 @@ def _handle(store, event, payload, host):
     value, _ = resolve(store, root)
     if value != 'on' or not is_git:
         return None
-    task = current_task(store, root)
     session = payload.get('session_id')
+    if event == 'session-end':
+        if session:
+            store.end_session(session)  # the event that frees its task for the next session
+        return None
+    task = resolve_task(store, root, session, payload.get('source'))
     from . import continuity
 
     def watched(current, source=None):

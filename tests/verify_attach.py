@@ -231,7 +231,7 @@ def main():
         attach.install_hooks(host)
         attach.install_hooks(host)  # idempotent
         status = attach.hook_status(host)
-        check(host + ' installed once', status['installed'] and status['events'] == ['SessionStart', 'UserPromptSubmit', 'Stop', 'PreCompact'], status)
+        check(host + ' installed once', status['installed'] and status['events'] == [e for e, _, _ in attach.HOST_EVENTS[host]], status)
     data = json.loads((base / 'claude' / 'settings.json').read_text())
     ours = [e for e in data['hooks']['Stop'] if attach._is_ours(e)]
     check('claude: existing Stop hook kept, ours added exactly once', len(data['hooks']['Stop']) == 2 and len(ours) == 1 and data['other'] == 1)

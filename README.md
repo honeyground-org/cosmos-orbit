@@ -73,7 +73,7 @@ Install once:
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
 ./install.sh
-cosmos-orbit hooks install        # four hooks for Claude Code and Codex: SessionStart · UserPromptSubmit · Stop · PreCompact
+cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop · PreCompact (+ SessionEnd for Claude Code)
 ```
 
 The hooks are inert until something is switched on. Then use your normal command: `claude`,
@@ -101,6 +101,12 @@ executor's `cosmos-orbit done/evidence/claim` calls need the Orbit store added t
 `codex -c 'sandbox_workspace_write.writable_roots=["~/.local/share/local-harness"]'`). The hooks
 themselves run outside that sandbox and need nothing. Codex asks once to trust new hooks.
 
+
+Several sessions can be open in one project at once. Each session works on its own task: a new
+terminal or a `/clear` only takes over an existing task when a handoff checkpoint invited it (one
+taker) or when the sessions that held it have ended (Claude Code reports SessionEnd; Codex does not,
+so a Codex task stays with its session until a handoff). Prompts from one session never land in
+another session's task. Host notifications are ignored.
 
 What happens in an attached session:
 

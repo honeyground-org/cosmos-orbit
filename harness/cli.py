@@ -135,7 +135,7 @@ def main(argv=None):
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
-    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop'))
+    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
     result = sub.add_parser('result')
     result.add_argument('id')

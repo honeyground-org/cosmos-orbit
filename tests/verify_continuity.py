@@ -134,6 +134,7 @@ def main():
     t2 = base / 's2.jsonl'
     claude_turn(t2, 40_000)
     pay2 = {'cwd': str(root), 'session_id': 's2', 'transcript_path': str(t2)}
+    attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's1', 'reason': 'clear'}, 'claude')  # /clear ends s1
     start = attach.handle(store, 'session-start', dict(pay2, source='clear'), 'claude')
     brief = start['hookSpecificOutput']['additionalContext'] if start else ''
     check('brief: CONTINUED + CHECKPOINT next step', 'CONTINUED in a fresh context (previous session peaked at 210k' in brief and 'Write tests/test_mod.py' in brief, brief[-500:])
@@ -149,6 +150,7 @@ def main():
     t6 = base / 's6.jsonl'
     claude_turn(t6, 60_000)
     pay6 = {'cwd': str(root), 'session_id': 's6', 'transcript_path': str(t6)}
+    attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's2'}, 'claude')  # the previous terminal closed
     attach.handle(store, 'session-start', dict(pay6, source='startup'), 'claude')
     claude_turn(t6, 270_000)
     check('stop_hook_active: no decision (control)', attach.handle(store, 'stop', dict(pay6, stop_hook_active=True, last_assistant_message='x'), 'claude') is None)
@@ -172,6 +174,7 @@ def main():
     t3 = base / 's3.jsonl'
     claude_turn(t3, 190_000)
     pay3 = {'cwd': str(root), 'session_id': 's3', 'transcript_path': str(t3)}
+    attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's6'}, 'claude')
     attach.handle(store, 'session-start', dict(pay3, source='resume'), 'claude')
     claude_turn(t3, 215_000)
     attach.handle(store, 'prompt', dict(pay3, prompt='next step on the tests please'), 'claude')
@@ -186,6 +189,7 @@ def main():
     t4 = base / 's4.jsonl'
     claude_turn(t4, 400_000)
     pay4 = {'cwd': str(root), 'session_id': 's4', 'transcript_path': str(t4)}
+    attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's3'}, 'claude')
     start = attach.handle(store, 'session-start', dict(pay4, source='startup'), 'claude')
     stop = attach.handle(store, 'stop', dict(pay4, stop_hook_active=False, last_assistant_message='working'), 'claude')
     check('project off: 400k → no CONTEXT line, no request', 'CONTEXT ' not in start['hookSpecificOutput']['additionalContext'] and stop is None)
@@ -202,6 +206,7 @@ def main():
     t5 = base / 's5.jsonl'
     claude_turn(t5, 60_000)
     pay5 = {'cwd': str(root), 'session_id': 's5', 'transcript_path': str(t5)}
+    attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 's4'}, 'claude')
     attach.handle(store, 'session-start', dict(pay5, source='startup'), 'claude')
     claude_turn(t5, 150_000)
     before = len(store.get(tid)['data'].get('checkpoints') or [])

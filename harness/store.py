@@ -34,6 +34,8 @@ class Store:
             kind TEXT NOT NULL, payload TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS attachments (workspace TEXT PRIMARY KEY, task_id TEXT NOT NULL, at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS session_tasks (session TEXT PRIMARY KEY, task_id TEXT NOT NULL, workspace TEXT NOT NULL,
+            at TEXT NOT NULL, ended TEXT);
           CREATE TABLE IF NOT EXISTS controls (task_id TEXT PRIMARY KEY, paused INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS routing (task_id TEXT PRIMARY KEY, id TEXT NOT NULL,
             provider TEXT NOT NULL, model TEXT, at TEXT NOT NULL);
@@ -211,6 +213,21 @@ class Store:
     def detach(self, workspace):
         with self.db:
             self.db.execute('DELETE FROM attachments WHERE workspace=?', (str(workspace),))
+
+    def bind_session(self, session, task_id, workspace):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO session_tasks VALUES(?,?,?,?,NULL)', (session, task_id, str(workspace), now()))
+
+    def session_task(self, session):
+        row = self.db.execute('SELECT * FROM session_tasks WHERE session=?', (session,)).fetchone()
+        return dict(row) if row else None
+
+    def task_sessions(self, task_id):
+        return [dict(r) for r in self.db.execute('SELECT * FROM session_tasks WHERE task_id=?', (task_id,))]
+
+    def end_session(self, session):
+        with self.db:
+            self.db.execute('UPDATE session_tasks SET ended=? WHERE session=? AND ended IS NULL', (now(), session))
 
     def attachments(self):
         return [dict(r) for r in self.db.execute('SELECT workspace, task_id, at FROM attachments ORDER BY at DESC')]
