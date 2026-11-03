@@ -200,8 +200,6 @@ def finish_executor(store, task, answer, metadata, recovered=False):
     if answer['done_proposed'] and (not data['done_fixed'] or data.get('done_stale')):
         user_fixed = (data.get('done_fixed') or {}).get('origin') == 'user'
         revise(data, answer['done_proposed'], 'executor', add=user_fixed, because=None)
-    elif data.get('done_stale') and answer['finished']:
-        revise(data, [], 'executor', keep=True, because='executor finished without revising: current items kept')
     data.setdefault('presentation', {})['summary'] = answer['summary']
     data['objective_progress'] = {'remaining': answer['remaining'], 'source': 'executor_report'}
     from .results import capture
@@ -326,6 +324,13 @@ def run(engine, task_id):
                     return task
                 if not task['data']['done_fixed']:
                     stop_for_input(store, task, 'Supply completion definitions with feedback --done before continuing.', 'missing_done')
+                    return task
+                if task['data'].get('done_stale') and answer['finished']:
+                    # Corrections arrived after the definitions and the executor did not revise them: no review yet.
+                    if continue_work(store, task, 'definitions_stale',
+                                     ['Corrections arrived after the completion definitions. Return done_proposed covering the '
+                                      'whole updated request (keep the items that still apply) before claiming completion.']):
+                        continue
                     return task
                 if not check(store, task, leases, simplified=True):
                     return task

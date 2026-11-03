@@ -141,8 +141,10 @@ Real work keeps growing: a case is added, a feature widens, a rule changes. Ever
 revise what "done" means, or the review checks yesterday's task. Orbit makes that a rule instead of
 a habit:
 
-1. Each prompt is classified without a model. A go-ahead (`continue`, `진행해`) or a question is only
-   recorded. Host notifications that arrive through the same hook (background tasks, monitors,
+1. Each prompt is classified without a model. A go-ahead (`continue`, `진행해`) or an information
+   question is only recorded; a request phrased as a question ("can you also add CSV export?") and a
+   short refusal ("no", "안돼") count as changes. When unsure, Orbit counts it: a missed change costs
+   more than one `done --keep`. Host notifications that arrive through the same hook (background tasks, monitors,
    slash-command echoes) are ignored: only a person's words set or change a goal. Anything else is a
    **requirement change**: it joins the corrections that bind the independent review, and the
    session gets one short notice, not the whole brief again.
@@ -165,7 +167,8 @@ a habit:
    the work as `requirements_changed` instead of closing it.
 
 Unattended work follows the same rule: a correction marks the definitions stale, the executor's next
-response proposes the revised set, and Orbit adopts it as a new revision.
+response proposes the revised set, and Orbit adopts it as a new revision. A completion claim made
+while the definitions are still stale goes back to the executor instead of to the review.
 
 ## Context and mid-task handoff
 

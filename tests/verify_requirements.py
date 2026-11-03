@@ -83,6 +83,13 @@ def main():
         check('question: ' + text, requirements.classify(text) == 'question')
     for text in ('고쳐서 반영해줘', 'Also support CSV export', '그런 요구가 있을때마다 결과 목표와 검증 목표를 업데이트 해야 합니다.'):
         check('requirement: ' + text, requirements.classify(text) == 'requirement')
+    # found by the independent review of this very feature: requests phrased as questions, and short refusals
+    for text in ('CSV 내보내기도 추가해줄 수 있어?', 'Can you also add CSV export?', '이것도 지원해줄래?', 'Could you handle tabs too?'):
+        check('request phrased as a question → requirement: ' + text, requirements.classify(text) == 'requirement')
+    for text in ('안돼', 'no', '아니'):
+        check('short refusal → requirement: ' + text, requirements.classify(text) == 'requirement')
+    for text in ('How are totals rounded?', '왜 실패했어?'):
+        check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
     for text in ('<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event</summary>\n</task-notification>',
                  '<system-reminder>x</system-reminder>', '<local-command-caveat>x</local-command-caveat>', '<command-name>/model</command-name>'):
@@ -261,6 +268,51 @@ def main():
     check('not stale → a proposal is ignored (control)', 'should be ignored: not stale' not in texts)
     check('history: initial, then the correction as the reason', [h['because'][:12] for h in managed['data']['done_history']] == ['initial', 'Also strip a'],
           [h['because'] for h in managed['data']['done_history']])
+
+    print('⑧-b unattended: finishing without revising stale definitions goes back to the executor (no automatic keep)')
+    root4 = make_repo(base, 'repo4')
+    stale = create(store, root4, 'claude', 'Write a title-case helper', [], None, 6)
+    stale['data']['memory'] = {'mode': 'off'}
+    stale['data']['options'].update(auto_handoff=False)
+    store.save(stale, 'received', 'test_setup', {})
+    sid = stale['id']
+    calls2 = []
+
+    class StaleExecutor:
+        def __init__(self, name, home, model=None, timeout=None):
+            self.home = Path(home)
+
+        def call(self, task_id, prompt, schema, session=None, workspace=None, lease_fds=()):
+            calls2.append(prompt)
+            n = len(calls2)
+            (Path(workspace) / ('s%d.txt' % n)).write_text(str(n))
+            log = self.home / 'runs' / task_id / ('s%d.jsonl' % n)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text('')
+            if n == 1:
+                store.enqueue(task_id, 'Keep small words like "of" lowercase', None)
+                answer = {'summary': 'helper written', 'finished': False, 'remaining': ['tests'], 'question': '',
+                          'done_proposed': ['title_case capitalises each word']}
+            elif n == 2:
+                answer = {'summary': 'all done', 'finished': True, 'remaining': [], 'question': '', 'done_proposed': []}
+            else:
+                answer = {'summary': 'revised', 'finished': False, 'remaining': ['x'], 'question': 'stop for the test',
+                          'done_proposed': ['title_case capitalises each word', 'small words such as "of" stay lowercase']}
+            return answer, {'call_id': 's%d' % n, 'session': 'st', 'provider': 'claude', 'requested_model': None, 'reported_models': [],
+                            'context': {'tokens': 1000, 'source': 'fake', 'window': None}, 'seconds': 0.1, 'usage': {}, 'log': str(log), 'invocation': ''}
+
+    providers.Provider = StaleExecutor
+    try:
+        engine.run(sid)
+    finally:
+        providers.Provider = original
+    stale = store.get(sid)
+    resumed = [r['because'] for r in stale['data']['resumes']]
+    check('finished with stale definitions → resumed(definitions_stale), not reviewed', 'definitions_stale' in resumed
+          and not stale['data'].get('verdicts') and 'Return done_proposed' in calls2[2], resumed)
+    check('no automatic keep was recorded', not any(h.get('kept') for h in stale['data']['done_history']), stale['data']['done_history'])
+    check('the next proposal is adopted as rev 2', stale['data']['done_rev'] == 2
+          and [d['text'] for d in stale['data']['done'] if d['id'][0] == 'D'][-1].startswith('small words'))
 
     print('⑨ projections')
     from harness.observer import snapshot, terminal

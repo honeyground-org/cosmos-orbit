@@ -18,6 +18,11 @@ _TRIVIAL = {
 }
 
 
+_REQUEST = re.compile(
+    r'(해\s?줘|해\s?줄|해\s?주|주세요|줄래|줄\s?수|바꿔|바꾸|추가|넣어|빼\s?줘|빼고|지원|고쳐|고치|만들어|수정|업데이트|반영|'
+    r'해야|하자|할래|해\s?볼래|되게|되도록|하도록|처리해|적용|'
+    r"\bcan you\b|\bcould you\b|\bwould you\b|\bwill you\b|\bplease\b|\balso\b|\badd\b|\bmake\b|\bsupport\b|"
+    r"\bchange\b|\bshould\b|\blet's\b|\bfix\b|\bupdate\b|\binclude\b|\bremove\b|\bhandle\b|\binstead\b)")
 _SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
                      r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
 
@@ -30,11 +35,11 @@ def classify(text):
     if _SYSTEM.match(stripped):
         return 'system'
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
-    if len(bare) <= 2 or bare in _TRIVIAL:
+    if not bare or bare in _TRIVIAL:
         return 'trivial'
-    if stripped.endswith(('?', '？')):
-        return 'question'
-    return 'requirement'
+    if stripped.endswith(('?', '？')) and not _REQUEST.search(stripped.lower()):
+        return 'question'  # an information question; a request phrased as a question falls through
+    return 'requirement'  # when unsure, count it: a missed change costs more than one `done --keep`
 
 
 def mark_pending(data, text, source):
