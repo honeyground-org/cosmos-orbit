@@ -34,7 +34,7 @@ def build():
             events=[], messages=[], feedback=[],
             sessions=[dict(name='executor', provider=provider, id=f'demo-session-{i}', peer=False,
                 state='running', requested_model=None, reported_models=['Illustrative model'],
-                context_tokens=[122000,310000,74000,440000][i%4], context_limit=500000,
+                context_tokens=[62000,148000,41000,186000][i%4], context_limit=200000,
                 context_source='Synthetic fixture', handoff_count=i%3)]))
     # The preview illustrates the current single loop; it never reads a real task store.
     for i, task in enumerate(tasks):
@@ -59,6 +59,18 @@ def build():
         task['sessions'][0].update(name=task['provider'] + (':verifier' if state_name == 'verifying' else ''),
                                    state='running' if task['busy'] else 'idle')
         task['metrics']['by_phase'] = {'working': {'calls': 1, 'seconds': 30}, 'verifying': {'calls': 1, 'seconds': 10}}
+        if i in (0, 6):
+            # Attached to the user's own CLI session: live context, the handoff point and one checkpoint.
+            tokens = 118000 if i == 0 else 214000
+            task.update(mode='attached', host=provider, prompts_count=6 + i, briefs={'served': 3, 'skipped': 4},
+                        context_live={'tokens': tokens, 'start': 52000, 'peak': tokens, 'limit': 200000, 'threshold': 200000,
+                                      'threshold_source': 'built-in', 'session': 'demo-live-' + str(i)},
+                        session_log=[{'session': 'demo-live-' + str(i), 'start': 52000, 'peak': tokens, 'reason': 'startup'}],
+                        handoff_state={'session': 'demo-live-' + str(i), 'state': 'checkpointed', 'tokens': tokens, 'limit': 200000} if i == 6 else None,
+                        checkpoints=[{'at': '2026-11-03T03:23:46+00:00', 'by': provider, 'kind': 'executor', 'tokens': tokens,
+                                      'next': 'Write the remaining tests, then run the fixed check.',
+                                      'notes': 'Synthetic fixture: approach and decisions the ledger does not already hold.',
+                                      'files': [{'path': 'src/module.py', 'exists': True}]}] if i == 6 else [])
     state = dict(tasks=tasks, scope='demo', worker_running=True, at='', events=[], model_options={},
                  labels=dict(en=dict(running='Running', idle='Idle')))
     history_start = html.index('async function loadEarlier(')
@@ -88,7 +100,8 @@ async function poll(){
     html = html.replace('COSMOS ORBIT / LIVE SYSTEM', 'INTERACTIVE PREVIEW / NO REAL TASKS OR MODEL CALLS')
     html = html.replace('Glow indicates execution, not hardware temperature.', 'Synthetic demo signals, not hardware temperature.')
     html = html.replace('<title>Cosmos Orbit · Engine Room</title>', '<title>Cosmos Orbit · Interactive Demo</title><meta name="description" content="Explore the Cosmos Orbit engine room: AI session cores, context orbits, live signals and interactive inspection."><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'nonce-visual-demo\'; style-src \'unsafe-inline\'; img-src data:; connect-src \'none\'; base-uri \'none\'; form-action \'none\'">')
-    html = html.replace('<button id="showCommands"', '<a class="demo-source" href="https://github.com/honeyground-org/cosmos-orbit">Install / GitHub ↗</a><button id="showCommands"')
+    html = html.replace('<button id="showCommands"', '<a class="demo-source" href="https://github.com/honeyground-org/cosmos-orbit">Install / GitHub ↗</a>'
+                        '<a class="demo-source" href="https://github.com/honeyground-org/local-brain" title="Local memory for coding agents; Orbit can use it">Cosmos Brain ↗</a><button id="showCommands"')
     html = html.replace('</style>', '.demo-source{color:var(--blue);text-decoration:none;font-size:11px;margin-right:14px}@media(max-width:700px){.demo-source{display:inline-block;margin:5px}#connection{font-size:9px}}\n</style>')
     if 'fetch(' in html or '__COMMAND_GUIDE__' in html or '/Users/' in html:
         raise ValueError('Preview must be self-contained and contain no runtime requests or personal paths')

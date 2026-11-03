@@ -1,17 +1,25 @@
 # Cosmos Orbit
 
-**Keep your AI work in orbit.** Part of the Cosmos family: Cosmos AIOS, Cosmos Brain and Cosmos Orbit.
+**Keep your AI work in orbit.** Part of the Cosmos family: Cosmos AIOS,
+[Cosmos Brain](https://github.com/honeyground-org/local-brain) and Cosmos Orbit.
 
-[Source](https://github.com/honeyground-org/cosmos-orbit) · [Apache-2.0 licence](LICENSE)
+[Source](https://github.com/honeyground-org/cosmos-orbit) · [Apache-2.0 licence](LICENSE) ·
+[Interactive demo](https://honeyground-org.github.io/cosmos-orbit/) ·
+[Cosmos Brain (local-brain)](https://github.com/honeyground-org/local-brain)
 
 ### [Launch the interactive engine room →](https://honeyground-org.github.io/cosmos-orbit/)
 
+[![The Cosmos Orbit engine room: AI session cores, context and verification layers, live signals. Click to open the interactive demo.](docs/assets/engine-room.jpg)](https://honeyground-org.github.io/cosmos-orbit/)
+
+**▶ https://honeyground-org.github.io/cosmos-orbit/**
+
 **Rotate it. Zoom in. Inspect an engine. Watch signals travel through Orbit.**
 
-Explore 12 synthetic sessions, animated context and verification layers, model selection, and
-session details directly in your browser. No installation, account or AI calls required.
-This is an interactive preview of the real UI, not a recording. GitHub README pages cannot run
-JavaScript, so the preview opens on GitHub Pages.
+Explore 12 synthetic sessions, animated context and verification layers, attached sessions with
+their live context and checkpoints, and session details directly in your browser. No installation,
+account or AI calls required. This is an interactive preview of the real UI, not a recording.
+GitHub README pages cannot run JavaScript, so the preview opens on GitHub Pages. It starts in
+English; the language menu offers six languages and remembers your choice.
 
 
 A local companion for **Codex CLI or Claude Code**. A CLI session forgets its goal when the
@@ -21,6 +29,18 @@ evidence per completion item, one independent review of the completion claim, an
 ledger from which handoffs and measurements are generated. Two entrances, one ledger: attach Orbit
 to the session you already use, or run a request unattended in a private clone. Either engine works
 alone. Brain is optional. Orbit never commits, pushes or deploys task changes.
+
+> **Pairs with [Cosmos Brain (local-brain)](https://github.com/honeyground-org/local-brain)**, an
+> open-source memory system for coding agents that lives on your machine. Orbit keeps one task on
+> course; Brain carries your decisions, lessons and project context into every session. Related
+> memories attach as you type, the guidance you once wrote appears right before a risky push or
+> migration, and eleven MCP tools answer when the agent asks. Local index, zero dependencies,
+> Apache-2.0, works with Claude Code, Codex and any MCP client.
+>
+> ```sh
+> git clone https://github.com/honeyground-org/local-brain ~/tools/local-brain
+> cd ~/tools/local-brain && ./install.sh --with-hook --with-guard
+> ```
 
 ## Why Orbit does so little
 
@@ -287,7 +307,13 @@ hooks, worker and observers. Observation does not start model work.
 The dashboard binds to `127.0.0.1` and validates its host, origin and per-launch token. It is a local
 single-user interface, not a public server. Do not expose it through a proxy.
 
-## Optional memory and imported work
+## Memory with Cosmos Brain, and imported work
+
+Orbit's ledger answers "what happened in this task"; [Cosmos Brain](https://github.com/honeyground-org/local-brain)
+answers "what is still true across all of them". Together they split the work cleanly: Brain hands
+the executor the decisions and lessons that matter when a task starts, and only results Orbit has
+verified flow back into Brain as memory. An unverified completion claim never becomes a memory.
+Orbit works without Brain; Brain works without Orbit.
 
 `--memory off` disables Orbit's memory bridge; it does not disable native CLI memory/settings.
 `native`, `brain` and `both` provide bounded, attributed context. `--remember` with Brain queues
