@@ -614,3 +614,17 @@ python3 scripts/build_demo.py --check
 It makes no provider calls or runtime requests and is not evidence of real task completion or
 recovery. Process-fault probes and live-provider validation are separate. Full power-loss/network
 recovery and general long-task productivity require further real-world evidence.
+
+
+### When a completion claim becomes stale
+
+A completion claim is a proposal for verification, not proof that the user's goal is finished.
+If requirements change or completion goals are revised while verification is queued, Orbit clears the
+old claim, records the remaining work, and resumes the attached executor when its input is idle.
+This recovery does not wait for another task to release the shared workspace. A review already
+holding the task lease remains protected; queued user changes are reconciled when it releases it.
+
+The brief and observer distinguish executing checks, an executing review, a workspace wait, a queued
+review, and a stopped worker. They no longer say that checks passed or a reviewer is running merely
+because a verification flag is set. Supervision restarts a missing worker for an already authorised
+pending verification. Questions about the next work or remaining steps do not add new requirements.

@@ -151,6 +151,8 @@ def snapshot(store, task_id=None):
         for summary in selected:
             task = store.get(summary['id'])
             data, state = task['data'], task['status']
+            from .attach import verification_progress
+            verification = verification_progress(store, task)
             busy = store.locked('task:' + task['id'])
             paused = store.paused(task['id'])
             checks = data.get('evidence', [])
@@ -301,6 +303,7 @@ def snapshot(store, task_id=None):
                           'done_evidence': done_evidence, 'prompts_count': len(data.get('prompts') or []),
                           'briefs': data.get('briefs') if mode == 'attached' else None,
                           'verification_pending': bool(data.get('verification_pending')),
+                          'verification_progress': verification,
                           'context_live': __import__('harness.continuity', fromlist=['context_view']).context_view(data) if mode == 'attached' else None,
                           'handoff_state': data.get('handoff_state') if mode == 'attached' else None,
                           'checkpoints': [dict(c, next=str(c.get('next'))[:600], notes=str(c.get('notes'))[:800])
@@ -355,7 +358,7 @@ def snapshot(store, task_id=None):
                                            if k in ('title', 'summary', 'report', 'report_source', 'report_error')},
                           'workspace': task['workspace'], 'updated': task['updated'], 'runtime': runtime,
                           'age': age_seconds(task['updated']), 'busy': busy, 'pause_requested': paused,
-                          'reason': issue or failures.describe(data), 'failure': failures.details(data), 'questions': contract.get('questions', []),
+                          'reason': issue or (verification['reason'] if verification else failures.describe(data)), 'failure': failures.details(data), 'questions': contract.get('questions', []),
                           'constraints': contract.get('constraints', []), 'steps': contract.get('steps', []),
                           'attempt': data.get('turns', 0) if runtime_version == 3 else data.get('attempt', 0),
                           'budget': data.get('max_turns') if runtime_version == 3 else data.get('options', {}).get('max_attempts', 3),
@@ -471,7 +474,7 @@ def terminal(data, lang='en', width=110):
                         ' | ' + (task.get('handoff_state') or {}).get('state', '') if task.get('handoff_state') else ''))
                 rows.append('  entrance: attached · ' + clean(task['workspace']) + ' | prompts ' + str(task.get('prompts_count', 0))
                             + ' | briefs ' + str((task.get('briefs') or {}).get('served', 0)) + ' | evidence ' + evidence_counts
-                            + (' | verification pending' if task.get('verification_pending') else ''))
+                            + (' | ' + (task.get('verification_progress') or {}).get('reason', 'verification pending') if task.get('verification_pending') else ''))
             if task.get('requirements_pending'):
                 rows.append('  request changed: ' + clean(task['requirements_pending'].get('text', ''))[:160] + ' → revise the goals (done --add / --keep)')
             if task.get('done_rev'):

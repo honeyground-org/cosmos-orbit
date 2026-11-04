@@ -593,6 +593,53 @@ def record_prompt(store, task, text, session=None):
     return store.get(task['id'])
 
 
+def verification_progress(store, task):
+    """Read-only distinction between a running review and the queue in front of it."""
+    data = task['data']
+    if not data.get('verification_pending'):
+        return None
+    if store.locked('task:' + task['id']):
+        state = 'reviewing' if task['status'] == 'verifying' else 'checking'
+        reason = 'Independent review is running.' if state == 'reviewing' else 'The verification task is executing.'
+    elif data.get('requirements_pending'):
+        state, reason = 'stale_claim', 'The request changed; the old completion claim must yield to unfinished work.'
+    elif data.get('retry_at') and data['retry_at'] > time.time():
+        state, reason = 'retry_wait', data.get('reason') or 'Verification is waiting for its scheduled retry.'
+    elif store.locked('workspace:' + task['workspace']):
+        state, reason = 'waiting_workspace', 'Verification is queued behind another task holding this workspace.'
+    elif not store.locked('worker'):
+        state, reason = 'worker_stopped', 'Verification is queued but no worker is running; supervision will restart it.'
+    else:
+        state, reason = 'queued', 'Verification is queued; the worker has not started this task.'
+    return {'state': state, 'reason': reason}
+
+
+def reconcile_verification(store, task_id):
+    """Recover an invalidated queued claim without needing the executor to repair it."""
+    with store.lock('task:' + task_id):
+        task = store.get(task_id)
+        if task['data'].get('requirements_pending') and invalidate_verification(task['data']):
+            store.save(task, 'working', 'resumed', {'because': 'requirements_changed'})
+        return task
+
+
+def invalidate_verification(data):
+    """A queued claim cannot keep new work waiting behind yesterday's review."""
+    if not data.get('verification_pending'):
+        return False
+    data['verification_pending'] = False
+    data.pop('checks_done_for', None)
+    data['development']['phase'] = 'ready'
+    if data.get('executor_result'):
+        data['executor_result']['finished'] = False
+    data.update(reason='The completion claim is stale; continue the changed work and claim again.',
+                reason_code='requirements_changed')
+    data['objective_progress'] = {'remaining': ['Review the changed requirements and continue the unfinished work.'],
+                                 'next_action': 'Revise the goals and continue work before claiming completion.',
+                                 'source': 'runtime'}
+    return True
+
+
 def _apply_prompt(store, task, text, session=None):
     from . import requirements
     data = task['data']
@@ -618,6 +665,8 @@ def _apply_prompt(store, task, text, session=None):
         status = 'working'
     if kind in ('requirement', 'unsure') and data.get('done_fixed'):
         requirements.mark_pending(data, text, 'prompt', unsure=kind == 'unsure')
+        if invalidate_verification(data):
+            status = 'working'
         store.save(task, status, 'requirement_added', {'chars': len(text), 'session': session, 'rev': data.get('done_rev') or 0,
                                                        'text': text[:200], 'layer': 'control'})
     elif status != task['status']:
@@ -687,7 +736,8 @@ def set_done(store, task_id, texts, origin='executor', add=False, keep=False, ch
         if commands:
             data['development']['verified_tree'] = None  # new checks run at the next claim
         kind = 'done_kept' if row['kept'] else 'goal_fixed'
-        store.save(task, task['status'], kind, {'done': data['done'], 'origin': origin, 'rev': row['rev'],
+        status = 'working' if not row['kept'] and invalidate_verification(data) else task['status']
+        store.save(task, status, kind, {'done': data['done'], 'origin': origin, 'rev': row['rev'],
                                                 'added': row['added'], 'checks_added': row['checks_added'], 'because': row['because'][:200]})
     return store.get(task_id)
 
@@ -793,12 +843,18 @@ def run_verification(engine, task_id, checks_only=False):
     from .development import check
     from .simple_loop import stop_for_input
     store = engine.store
-    initial = store.get(task_id)
+    # Recover stale queued claims before competing for a shared workspace lease.
+    initial = reconcile_verification(store, task_id)
+    if not initial['data'].get('verification_pending'):
+        return initial
     with store.lock('task:' + task_id) as task_lease, store.lock('workspace:' + initial['workspace']) as workspace_lease:
         leases = (task_lease, workspace_lease)
         task = store.get(task_id)
         data = task['data']
         if not data.get('verification_pending') or task['status'] in CLOSED or not recovery.due(task):
+            return task
+        if data.get('requirements_pending') and invalidate_verification(data):
+            store.save(task, 'working', 'resumed', {'because': 'requirements_changed'})
             return task
         try:
             from .development import evidence_current
@@ -931,7 +987,7 @@ def brief_text(store, task, event='prompt', for_digest=False):
     if data.get('reason_code'):
         head += ' (' + data['reason_code'] + ')'
     if data.get('verification_pending'):
-        head += ' · independent verification pending'
+        head += ' · ' + verification_progress(store, task)['reason']
     lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 400)]
     if data.get('draft') and task['status'] not in CLOSED:
         lines.append("DRAFT: Orbit is unsure this prompt asks for work. If it does, define the completion (that confirms "
@@ -1271,7 +1327,8 @@ def stop_decision(store, task, payload):
                 ensure_worker(store, idle_exit=90)
             except (ValueError, OSError) as error:
                 hook_log(store, 'worker start failed: ' + str(error))
-        return {'systemMessage': 'Orbit: fixed checks passed; the independent review of task %s runs in the background. The verdict arrives in the next brief or `%s status %s`.' % (task['id'], prefix, task['id'])}
+        progress = verification_progress(store, task)
+        return {'systemMessage': 'Orbit: ' + progress['reason'] + ' Task %s; inspect `%s status %s`.' % (task['id'], prefix, task['id'])}
     draft = data.get('draft')
     if draft and task['status'] not in CLOSED and not [d for d in data.get('done') or [] if d['id'].startswith('D')]:
         changed = workspace_marks(task['workspace']) != draft.get('marks')
