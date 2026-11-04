@@ -96,6 +96,13 @@ def verify_supervision(base):
     calls.clear()
     check('supervisor: repeated observation never repeats a delivery',
           supervision.tick(store, tid, 'resume-session', runner) == 'awaiting_stop' and not calls)
+    reviewing = store.get(tid)
+    reviewing['data']['verification_pending'] = True
+    store.save(reviewing, 'verifying', 'test_review')
+    check('supervisor: actual verifying state keeps observer waiting',
+          supervision.tick(store, tid, 'resume-session', runner) == 'reviewing')
+    reviewing['data']['verification_pending'] = False
+    store.save(reviewing, 'working', 'test_review_finished')
     supervision.begin_turn(store, store.get(tid), 'resume-session')
     with patch.object(supervision, 'ensure'), patch.object(attach, '_pane', return_value=terminal):
         for repeated in (False, True):

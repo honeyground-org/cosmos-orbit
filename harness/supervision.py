@@ -105,14 +105,14 @@ def tick(store, task_id, session, runner=None):
         return 'session_ended'
     if attach.resolve(store, task['workspace'])[0] != 'on':
         return 'disabled'
-    if task['status'] not in ('working', 'checking'):
+    if task['status'] not in ('working', 'checking', 'verifying'):
         return 'settled'
     if (task['data'].get('executor_result') or {}).get('question'):
         return 'input_required'
     terminal, reason = wake.resolve(store, session=session)
     if not terminal:
         return reason
-    if task['data'].get('verification_pending') or task['status'] == 'checking':
+    if task['data'].get('verification_pending') or task['status'] in ('checking', 'verifying'):
         return 'reviewing'
     if not needs_work(task):
         return 'no_work'
@@ -159,7 +159,7 @@ def tick(store, task_id, session, runner=None):
 
 
 def ensure(store, task, session):
-    if not session or task['status'] not in ('working', 'checking'):
+    if not session or task['status'] not in ('working', 'checking', 'verifying'):
         return
     from . import wake
     terminal, reason = wake.resolve(store, session=session)
