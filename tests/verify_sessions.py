@@ -264,6 +264,121 @@ def main():
     finally:
         typist.detect = real_detect
 
+    print('③-c the handoff follows the pane, not the folder: the shell had cd\'d into a worktree (seen 2026-11-04 17:40)')
+    launch = make_repo(base, 'repo-launch')
+    wt = launch / 'wt'
+    subprocess.run(['git', '-C', str(launch), 'worktree', 'add', '-q', '--detach', str(wt)], check=True, capture_output=True)
+    for folder in (launch, wt):
+        attach.set_switch(store, 'on', folder)
+
+    def begin(session, source, cwd):
+        out = attach.handle(store, 'session-start', {'cwd': str(cwd), 'session_id': session, 'source': source}, 'claude')
+        return attach.resolve_task(store, cwd, session), json.dumps(out or {}, ensure_ascii=False)
+
+    def arm(task, **state):
+        with store.lock('task:' + task['id']):
+            t = store.get(task['id'])
+            t['data']['handoff_state'] = dict(state, tokens=404042, limit=350000)
+            if state.get('state') == 'auto':
+                t['data']['carried_prompt'] = {'text': 'Yes, merge it and install', 'at': now(), 'from_session': state['session']}
+            store.save(t, t['status'], 'test_setup', {})
+
+    def end(session, cwd):
+        attach.handle(store, 'session-end', {'cwd': str(cwd), 'session_id': session}, 'claude')
+
+    try:
+        in_pane('%PANE-E')
+        begin('E1', 'startup', launch)
+        prompt(store, wt, 'E1', 'Merge the pull request and reinstall from main')   # the agent cd'd into the worktree
+        moved = attach.resolve_task(store, wt, 'E1')
+        check('setup: the task lives in the worktree the shell moved to',
+              moved and Path(moved['workspace']).resolve() == wt.resolve(), moved and moved['workspace'])
+        arm(moved, session='E1', state='auto', panel='%PANE-E', at=now(), auto_at=now())
+        end('E1', wt)                                     # Orbit's /clear ends the old session before the fresh one starts
+        in_pane('%PANE-OTHER')
+        stranger, _ = begin('E-other', 'clear', launch)
+        check('a /clear in another pane does not take it (control)', not stranger or stranger['id'] != moved['id'],
+              stranger and stranger['id'])
+        in_pane('%PANE-E')
+        took, brief = begin('E2', 'clear', launch)        # the fresh session starts where the host was launched
+        check('the fresh session in the pane where Orbit typed /clear takes the task although it starts one folder up',
+              took and took['id'] == moved['id'], took and took['id'])
+        check('…and its first brief carries the request the user made', 'Yes, merge it and install' in brief, brief[:300])
+
+        in_pane('%PANE-T')
+        begin('TOLD1', 'startup', launch)
+        prompt(store, wt, 'TOLD1', 'Write the release note for the merged change')
+        told = attach.resolve_task(store, wt, 'TOLD1')
+        with store.lock('task:' + told['id']):
+            t = store.get(told['id'])
+            t['data']['context_live'] = dict(t['data'].get('context_live') or {}, session='TOLD1', tokens=404042)
+            t['data']['handoff_state'] = {'session': 'TOLD1', 'state': 'checkpointed', 'tokens': 404042, 'limit': 350000,
+                                          'at': now(), 'checkpoint_at': now()}
+            store.save(t, t['status'], 'test_setup', {})
+        attach.context_decision(store, store.get(told['id']))       # the Stop hook tells the user to /clear
+        recorded = store.get(told['id'])['data']['handoff_state']
+        check('telling the user records the pane the handoff was told in', recorded.get('state') == 'told'
+              and recorded.get('pane') == '%PANE-T', recorded)
+        end('TOLD1', wt)
+        relaunch, _ = begin('TOLD0', 'startup', launch)      # a new launch in that pane, not a /clear
+        check('a new launch in that pane does not take another folder\'s handoff (control: only /clear crosses folders)',
+              not relaunch or relaunch['id'] != told['id'], relaunch and relaunch['id'])
+        in_pane('%PANE-T2')
+        elsewhere, _ = begin('TOLD-else', 'clear', launch)
+        check('a /clear in another pane does not take another folder\'s told handoff (control)',
+              not elsewhere or elsewhere['id'] != told['id'], elsewhere and elsewhere['id'])
+        in_pane('%PANE-T')
+        took2, _ = begin('TOLD2', 'clear', launch)
+        check('the user\'s own /clear in the told pane takes it although the fresh session starts one folder up',
+              took2 and took2['id'] == told['id'], took2 and took2['id'])
+
+        print('③-d when the hook misses anyway, the typist hands the task to the session that appeared in its pane')
+        from harness import wake
+        in_pane('%PANE-G')
+        begin('G1', 'startup', launch)
+        prompt(store, wt, 'G1', 'Rebuild the demo page and check it')
+        g = attach.resolve_task(store, wt, 'G1')
+        arm(g, session='G1', state='auto', panel='%PANE-G', at=now(), auto_at=now())
+        end('G1', wt)
+        wake.note(store, 'G2', 'claude', 'session-start', {'kind': 'tmux', 'target': '%PANE-G'})
+        store.bind_session('G2', attach.NO_TASK, launch)  # its hook decided there was nothing to take (today's outcome)
+        wake.note(store, 'G-other', 'claude', 'session-start', {'kind': 'tmux', 'target': '%PANE-NOT-G'})
+        ran = []
+        typist.run({'kind': 'tmux', 'cli': '/usr/bin/true', 'target': '%PANE-G'},
+                   [('adopted', 1.0), ('text', typist.CARRY_LINE), ('key', 'enter')],
+                   runner=lambda argv: ran.append(argv) or 0, sleep=lambda s: None,
+                   adopted=lambda: continuity.adopt_in_panel(store, g['id'], '%PANE-G'))
+        check('the typist hands the task to the fresh session in its pane, then types the carry line',
+              (store.session_task('G2') or {}).get('task_id') == g['id'] and any(typist.CARRY_LINE in a for a in ran),
+              (store.session_task('G2'), ran))
+        check('…the other pane\'s session is left alone (control)', (store.session_task('G-other') or {}).get('task_id') != g['id'])
+        again, _ = begin('G2', 'clear', launch)
+        check('the fresh session then finds that task on its next event', again and again['id'] == g['id'], again and again['id'])
+
+        begin('K1', 'startup', launch)
+        prompt(store, wt, 'K1', 'Translate the README into Japanese')
+        k = attach.resolve_task(store, wt, 'K1')
+        arm(k, session='K1', state='auto', panel='%PANE-K', at=now(), auto_at=now())
+        wake.note(store, 'K2', 'claude', 'prompt', {'kind': 'tmux', 'target': '%PANE-K'})
+        store.bind_session('K2', g['id'], launch)        # a session that already works on a task of its own
+        check('a session with a task of its own is never taken from it (control)',
+              continuity.adopt_in_panel(store, k['id'], '%PANE-K') is False and store.session_task('K2')['task_id'] == g['id'])
+        wake.note(store, 'K3', 'claude', 'session-start', {'kind': 'tmux', 'target': '%PANE-K3'})
+        check('the typist hands over only in the pane it typed /clear in (control)',
+              continuity.adopt_in_panel(store, k['id'], '%PANE-K3') is False)
+        with store.lock('task:' + k['id']):
+            t = store.get(k['id'])
+            t['data']['handoff_state']['panel'] = '%PANE-K4'
+            store.save(t, t['status'], 'test_setup', {})
+        wake.note(store, 'K4', 'claude', 'session-start', {'kind': 'tmux', 'target': '%PANE-K4'})
+        check('a session whose own hook has not finished yet gets the grace period first (control)',
+              continuity.adopt_in_panel(store, k['id'], '%PANE-K4') is False and store.session_task('K4') is None)
+        check('…and is handed the task once the grace has passed',
+              continuity.adopt_in_panel(store, k['id'], '%PANE-K4', grace=0) is True
+              and (store.session_task('K4') or {}).get('task_id') == k['id'])
+    finally:
+        typist.detect = real_detect
+
     print('④ every installed hook event runs through the real command line (exit 0)')
     home = str(base / 'home')
     for host, events in attach.HOST_EVENTS.items():
