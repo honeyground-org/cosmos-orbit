@@ -92,6 +92,7 @@ def settings_view(store, path=None):
             'here': {'root': str(root), 'git': is_git, 'orbit': value, 'source': source,
                      'task': current, 'effective': value == 'on' and is_git},
             'environment': os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT'),
+            'supervision': __import__('harness.supervision', fromlist=['configure']).configure(store),
             'handoff': __import__('harness.continuity', fromlist=['threshold_view']).threshold_view(store, root)}
 
 
@@ -1170,10 +1171,20 @@ def _handle(store, event, payload, host):
             hook_log(store, 'pre-compact checkpoint skipped: ' + str(error))
         return None
     if event == 'prompt':
+        if task:
+            from . import supervision
+            try:
+                supervision.begin_turn(store, task, session)
+            except RuntimeError:
+                pass  # A busy reviewer must not prevent the user's prompt reaching the inbox.
+            task = store.get(task['id'])
         text = (payload.get('prompt') or '').strip()
         from .requirements import classify
         if classify(text) == 'system':
             return None  # background-task and monitor notifications never create or change a task
+        from .supervision import RESUME_LINE
+        if text == RESUME_LINE:
+            return _context('UserPromptSubmit', '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n' + ((serve_brief(store, watched(task), 'prompt', session) or '') if task else 'No attached task; do not start work.'))
         from .wake import WAKE_LINE
         if text == WAKE_LINE:
             # Typed by Orbit for another session's message: not recorded as the user's prompt, never a handoff
@@ -1210,7 +1221,18 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         task = watched(task)  # measure every stop, including the one after a block
+        from . import supervision
+        try:
+            supervision.record_stop(store, task, session)
+            supervision.ensure(store, store.get(task['id']), session)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
+            hook_log(store, 'supervisor unavailable: ' + str(error)[:200])
+            # A monitor launch failure must not disable the synchronous Stop guard.
+        task = store.get(task['id'])
         if payload.get('stop_hook_active'):
+            continuation = supervision.stop_block(store, task)
+            if continuation:
+                return continuation
             # Never block twice in a row; a message to the user does not continue the turn, so it may go now
             # (this is the stop right after the checkpoint the executor was asked for).
             return context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED,
@@ -1218,6 +1240,9 @@ def _handle(store, event, payload, host):
         primary = stop_decision(store, task, payload)
         if primary and primary.get('decision') == 'block':
             return primary  # the context decision waits for the next stop
+        continuation = supervision.stop_block(store, store.get(task['id']))
+        if continuation:
+            return continuation
         settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
         secondary = context_decision(store, store.get(task['id']), settle=settle)
         if primary and secondary and 'systemMessage' in secondary:
