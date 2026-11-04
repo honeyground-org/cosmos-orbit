@@ -443,7 +443,7 @@ def _attempt(store, value, key, row, agent, reviewer, installer):
 
 def view(store):
     from .attach import learned
-    value = state(store)
+    value = scan(store)
     table = learned(store)
     return {'mode': value['mode'], 'repo': value.get('repo'),
             'personal_layer': {'learned_endings': len(table), 'stored_in': str(store.home)},
