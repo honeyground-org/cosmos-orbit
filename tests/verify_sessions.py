@@ -216,6 +216,54 @@ def main():
     check('a legacy member finds its own task even when it is not the latest', found is not None and found['id'] == old2['id'],
           found and found['id'])
 
+    print('③-b two open handoffs in one project: the pane decides which one a fresh session takes (seen 2026-11-04)')
+    from harness import typist
+    from harness.store import now
+    real_detect = typist.detect
+
+    def in_pane(target):
+        typist.detect = (lambda env=None: None) if target is None else \
+            (lambda env=None: {'kind': 'tmux', 'cli': '/usr/bin/true', 'target': target})
+
+    def start(session, source):
+        attach.handle(store, 'session-start', {'cwd': str(root3), 'session_id': session, 'source': source}, 'claude')
+        return task_of(store, root3, session)
+
+    root3 = make_repo(base, 'repo-panes')
+    attach.set_switch(store, 'on', root3)
+    try:
+        in_pane('%PANE-Y')
+        start('Y', 'startup')
+        prompt(store, root3, 'Y', 'Refactor the importer and keep the output identical')
+        mine = task_of(store, root3, 'Y')
+        in_pane('%PANE-X')
+        start('X', 'startup')
+        prompt(store, root3, 'X', 'Render the product video with the new storyboard')
+        other = task_of(store, root3, 'X')
+        check('setup: two sessions, two panes, two tasks', mine and other and mine['id'] != other['id'])
+        for task, state in ((mine, {'session': 'Y', 'state': 'auto', 'panel': '%PANE-Y', 'at': '2026-11-04T05:34:22+00:00', 'auto_at': now()}),
+                            (other, {'session': 'X', 'state': 'told', 'at': now(), 'told_at': now()})):  # the other one is newer
+            with store.lock('task:' + task['id']):
+                t = store.get(task['id'])
+                t['data']['handoff_state'] = dict(state, tokens=360000, limit=350000)
+                store.save(t, t['status'], 'test_setup', {})
+        in_pane('%PANE-Y')
+        took = start('Z', 'clear')                       # Orbit typed /clear in pane Y
+        check("the fresh session in the pane where Orbit typed /clear takes that pane's task, not the newer handoff "
+              'of a session still working in another pane', took and took['id'] == mine['id'], took and took['id'])
+        check("…and the other pane's handoff stays open for its own session (control)",
+              store.get(other['id'])['data']['handoff_state']['state'] == 'told')
+        in_pane(None)
+        elsewhere = start('W', 'startup')                # a plain terminal while X still holds pane X
+        check('a fresh session elsewhere does not take a handoff whose session still holds its pane',
+              not elsewhere or elsewhere['id'] != other['id'], elsewhere and elsewhere['id'])
+        attach.handle(store, 'session-end', {'cwd': str(root3), 'session_id': 'X'}, 'claude')
+        later = start('V', 'startup')
+        check('once that session has ended, a fresh session anywhere takes its handoff (control: not a ban)',
+              later and later['id'] == other['id'], later and later['id'])
+    finally:
+        typist.detect = real_detect
+
     print('④ every installed hook event runs through the real command line (exit 0)')
     home = str(base / 'home')
     for host, events in attach.HOST_EVENTS.items():
