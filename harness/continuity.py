@@ -351,7 +351,7 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
             return None
         data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
-        state.update(state='auto', auto_at=now())
+        state.update(state='auto', auto_at=now(), panel=terminal['target'])  # only the session in this pane takes it
         store.save(task, task['status'], 'handoff_auto', {'terminal': terminal['kind'], 'layer': 'context'})
     (spawn or typist.spawn)(terminal, typist.handoff_steps(host, typist.clear_presses(text)), store.home / 'hooks.log',
                             home=store.home, task=task['id'])

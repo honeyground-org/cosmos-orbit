@@ -173,6 +173,11 @@ def main():
         data = store.get(tid_f)['data']
         check('the request is in the ledger (carried_prompt) and the state is auto',
               data['carried_prompt']['text'] == request and data['handoff_state']['state'] == 'auto' and 'handoff_auto' in kinds(store, tid_f))
+        typist.detect = lambda env=None: dict(fake, target='PANEL-2')
+        attach.handle(store, 'session-start', {'cwd': str(root_f), 'session_id': 'f9', 'source': 'clear'}, 'claude')
+        check('a /clear in another pane does not take the auto handoff (observed: another session took it)',
+              (store.session_task('f9') or {}).get('task_id') != tid_f and store.get(tid_f)['data']['handoff_state']['state'] == 'auto')
+        typist.detect = lambda env=None: fake
         start = attach.handle(store, 'session-start', {'cwd': str(root_f), 'session_id': 'f2', 'source': 'clear'}, 'claude')
         brief = start['hookSpecificOutput']['additionalContext'] if start else ''
         check('the fresh session takes the task over and its brief carries the request',
@@ -203,9 +208,9 @@ def main():
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
-    check('cmux: send-panel text, send-key-panel enter and ctrl+u', typist.command(cmux, text='/clear') == ['cmux', 'send-panel', '--panel', 'P', '--', '/clear']
+    check('cmux: send-panel text and raw ctrl+u (0x15; its key event never reached Claude Code), send-key-panel enter', typist.command(cmux, text='/clear') == ['cmux', 'send-panel', '--panel', 'P', '--', '/clear']
           and typist.command(cmux, key='enter') == ['cmux', 'send-key-panel', '--panel', 'P', 'enter']
-          and typist.command(cmux, key='ctrl+u') == ['cmux', 'send-key-panel', '--panel', 'P', 'ctrl+u'])
+          and typist.command(cmux, key='ctrl+u') == ['cmux', 'send-panel', '--panel', 'P', '--', '\x15'])
     check('tmux: send-keys -l text, send-keys Enter and C-u', typist.command(tmux, text='/clear') == ['tmux', 'send-keys', '-t', '%3', '-l', '/clear']
           and typist.command(tmux, key='enter') == ['tmux', 'send-keys', '-t', '%3', 'Enter']
           and typist.command(tmux, key='ctrl+u') == ['tmux', 'send-keys', '-t', '%3', 'C-u'])

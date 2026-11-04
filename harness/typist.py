@@ -40,7 +40,11 @@ def detect(env=None):
     return None
 
 
-KEYS = {'cmux': {'enter': 'enter', 'ctrl+u': 'ctrl+u'}, 'tmux': {'enter': 'Enter', 'ctrl+u': 'C-u'}}
+# How each key reaches the program in the pane. cmux's send-key-panel delivers Enter, but no Ctrl combination
+# reached Claude Code (measured: ctrl+u, ctrl+a, ctrl+k and ctrl+c all left the input as it was), while the raw
+# control byte typed as text does: ctrl+u is 0x15. tmux's send-keys C-u reaches it as it is.
+KEYS = {'cmux': {'enter': ('key', 'enter'), 'ctrl+u': ('text', '\x15')},
+        'tmux': {'enter': ('key', 'Enter'), 'ctrl+u': ('key', 'C-u')}}
 
 
 def command(terminal, text=None, key=None):
@@ -49,8 +53,11 @@ def command(terminal, text=None, key=None):
     if kind not in KEYS:
         raise ValueError('unknown terminal kind: ' + str(kind))
     if key:
-        name = KEYS[kind][key]
-        return [cli, 'send-key-panel', '--panel', target, name] if kind == 'cmux' else [cli, 'send-keys', '-t', target, name]
+        how, name = KEYS[kind][key]
+        if how == 'text':
+            text = name
+        else:
+            return [cli, 'send-key-panel', '--panel', target, name] if kind == 'cmux' else [cli, 'send-keys', '-t', target, name]
     return [cli, 'send-panel', '--panel', target, '--', text] if kind == 'cmux' else [cli, 'send-keys', '-t', target, '-l', text]
 
 

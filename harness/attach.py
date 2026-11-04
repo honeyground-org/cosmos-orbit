@@ -331,6 +331,11 @@ NO_TASK = ''  # a session row with no task: the session was seen without one, so
 SESSION_LOCK_WAIT = 2.0  # seconds; the sessions lock is held only for one check and one write
 
 
+def _pane():
+    from .typist import detect
+    return detect()
+
+
 def _live_owners(store, task_id, session, *also_ignore):
     return [r for r in store.task_sessions(task_id) if not r['ended'] and r['session'] != session and r['session'] not in also_ignore]
 
@@ -426,6 +431,8 @@ def resolve_task(store, root, session, source=None, transcript=None):
         task = store.get(item['id'])
         state = task['data'].get('handoff_state') or {}
         if task['data'].get('mode') == 'attached' and invitation_open(state):
+            if state.get('state') == 'auto' and state.get('panel') and (_pane() or {}).get('target') != state['panel']:
+                continue                                 # Orbit typed /clear in another pane: that session takes it
             invited.append((state.get('at') or task['updated'], task))
     for _, candidate in sorted(invited, key=lambda pair: pair[0], reverse=True):
         try:
