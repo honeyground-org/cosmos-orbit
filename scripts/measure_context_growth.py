@@ -112,7 +112,7 @@ def main():
         print('  cost-equivalent tokens saved by a handoff at T (handoffs in brackets):')
         for reread in rereads:
             cells = []
-            for threshold in (120_000, 150_000, 200_000, 300_000):
+            for threshold in (120_000, 150_000, 200_000, 300_000, 350_000, 400_000):
                 handoffs, saved = replay(sessions, threshold, reread)
                 cells.append('%dk %5.1f%% (%d)' % (threshold // 1000, 100 * saved / actual, handoffs))
             print('    re-read %2dk: ' % (reread // 1000) + ' · '.join(cells))

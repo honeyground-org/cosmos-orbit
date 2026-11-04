@@ -144,7 +144,8 @@ def main(argv=None):
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
     checkpoint_cmd.add_argument('--notes', default='')
     checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
-    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: on | off | 200k [PATH] [--global] · auto | tell (who types /clear)')
+    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global] · '
+                                                 'auto | tell (who types /clear) · stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
@@ -427,6 +428,8 @@ def main(argv=None):
             root = project_root(args.path)[0]
             if args.value in ('auto', 'tell'):
                 changed = {'handoff_mode': continuity.set_handoff_mode(store, args.value)}
+            elif args.value == 'reset':
+                changed = continuity.clear_threshold(store, root, args.global_default)
             elif args.value is not None:
                 changed = continuity.set_threshold(store, args.value, root, args.global_default)
             else:

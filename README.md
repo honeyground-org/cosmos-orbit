@@ -70,7 +70,7 @@ Everything else is left to the native CLI, and Orbit judges itself by one thing:
 |---|---|---|
 | **The goal survives** | Your request and every correction are fixed in a ledger and re-presented after compaction and in the next session. | A compacted session no longer forgets what you asked for. |
 | **An independent review** | A completion claim needs evidence per item and passes one read-only review in a fresh context. | The session does not grade its own work. |
-| **Handoff at a measured point** | At 200k tokens the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
+| **Handoff at a measured point** | At 350k tokens (a setting) the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
 | **Messages wake an idle session** | When another session (Codex or Claude Code) sends a message, **the receiving session is woken by itself** once its input line is empty. **Your own typing is never erased.** | No more typing "check it" into a session to make it read its mail ([details](#messages-between-sessions-an-idle-session-wakes-up-by-itself)). |
 | **Self-evolution in two layers** | **What your use teaches stays on your machine as data; only general fixes can reach the code**, through four gates. | Orbit improves without the code becoming personal ([details](#self-evolution-agent-orbit-improves-itself-without-making-the-code-personal)). |
 | **One view of all of it** | The engine room and `cosmos-orbit watch` show tasks, evidence, reviews, the handoff mode, the panes a message can wake and the self-evolution mode. | What Orbit did is visible, not assumed ([details](#observe-the-same-work)). |
@@ -269,7 +269,7 @@ the model's attention. Orbit measures each session's context from the host's own
 Code) or rollout (Codex) and hands the work over to a fresh session at a measured point:
 
 1. The hooks read the current context size on every event. No model is called.
-2. When a session reaches the **handoff point** (default 200k tokens) and has grown at least 60k
+2. When a session reaches the **handoff point** (default 350k tokens) and has grown at least 60k
    since it started, the brief says so, and at the end of that turn the Stop hook asks the executor
    once for a short checkpoint: the next concrete step and what the ledger cannot know.
 
@@ -308,11 +308,13 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
    fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
    tool traces, remaining work, changed files). No extra model call writes the handoff.
 
-Why 200k: replaying 99 real Claude Code sessions from the author's last 14 days (median start 78k,
+Why 350k: replaying 99 real Claude Code sessions from the author's last 14 days (median start 78k,
 median peak 506k) with a handoff at 200k saved 31–51% of cost-equivalent tokens (input ×1, cache
 write ×1.25, cache read ×0.1) whether a fresh session had to re-read 15k or 80k tokens of files; 42
 Codex sessions saved 9–23%. Lower points thrashed when re-reading was heavy (150k: −286% at 80k).
-Measure your own sessions before changing it:
+Replayed again on 113 Claude Code sessions (2026-11-04), 350k still saved 32–38% while handing off
+3–6× less often than 200k (150–177 handoffs instead of 444–1,075): a few points of saving traded for
+far fewer interruptions, so 350k is the built-in default. Measure your own sessions before changing it:
 
 ```sh
 python3 scripts/measure_context_growth.py --days 14
@@ -322,13 +324,34 @@ The handoff point follows the same three scopes as the on/off switch:
 
 | Scope | Set | Off | Show |
 |---|---|---|---|
-| Every project | `cosmos-orbit context 300k --global` | `cosmos-orbit context off --global` | `cosmos-orbit settings` |
-| One project | `cosmos-orbit context 150k` | `cosmos-orbit context off` | `cosmos-orbit context` |
+| Every project | `cosmos-orbit context 400k --global` | `cosmos-orbit context off --global` | `cosmos-orbit settings` |
+| One project | `cosmos-orbit context 250k` | `cosmos-orbit context off` | `cosmos-orbit context` |
 | One terminal session | `export ORBIT_HANDOFF_AT=250k` | `export ORBIT_HANDOFF_AT=off` | `cosmos-orbit context` |
 | Who types `/clear` | `cosmos-orbit context auto` (cmux, tmux) | `cosmos-orbit context tell` (default) | `cosmos-orbit context` |
 
-`cosmos-orbit context on` restores the default. Unattended tasks take the point at creation;
+`cosmos-orbit context on` sets the built-in point explicitly; `cosmos-orbit context reset [--global]`
+removes a stored point so the next scope applies again. Unattended tasks take the point at creation;
 `--context-budget TOKENS` overrides it for one task. Measurement continues when handoff is off.
+
+**The settings file.** Every stored point and the mode live in one file, `settings.json` in Orbit's
+home (`~/.local/share/local-harness/settings.json`, or `$HARNESS_HOME/settings.json`). The commands
+above write it; you can also edit it by hand, and the change applies at the next hook event, with no
+restart. Values are token counts or the same words the command takes (`"350k"`, `"off"`):
+
+```json
+{
+  "handoff": {
+    "at": 350000,
+    "mode": "auto",
+    "projects": { "/path/to/repo": "250k" }
+  }
+}
+```
+
+`cosmos-orbit context` shows the file's path and any value it had to ignore. A file that is not valid
+JSON is never overwritten: the hooks fall back to the built-in point and the command asks you to fix
+it. Points stored by an earlier version (in the ledger database) move into the file once, by
+themselves.
 
 ## Messages between sessions: an idle session wakes up by itself
 

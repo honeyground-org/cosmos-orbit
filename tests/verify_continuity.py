@@ -70,24 +70,78 @@ def main():
     root = make_repo(base)
     attach.set_switch(store, 'on', root)
 
-    print('① settings: parsing and precedence (environment → project → global → built-in)')
+    print('① settings: parsing and precedence (environment → project → global → built-in), all in the settings file')
     check('200k · 1.5m · on · off', [continuity.parse_tokens(v) for v in ('200k', '1.5m', 'on', 'off', '250000')]
-          == [200000, 1500000, 200000, 0, 250000])
+          == [200000, 1500000, continuity.DEFAULT_HANDOFF_AT, 0, 250000])
     try:
         continuity.parse_tokens('5k')
         check('a point below 20k is refused', False)
     except ValueError:
         check('a point below 20k is refused', True)
-    check('built-in 200k', continuity.resolve_threshold(store, root) == (200000, 'built-in'))
+    settings = store.home / 'settings.json'
+    check('built-in 350k, no settings file yet', continuity.resolve_threshold(store, root) == (350000, 'built-in')
+          and continuity.DEFAULT_HANDOFF_AT == 350000 and not settings.exists())
+    check('unattended work uses the same built-in point', context.DEFAULT_LIMIT == continuity.DEFAULT_HANDOFF_AT)
     continuity.set_threshold(store, '300k', global_default=True)
     check('global 300k', continuity.resolve_threshold(store, root) == (300000, 'default'))
+    on_disk = json.loads(settings.read_text())
+    check('the command wrote the settings file', on_disk.get('handoff', {}).get('at') == 300000, on_disk)
+    check('…and nothing in the ledger database (one place)', store.db.execute(
+        "SELECT count(*) FROM preferences WHERE key LIKE 'handoff%'").fetchone()[0] == 0)
     continuity.set_threshold(store, '200k', root)
     check('project beats global', continuity.resolve_threshold(store, root) == (200000, 'project'))
     os.environ['ORBIT_HANDOFF_AT'] = 'off'
     check('terminal session beats project', continuity.resolve_threshold(store, root) == (0, 'environment'))
     os.environ.pop('ORBIT_HANDOFF_AT')
-    check('settings view carries the handoff point', attach.settings_view(store, root)['handoff']['here']['handoff_at'] == 200000)
-    continuity.set_threshold(store, '200k', global_default=True)
+    check('settings view carries the handoff point and the file', attach.settings_view(store, root)['handoff']['here']['handoff_at'] == 200000
+          and attach.settings_view(store, root)['handoff']['settings_file']['path'] == str(settings))
+
+    on_disk = json.loads(settings.read_text())
+    on_disk['handoff']['projects'][str(root.resolve())] = '250k'
+    on_disk['note'] = 'kept by Orbit'
+    settings.write_text(json.dumps(on_disk))
+    check('a hand edit applies at once ("250k" in the file)', continuity.resolve_threshold(store, root) == (250000, 'project'))
+    continuity.set_handoff_mode(store, 'auto')
+    on_disk = json.loads(settings.read_text())
+    check('the mode lives in the same file, and keys Orbit does not own survive a write',
+          on_disk['handoff'].get('mode') == 'auto' and on_disk.get('note') == 'kept by Orbit' and continuity.handoff_mode(store) == 'auto', on_disk)
+    continuity.set_handoff_mode(store, 'tell')
+    continuity.clear_threshold(store, root)
+    check('reset removes the project point: the global one applies again', continuity.resolve_threshold(store, root) == (300000, 'default'))
+    continuity.clear_threshold(store, global_default=True)
+    check('reset --global: the built-in point applies again', continuity.resolve_threshold(store, root) == (350000, 'built-in'))
+
+    on_disk['handoff']['at'] = 'lots'
+    settings.write_text(json.dumps(on_disk))
+    view = continuity.threshold_view(store, root)
+    check('an unreadable value is ignored and named in the view', view['here']['source'] != 'default'
+          and any('lots' in line for line in view['settings_file']['problems']), view['settings_file'])
+    settings.write_text('{"handoff": {"at": 300000,')
+    view = continuity.threshold_view(store, root)
+    check('broken JSON: the hooks fall back to the built-in point and the view says why',
+          view['here'] == {'handoff_at': 350000, 'source': 'built-in', 'off': False} and view['settings_file']['problems'], view)
+    try:
+        continuity.set_threshold(store, '400k', global_default=True)
+        refused = False
+    except ValueError:
+        refused = True
+    check('…and a command never overwrites the broken file (the user fixes it)', refused
+          and settings.read_text() == '{"handoff": {"at": 300000,')
+
+    legacy = Store(base / 'legacy-home')
+    legacy.preference('handoff_at', '420000')
+    legacy.preference('handoff_mode', 'auto')
+    legacy.preference('handoff_at:' + str(root.resolve()), '180000')
+    legacy.preference('provider', 'codex')
+    check('an earlier version\'s points move into the file once', continuity.resolve_threshold(legacy, root) == (180000, 'project')
+          and continuity.handoff_mode(legacy) == 'auto'
+          and json.loads((legacy.home / 'settings.json').read_text())['handoff']['at'] == 420000)
+    check('…leaving no copy in the database, and other preferences untouched (control)',
+          legacy.db.execute("SELECT count(*) FROM preferences WHERE key LIKE 'handoff%'").fetchone()[0] == 0
+          and legacy.preference('provider') == 'codex')
+
+    settings.write_text('{}')
+    continuity.set_threshold(store, '200k', global_default=True)  # the scenarios below drive sessions past 200k
 
     print('② measurement: Claude Code transcript and Codex rollout')
     t1 = base / 's1.jsonl'
