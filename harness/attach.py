@@ -1171,13 +1171,17 @@ def _handle(store, event, payload, host):
             hook_log(store, 'pre-compact checkpoint skipped: ' + str(error))
         return None
     if event == 'prompt':
+        if task:
+            from . import supervision
+            supervision.begin_turn(store, task, session)
+            task = store.get(task['id'])
         text = (payload.get('prompt') or '').strip()
         from .requirements import classify
         if classify(text) == 'system':
             return None  # background-task and monitor notifications never create or change a task
         from .supervision import RESUME_LINE
         if text == RESUME_LINE:
-            return _context('UserPromptSubmit', '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n' + (serve_brief(store, watched(task), 'prompt', session) if task else 'No attached task; do not start work.'))
+            return _context('UserPromptSubmit', '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n' + ((serve_brief(store, watched(task), 'prompt', session) or '') if task else 'No attached task; do not start work.'))
         from .wake import WAKE_LINE
         if text == WAKE_LINE:
             # Typed by Orbit for another session's message: not recorded as the user's prompt, never a handoff
@@ -1221,7 +1225,11 @@ def _handle(store, event, payload, host):
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
             hook_log(store, 'supervisor unavailable: ' + str(error)[:200])
             # A monitor launch failure must not disable the synchronous Stop guard.
+        task = store.get(task['id'])
         if payload.get('stop_hook_active'):
+            handoff = context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED)
+            if handoff:
+                return handoff
             continuation = supervision.stop_block(store, task)
             if continuation:
                 return continuation
@@ -1232,7 +1240,10 @@ def _handle(store, event, payload, host):
         primary = stop_decision(store, task, payload)
         if primary and primary.get('decision') == 'block':
             return primary  # the context decision waits for the next stop
-        continuation = supervision.stop_block(store, task)
+        handoff = context_decision(store, store.get(task['id']), settle=task['data'].get('verification_pending') or task['status'] in CLOSED)
+        if handoff:
+            return handoff
+        continuation = supervision.stop_block(store, store.get(task['id']))
         if continuation:
             return continuation
         settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED

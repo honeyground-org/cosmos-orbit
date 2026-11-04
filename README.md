@@ -157,7 +157,8 @@ What happens in an attached session:
    `cosmos-orbit supervision tell` uses notification only. This setting is separate from `context auto|tell`;
    until explicitly set it inherits that existing preference. Unsupported terminals are recorded as
    unavailable; they are not claimed to have resumed. Pause, input dependency, session replacement and
-   Orbit off cancel supervision. Wake limits and one delivery per stopped turn prevent duplicate sends.
+   Orbit off cancel supervision. Pending context handoffs take precedence; the supervisor waits for them.
+   After two synchronous Stop blocks in one turn, the rate-limited observer takes over. Wake limits and one delivery per stopped turn prevent duplicate sends.
 7. `cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md` renders the ledger as Markdown. No
    handoff is written by hand. `cosmos-orbit lessons` lists corrections repeated across tasks, the
    candidates for a guard rule.

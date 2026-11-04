@@ -16,6 +16,7 @@ import time
 RESUME_LINE = 'Orbit: continue the unfinished task recorded in your ledger.'
 POLL = 3.0
 MODE_KEY = 'continuation_mode'
+MAX_STOP_BLOCKS = 2
 
 
 def mode(store):
@@ -46,9 +47,30 @@ def needs_work(task):
                 any(d['id'].startswith('D') for d in data.get('done') or []))
 
 
+def handoff_pending(task):
+    data = task['data']
+    state = data.get('handoff_state') or {}
+    return (state.get('session') == (data.get('context_live') or {}).get('session')
+            and state.get('state') in ('recommended', 'asked', 'checkpointed', 'told', 'auto'))
+
+
+def begin_turn(store, task, session):
+    if not session:
+        return
+    with store.lock('task:' + task['id']):
+        task = store.get(task['id'])
+        mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
+        mark.update(stop_count=0, stop_at=None)
+        store.save(task, task['status'], 'supervision_turn', {'session': session, 'layer': 'control'})
+
+
 def stop_block(store, task):
-    if not needs_work(task):
+    if not needs_work(task) or handoff_pending(task):
         return None
+    session = (task['data'].get('context_live') or {}).get('session')
+    mark = task['data'].get('supervision', {}).get(session, {})
+    if mark.get('stop_count', 0) > MAX_STOP_BLOCKS:
+        return None  # The rate-limited observer takes over; no unbounded synchronous Stop loop.
     from .attach import orbit_command
     data = task['data']
     remaining = ((data.get('objective_progress') or {}).get('remaining') or
@@ -67,7 +89,9 @@ def record_stop(store, task, session):
     from .store import now
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
-        task['data'].setdefault('supervision', {}).setdefault(session, {})['stop_at'] = now()
+        mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
+        mark['stop_at'] = now()
+        mark['stop_count'] = mark.get('stop_count', 0) + 1
         store.save(task, task['status'], 'supervision_stop', {'session': session, 'layer': 'control'})
 
 
@@ -92,6 +116,8 @@ def tick(store, task_id, session, runner=None):
         return 'reviewing'
     if not needs_work(task):
         return 'no_work'
+    if handoff_pending(task):
+        return 'awaiting_handoff'
     mark = task['data'].get('supervision', {}).get(session, {})
     if not mark.get('stop_at') or mark.get('sent_for') == mark['stop_at']:
         return 'awaiting_stop'

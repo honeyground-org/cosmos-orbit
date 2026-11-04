@@ -65,6 +65,60 @@ class FakeReviewer:
         return json.loads(json.dumps(FakeReviewer.verdict)), metadata
 
 
+def verify_supervision(base):
+    from unittest.mock import patch
+    from harness import supervision, wake
+    store = Store(base / 'supervision-home')
+    root = base / 'repo'
+    attach.set_switch(store, 'on', global_default=True)
+    supervision.configure(store, 'auto')
+    task = attach.create(store, root, 'Complete both stages of the requested work', 'codex', 'resume-session',
+                         done=['Both stages verified'])
+    tid = task['id']
+    attach.claim(store, tid, remaining=['second stage'])
+    terminal = {'kind': 'tmux', 'cli': 'tmux', 'target': '%99'}
+    calls = []
+    def runner(argv):
+        calls.append(argv)
+        return 0, '› Ask a follow-up question\n\n'
+    wake.note(store, 'resume-session', 'codex', 'stop', terminal)
+    supervision.record_stop(store, store.get(tid), 'resume-session')
+    wake.note(store, 'resume-session', 'codex', 'prompt', terminal)
+    check('supervisor: empty-looking screen cannot resume an active turn',
+          supervision.tick(store, tid, 'resume-session', runner) == 'host_turn_active' and not calls)
+    wake.note(store, 'resume-session', 'codex', 'stop', terminal)
+    check('supervisor: a newer terminal event invalidates the old stop',
+          supervision.tick(store, tid, 'resume-session', runner) == 'host_turn_active' and not calls)
+    supervision.record_stop(store, store.get(tid), 'resume-session')
+    check('supervisor: stopped empty host resumes once',
+          supervision.tick(store, tid, 'resume-session', runner) == 'continued'
+          and len([c for c in calls if 'send-keys' in c]) == 2)
+    calls.clear()
+    check('supervisor: repeated observation never repeats a delivery',
+          supervision.tick(store, tid, 'resume-session', runner) == 'awaiting_stop' and not calls)
+    supervision.begin_turn(store, store.get(tid), 'resume-session')
+    with patch.object(supervision, 'ensure'), patch.object(attach, '_pane', return_value=terminal):
+        for repeated in (False, True):
+            decision = attach.handle(store, 'stop', {'cwd': str(root), 'session_id': 'resume-session',
+                                     'stop_hook_active': repeated}, 'codex')
+            check('supervisor: unfinished stop stays blocked, repeated=' + str(repeated),
+                  decision and decision.get('decision') == 'block')
+    check('supervisor: repeated Stop blocks are bounded',
+          supervision.stop_block(store, dict(store.get(tid), data=dict(store.get(tid)['data'],
+              supervision={'resume-session': {'stop_count': 3}}))) is None)
+    pending = store.get(tid)
+    pending['data']['handoff_state'] = {'session': 'resume-session', 'state': 'recommended', 'limit': 350000}
+    store.save(pending, pending['status'], 'test_handoff')
+    check('supervisor: context handoff takes precedence', supervision.stop_block(store, pending) is None
+          and supervision.tick(store, tid, 'resume-session', runner) == 'awaiting_handoff')
+    decision = attach.context_decision(store, pending)
+    check('supervisor: unfinished task still requests a context checkpoint', decision and decision.get('decision') == 'block')
+    attach.claim(store, tid, remaining=['source unavailable'], question='Which source should be used?')
+    check('supervisor: real input requirement releases the stop guard',
+          supervision.stop_block(store, store.get(tid)) is None)
+    store.close()
+
+
 def main():
     os.environ['PYTHONDONTWRITEBYTECODE'] = '1'  # calc.py is rewritten within one second; a stale .pyc would fake a failure
     base = Path(tempfile.mkdtemp(prefix='orbit-verify-attach-'))
@@ -242,6 +296,7 @@ def main():
     data = json.loads((base / 'claude' / 'settings.json').read_text())
     check('claude: foreign hook survives uninstall', data['hooks']['Stop'][0]['hooks'][0]['command'] == 'echo keep' and 'UserPromptSubmit' not in data['hooks'])
     store.close()
+    verify_supervision(base)
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 
