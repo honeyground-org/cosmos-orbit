@@ -93,16 +93,43 @@ def verify_supervision(base):
     check('supervisor: stopped empty host resumes once',
           supervision.tick(store, tid, 'resume-session', runner) == 'continued'
           and len([c for c in calls if 'send-keys' in c]) == 2)
+    store.set_paused(tid, True)
+    check('supervisor: pending user pause prevents resume before status transitions',
+          supervision.tick(store, tid, 'resume-session', runner) == 'settled'
+          and supervision.stop_block(store, store.get(tid)) is None)
+    store.set_paused(tid, False)
     calls.clear()
     check('supervisor: repeated observation never repeats a delivery',
           supervision.tick(store, tid, 'resume-session', runner) == 'awaiting_stop' and not calls)
     reviewing = store.get(tid)
     reviewing['data']['verification_pending'] = True
     store.save(reviewing, 'verifying', 'test_review')
-    check('supervisor: actual verifying state keeps observer waiting',
-          supervision.tick(store, tid, 'resume-session', runner) == 'reviewing')
+    with store.lock('worker'), store.lock('task:' + tid):
+        check('supervisor: actual verifying state keeps observer waiting',
+              supervision.tick(store, tid, 'resume-session', runner) == 'reviewing')
     reviewing['data']['verification_pending'] = False
     store.save(reviewing, 'working', 'test_review_finished')
+    # Reproduce the incident: stale queued claim + workspace held by another task.
+    stale = store.get(tid)
+    stale['data'].update(verification_pending=True, requirements_pending={'text': 'Install and verify the result', 'unsure': False})
+    store.save(stale, 'checking', 'test_stale_claim')
+    wake.note(store, 'resume-session', 'codex', 'stop', terminal)
+    supervision.record_stop(store, store.get(tid), 'resume-session')
+    with store.lock('workspace:' + stale['workspace']), patch.object(wake, 'allowed', return_value=(True, 0)):
+        check('supervisor: stale queued claim reopens and resumes despite another workspace owner',
+              supervision.tick(store, tid, 'resume-session', runner) == 'continued')
+    recovered = store.get(tid)
+    check('supervisor: recovery leaves truthful unfinished state', recovered['status'] == 'working'
+          and not recovered['data']['verification_pending'] and not recovered['data']['executor_result']['finished'])
+    attach.set_done(store, tid, [], keep=True)
+    with patch('harness.recovery.ensure_worker') as start_worker:
+        queued = store.get(tid)
+        queued['data']['verification_pending'] = True
+        store.save(queued, 'checking', 'test_worker_lost')
+        check('supervisor: missing verification worker is restarted',
+              supervision.tick(store, tid, 'resume-session', runner) == 'worker_stopped' and start_worker.call_count == 1)
+        queued['data']['verification_pending'] = False
+        store.save(queued, 'working', 'test_worker_recovered')
     supervision.begin_turn(store, store.get(tid), 'resume-session')
     with patch.object(supervision, 'ensure'), patch.object(attach, '_pane', return_value=terminal):
         for repeated in (False, True):

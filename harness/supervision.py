@@ -65,7 +65,7 @@ def begin_turn(store, task, session):
 
 
 def stop_block(store, task):
-    if not needs_work(task) or handoff_pending(task):
+    if store.paused(task['id']) or not needs_work(task) or handoff_pending(task):
         return None
     session = (task['data'].get('context_live') or {}).get('session')
     mark = task['data'].get('supervision', {}).get(session, {})
@@ -105,14 +105,25 @@ def tick(store, task_id, session, runner=None):
         return 'session_ended'
     if attach.resolve(store, task['workspace'])[0] != 'on':
         return 'disabled'
-    if task['status'] not in ('working', 'checking', 'verifying'):
+    if store.paused(task_id) or task['status'] not in ('working', 'checking', 'verifying'):
         return 'settled'
     if (task['data'].get('executor_result') or {}).get('question'):
         return 'input_required'
     terminal, reason = wake.resolve(store, session=session)
     if not terminal:
         return reason
-    if task['data'].get('verification_pending') or task['status'] in ('checking', 'verifying'):
+    if task['data'].get('verification_pending'):
+        if task['data'].get('requirements_pending'):
+            try:
+                task = attach.reconcile_verification(store, task_id)
+            except RuntimeError:
+                return 'reviewing'
+        if task['data'].get('verification_pending'):
+            from .recovery import ensure_worker
+            if not store.locked('worker'):
+                ensure_worker(store, idle_exit=90)
+            return attach.verification_progress(store, task)['state']
+    if task['status'] in ('checking', 'verifying'):
         return 'reviewing'
     if not needs_work(task):
         return 'no_work'

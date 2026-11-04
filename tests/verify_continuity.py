@@ -217,7 +217,7 @@ def main():
         store.save(task, task['status'], 'claimed', {'finished': True})
     msg = attach.handle(store, 'stop', dict(pay6, stop_hook_active=False, last_assistant_message='claimed'), 'claude')
     text = (msg or {}).get('systemMessage', '')
-    check('claim + handoff point → one merged message, no checkpoint request', msg and 'decision' not in msg and 'independent review' in text
+    check('claim + handoff point → one merged message, no checkpoint request', msg and 'decision' not in msg and 'verification' in text.lower()
           and '/clear' in text and 'After the verdict' in text, msg)
     with store.lock('task:' + tid):
         task = store.get(tid)

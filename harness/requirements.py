@@ -35,6 +35,7 @@ _INFO_NOUNS = {'결과', '이유', '원인', '상태', '상황', '진행', '진�
                '문제', '에러', '오류', '로그', '출력', '답', '값', '크기', '용량', '버전', '경로', '위치', '이름', '날짜', '기간',
                '순서', '의미', '뜻', '범위', '기준', '근거', '목적', '목표', '계획', '일정', '성능', '정확도', '점수', '개수',
                '뭐', '무엇', '어디', '언제', '누구', '이건', '그건', '저건', '지금', '다음', '나머지', '전체', '총합', '합계'}
+_NEXT_STEP_KO = re.compile(r'^(?:다음(?:의)?|남은|앞으로(?:의)?|이후(?:의)?)\s+(?:작업|업무|단계|할\s?일)(?:은|는)(?:요)?\s*[?？]$')
 _AND_ELLIPSIS = re.compile(r'^and\s+(?!(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|how|what|why|'
                            r'when|where|who|which|whose|whom)\b)[^?]{1,60}\?\s*$')
 _SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
@@ -123,6 +124,8 @@ def _asking(text):
 def _question_kind(text):
     """A single sentence that asks something: 'requirement' | 'question' | 'unsure'."""
     lowered = text.lower()
+    if _NEXT_STEP_KO.fullmatch(text):
+        return 'question'
     if _ASK.search(lowered) or _adds_scope(text):
         return 'requirement'
     if _status_question(text):

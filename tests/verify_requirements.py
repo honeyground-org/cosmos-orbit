@@ -105,9 +105,9 @@ def main():
                  'And is it fast?', '이건 왜 이래?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
     # found by the fifth independent review: the same "what about X?" without the polite 요
-    for text in ('PDF는?', '엑셀은?', '다크 모드는?', '모바일은?', '그리고 다크 모드는요?'):
+    for text in ('배포 작업은?', 'PDF는?', '엑셀은?', '다크 모드는?', '모바일은?', '그리고 다크 모드는요?'):
         check('"what about X?" with a bare 은/는 → requirement: ' + text, requirements.classify(text) == 'requirement')
-    for text in ('결과는?', '속도는?', '이유는?', '테스트 결과는요?', '지금 체크아웃된 브랜치 이름은?', '왜 실패했는지 원인은?'):
+    for text in ('다음의 작업은?', '남은 업무는?', '다음 단계는?', '결과는?', '속도는?', '이유는?', '테스트 결과는요?', '지금 체크아웃된 브랜치 이름은?', '왜 실패했는지 원인은?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
     # several sentences ending in a question: the final question is what is asked; the statements are context
@@ -145,6 +145,30 @@ def main():
     store.enqueue(t0['id'], note, None)
     t0 = attach.drain_inbox(store, t0)
     check('queued notification is consumed and ignored', not store.inbox(t0['id']) and not t0['data'].get('requirements_pending'))
+
+    print('queued verification must yield to changed work')
+    queued_root = make_repo(base, 'queued-review')
+    queued = attach.create(store, queued_root, 'Implement and deploy the whole feature', 'codex', 'queued', done=['Feature deployed'])
+    attach.claim(store, queued['id'], summary='Claim before new work arrived')
+    with store.lock('workspace:' + queued['workspace']):
+        check('workspace lock is shown as queued, never as a running review',
+              attach.verification_progress(store, store.get(queued['id']))['state'] == 'waiting_workspace')
+        queued = attach.record_prompt(store, store.get(queued['id']), 'Also verify the installed version', 'queued')
+        check('new work clears pending review without waiting for workspace', queued['status'] == 'working'
+              and not queued['data']['verification_pending'] and not queued['data']['executor_result']['finished'])
+    attach.set_done(store, queued['id'], [], keep=True)
+    attach.claim(store, queued['id'])
+    queued = attach.set_done(store, queued['id'], ['Installation checked'], add=True)
+    check('revised goals invalidate queued completion claim', queued['status'] == 'working'
+          and not queued['data']['verification_pending'])
+    attach.claim(store, queued['id'])
+    queued = store.get(queued['id'])
+    requirements.mark_pending(queued['data'], 'Check the deployment outcome', 'prompt')
+    store.save(queued, 'checking', 'simulate_old_runtime')
+    with store.lock('workspace:' + queued['workspace']):
+        queued = attach.run_verification(engine, queued['id'])
+    check('old queued claim recovers even while another task owns workspace', queued['status'] == 'working'
+          and not queued['data']['verification_pending'])
 
     print('② attached: a change is recorded, binds the review, and gets one short notice')
     root = make_repo(base, 'repo')
