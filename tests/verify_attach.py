@@ -272,6 +272,14 @@ def main():
     os.environ['ORBIT'] = 'on'
     check('environment beats project', attach.resolve(store, root) == ('on', 'environment'))
     os.environ.pop('ORBIT')
+    # A switch on the enclosing folder covers repositories beneath it; the nearest switch wins.
+    folder_store = Store(base / 'home-folder')
+    check('control: no folder switch → off', attach.resolve(folder_store, root) == ('off', 'unset'))
+    attach.set_switch(folder_store, 'on', base)
+    check('folder on covers a repository beneath it',
+          attach.resolve(folder_store, root) == ('on', 'folder:' + str(Path(base).resolve())))
+    attach.set_switch(folder_store, 'off', root)
+    check('repository off beats folder on', attach.resolve(folder_store, root) == ('off', 'project'))
     attach.set_switch(store, 'on', root)
     view = attach.settings_view(store, root)
     check('settings view', view['here']['orbit'] == 'on' and view['here']['git'] and view['default'] == 'on')

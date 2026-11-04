@@ -96,9 +96,10 @@ The hooks are inert until something is switched on. Then use your normal command
 |---|---|---|---|
 | Every project, every `claude` and `codex` command | `cosmos-orbit on --global` | `cosmos-orbit off --global` | until changed; stored in the Orbit store |
 | One project (its Git root; run inside it, or give `PATH`) | `cosmos-orbit on` | `cosmos-orbit off` | until changed; stored per project |
+| Every repository under a folder (a workspace that is not itself a repository) | `cosmos-orbit on ~/work` | `cosmos-orbit off ~/work` | until changed; the nearest switch wins, so `off` in one repository still silences it |
 | One terminal session | `export ORBIT=on` (or `ORBIT=on claude`) | `export ORBIT=off` or `unset ORBIT` | that shell only |
 
-Precedence, highest first: terminal session → project → global → off. So `on --global` plus
+Precedence, highest first: terminal session → project → enclosing folder → global → off. So `on --global` plus
 `off` in one project means "everywhere except here", `off --global` plus `on` in a few projects
 means "only there", and `ORBIT=off` silences one terminal whatever the stored switches say.
 `cosmos-orbit settings` prints the global default, every project switch, the environment, and
