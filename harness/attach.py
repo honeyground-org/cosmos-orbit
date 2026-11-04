@@ -1173,7 +1173,10 @@ def _handle(store, event, payload, host):
     if event == 'prompt':
         if task:
             from . import supervision
-            supervision.begin_turn(store, task, session)
+            try:
+                supervision.begin_turn(store, task, session)
+            except RuntimeError:
+                pass  # A busy reviewer must not prevent the user's prompt reaching the inbox.
             task = store.get(task['id'])
         text = (payload.get('prompt') or '').strip()
         from .requirements import classify
@@ -1227,9 +1230,6 @@ def _handle(store, event, payload, host):
             # A monitor launch failure must not disable the synchronous Stop guard.
         task = store.get(task['id'])
         if payload.get('stop_hook_active'):
-            handoff = context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED)
-            if handoff:
-                return handoff
             continuation = supervision.stop_block(store, task)
             if continuation:
                 return continuation
@@ -1240,9 +1240,6 @@ def _handle(store, event, payload, host):
         primary = stop_decision(store, task, payload)
         if primary and primary.get('decision') == 'block':
             return primary  # the context decision waits for the next stop
-        handoff = context_decision(store, store.get(task['id']), settle=task['data'].get('verification_pending') or task['status'] in CLOSED)
-        if handoff:
-            return handoff
         continuation = supervision.stop_block(store, store.get(task['id']))
         if continuation:
             return continuation
