@@ -1045,6 +1045,10 @@ def brief_text(store, task, event='prompt', for_digest=False):
         lines.append('FIXED CHECK FAILED: ' + _one_line(data.get('reason'), 600))
     elif data.get('reason_code') == 'unmet':
         lines.append('UNMET (independent review): ' + _one_line(data.get('reason'), 600))
+    from .manager import brief_line
+    managed = brief_line(task) if task['status'] not in CLOSED else None
+    if managed:
+        lines.append(managed)
     remaining = (data.get('executor_result') or {}).get('remaining') or []
     if remaining and task['status'] == 'working' and data.get('reason_code') not in ('checks_failed', 'unmet'):
         lines.append('REMAINING (your last claim): ' + _one_line(' · '.join(remaining), 400))
@@ -1240,7 +1244,13 @@ def _handle(store, event, payload, host):
             return None  # background-task and monitor notifications never create or change a task
         from .supervision import RESUME_LINE
         if text == RESUME_LINE:
-            return _context('UserPromptSubmit', '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n' + ((serve_brief(store, watched(task), 'prompt', session) or '') if task else 'No attached task; do not start work.'))
+            note = '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n'
+            if not task:
+                return _context('UserPromptSubmit', note + 'No attached task; do not start work.')
+            from . import manager
+            found = manager.diagnose(task, paused=store.paused(task['id']), handoff=supervision.handoff_pending(task))
+            return _context('UserPromptSubmit', note + manager.instruction(store, task, found) + '\n'
+                            + (serve_brief(store, watched(task), 'prompt', session) or ''))
         from .wake import WAKE_LINE
         if text == WAKE_LINE:
             # Typed by Orbit for another session's message: not recorded as the user's prompt, never a handoff
@@ -1277,16 +1287,17 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         task = watched(task)  # measure every stop, including the one after a block
-        from . import supervision
+        from . import manager, supervision
+        said = str(payload.get('last_assistant_message') or '')
         try:
             supervision.record_stop(store, task, session)
+            manager.observe(store, store.get(task['id']), session, said)  # why it stopped, recorded as the task's state
             supervision.ensure(store, store.get(task['id']), session)
-        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
-            hook_log(store, 'supervisor unavailable: ' + str(error)[:200])
-            # A monitor launch failure must not disable the synchronous Stop guard.
+        except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
+            hook_log(store, 'supervisor unavailable: ' + repr(error)[:200])
         task = store.get(task['id'])
         if payload.get('stop_hook_active'):
-            continuation = supervision.stop_block(store, task)
+            continuation = supervision.stop_block(store, task, said)
             if continuation:
                 return continuation
             # Never block twice in a row; a message to the user does not continue the turn, so it may go now
@@ -1296,7 +1307,7 @@ def _handle(store, event, payload, host):
         primary = stop_decision(store, task, payload)
         if primary and primary.get('decision') == 'block':
             return primary  # the context decision waits for the next stop
-        continuation = supervision.stop_block(store, store.get(task['id']))
+        continuation = supervision.stop_block(store, store.get(task['id']), said)
         if continuation:
             return continuation
         settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
@@ -1375,6 +1386,7 @@ def stop_decision(store, task, payload):
     d_items = [d for d in data.get('done') or [] if not d['id'].startswith('C') and d['id'] != 'G0']
     claimed_this_turn = (data.get('claimed_at') or '') > last_prompt
     if (task['status'] == 'working' and message and CLAIM_WORDS.search(message[-1500:]) and not executor.get('finished')
+            and data.get('reason_code') != 'unmet'  # after an unmet review the manager names the unmet items instead
             and not claimed_this_turn and (data.get('claim_nudged_turn') != data.get('turns') or not d_items)):
         try:
             with store.lock('task:' + task['id']):
