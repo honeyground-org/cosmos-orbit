@@ -35,16 +35,9 @@ def configure(store, value=None):
 
 
 def needs_work(task):
-    data = task['data']
-    if task['status'] != 'working' or data.get('verification_pending') or data.get('draft'):
-        return False
-    if (data.get('requirements_pending') or {}).get('unsure'):
-        return False
-    if (data.get('executor_result') or {}).get('question'):
-        return False
-    return bool((data.get('executor_result') or {}).get('remaining') or
-                (data.get('objective_progress') or {}).get('remaining') or
-                any(d['id'].startswith('D') for d in data.get('done') or []))
+    """True when the manager would send the session back to work (unfinished, unverified or returned unmet)."""
+    from .manager import diagnose
+    return diagnose(task)['resume']
 
 
 def handoff_pending(task):
@@ -64,23 +57,19 @@ def begin_turn(store, task, session):
         store.save(task, task['status'], 'supervision_turn', {'session': session, 'layer': 'control'})
 
 
-def stop_block(store, task):
-    if store.paused(task['id']) or not needs_work(task) or handoff_pending(task):
+def stop_block(store, task, message=''):
+    """Send the session back with the manager's instruction for why it stopped; None when it may stop."""
+    if store.paused(task['id']) or handoff_pending(task):
+        return None
+    from . import manager
+    found = manager.diagnose(task, message=message)
+    if not found['resume']:
         return None
     session = (task['data'].get('context_live') or {}).get('session')
     mark = task['data'].get('supervision', {}).get(session, {})
     if mark.get('stop_count', 0) > MAX_STOP_BLOCKS:
         return None  # The rate-limited observer takes over; no unbounded synchronous Stop loop.
-    from .attach import orbit_command
-    data = task['data']
-    remaining = ((data.get('objective_progress') or {}).get('remaining') or
-                 (data.get('executor_result') or {}).get('remaining') or [])
-    return {'decision': 'block', 'reason': (
-        'Orbit: this task is still working, not verified. Continue the remaining authorised work now; '
-        'a progress report or --remaining is not permission to stop.\n' + '\n'.join(remaining)[:2000] +
-        '\nWhen all work is complete, record evidence and claim. If a real dependency needs user input, '
-        'record it with `%s claim %s --question "specific missing input"`; do not invent a blocker.'
-        % (orbit_command(store), task['id']))}
+    return {'decision': 'block', 'reason': manager.instruction(store, task, found)}
 
 
 def record_stop(store, task, session):
@@ -107,8 +96,9 @@ def tick(store, task_id, session, runner=None):
         return 'disabled'
     if store.paused(task_id) or task['status'] not in ('working', 'checking', 'verifying'):
         return 'settled'
-    if (task['data'].get('executor_result') or {}).get('question'):
-        return 'input_required'
+    from .manager import diagnose
+    if diagnose(task)['reason'] == 'waiting_for_user':
+        return 'input_required'  # a question the user already answered is stale, not a reason to stop supervising
     terminal, reason = wake.resolve(store, session=session)
     if not terminal:
         return reason
@@ -172,7 +162,9 @@ def tick(store, task_id, session, runner=None):
 def ensure(store, task, session):
     if not session or task['status'] not in ('working', 'checking', 'verifying'):
         return
-    from . import wake
+    from . import manager, wake
+    if not manager.diagnose(task, paused=store.paused(task['id']), handoff=handoff_pending(task))['supervise']:
+        return  # waiting for the user, a handoff, a draft: nothing to resume, so no supervisor (and no terminal)
     terminal, reason = wake.resolve(store, session=session)
     if not terminal:
         with store.db:

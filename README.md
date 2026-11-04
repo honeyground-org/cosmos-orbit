@@ -147,12 +147,26 @@ What happens in an attached session:
    hook keeps the turn open until it is fixed; nobody is asked to intervene. A pass queues one
    read-only review in a fresh context (`--wait` runs it now). Unmet items come back in the next
    brief; `verified` closes the task.
-5. An unfinished task with completion definitions cannot end just because the executor gave a progress
-   report or called `claim --remaining`. The Stop hook asks it to continue, including after a previous
-   Stop block. An explicit pause or a recorded question for the user permits stopping. A claim without
-   evidence is returned unmet.
+5. **Every stop is managed.** Orbit reads from the ledger why the session stopped (no model call),
+   records it as the task's state (`MANAGER` line in the brief, `manager_decision` in the events) and
+   gives the one next step that fits:
+
+   | Why it stopped | What Orbit does |
+   |---|---|
+   | Items still have no evidence | Sends it back with those items by name (and the last checkpoint's next step) |
+   | Every item has evidence, nothing claimed | Tells it to verify the result against the goal and claim |
+   | The review returned unmet items | Sends back the unmet items and the reviewer's fix list |
+   | A fixed check failed · the request changed | Fix the check · revise the goals, then continue |
+   | Claimed, review running | Lets it stop; the supervisor waits and resumes it if the review comes back unmet |
+   | A question for the user (`needs_input`) · paused · handoff | Lets it stop; nothing is resumed, no supervisor opens |
+   | Verified | Complete: the review passed against the goal; the task is closed |
+
+   A progress report or `claim --remaining` is not a reason to stop. A question the user has already
+   answered no longer counts as waiting, and the executor's `--remaining` list counts only until the
+   user speaks again. A claim without evidence is returned unmet.
 6. A lightweight observer covers sessions that become idle anyway and reviews that return unmet after
-   the executor has stopped. In cmux/tmux, `cosmos-orbit supervision auto` submits one continuation only
+   the executor has stopped. It starts only when the manager has work to resume or a review to wait for,
+   and the session it resumes receives the manager's instruction with it. In cmux/tmux, `cosmos-orbit supervision auto` submits one continuation only
    when the bound session has an empty input line. It never clears text or interrupts a busy host.
    `cosmos-orbit supervision tell` uses notification only. This setting is separate from `context auto|tell`;
    until explicitly set it inherits that existing preference. Unsupported terminals are recorded as

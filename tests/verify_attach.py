@@ -153,6 +153,106 @@ def verify_supervision(base):
     store.close()
 
 
+def verify_manager(base):
+    """Orbit as the middle manager: each reason for a stop gets its own next step, and only work to resume opens a
+    supervisor (user, 2026-11-04: find out why it stopped, direct the next work; finished work is verified against
+    the goal and, when it passes, closed as complete)."""
+    from unittest.mock import patch
+    from harness import manager, supervision, wake
+    store = Store(base / 'manager-home')
+    root = base / 'manager-repo'
+    root.mkdir()
+    git(root, 'init', '-q')
+    git(root, 'commit', '-q', '--allow-empty', '-m', 'init')
+    attach.set_switch(store, 'on', global_default=True)
+    supervision.configure(store, 'auto')
+    session = 'manager-session'
+    task = attach.create(store, root, 'Build the importer in two stages and verify both', 'claude', session,
+                         done=['First stage built', 'Second stage built'])
+    tid = task['id']
+    attach.record_evidence(store, tid, 'D1', note='stage one ran on the sample file')
+    wake.note(store, session, 'claude', 'stop', {'kind': 'tmux', 'cli': 'tmux', 'target': '%42'})
+
+    def stop(message, active=False):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        launch = MagicMock()  # only the supervisor's own launch is faked; git and every other subprocess stay real
+        fake = SimpleNamespace(Popen=launch, run=subprocess.run, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError)
+        with patch.object(supervision, 'subprocess', fake), patch.object(attach, '_pane', return_value={'kind': 'tmux', 'cli': 'tmux', 'target': '%42'}):
+            out = attach.handle(store, 'stop', {'cwd': str(root), 'session_id': session, 'stop_hook_active': active,
+                                                'last_assistant_message': message}, 'claude')
+        state = store.get(tid)['data'].get('manager') or {}
+        supervision.begin_turn(store, store.get(tid), session)  # the next turn starts: stop counts reset
+        return out, state, launch.call_count
+
+    out, state, launched = stop('Working on the second stage now.')
+    check('manager: unfinished work → stop is sent back with the exact item left (D2), recorded as interrupted',
+          out and out.get('decision') == 'block' and 'stopped before the work was finished' in out['reason']
+          and 'D2 Second stage built' in out['reason'] and state.get('reason') == 'interrupted', out or state)
+    check('manager: …and a supervisor is started for work to resume (control for the cases below)', launched == 1, launched)
+    check('manager: the decision is in the ledger and the brief', 'manager_decision' in [e['kind'] for e in store.events(tid)]
+          and 'MANAGER (' in attach.brief_text(store, store.get(tid)), attach.brief_text(store, store.get(tid))[-400:])
+    typed = attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': supervision.RESUME_LINE}, 'claude')
+    context = (typed or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+    check("manager: Orbit's typed continuation carries the manager's instruction, not a bare 'continue'",
+          'Orbit (manager)' in context and 'NEXT: Continue with the unfinished items' in context, context[:300])
+
+    attach.record_evidence(store, tid, 'D2', note='stage two ran on the sample file')
+    out, state, launched = stop('Here is where things stand.')
+    check('manager: every item has evidence but nothing is claimed → verify against the goal and claim, not "continue"',
+          out and out.get('decision') == 'block' and 'Verify the result against the goal' in out['reason']
+          and ' claim ' + tid in out['reason'] and state.get('reason') == 'finished_unclaimed', out or state)
+
+    pending = store.get(tid)
+    pending['data']['verification_pending'] = True
+    store.save(pending, 'checking', 'test_claimed')
+    out, state, launched = stop('Claimed; waiting for the review.')
+    check('manager: claimed → nothing to resume; it waits for the review (stop not blocked)',
+          not (out and out.get('decision') == 'block') and state.get('reason') == 'verifying', out or state)
+    check('manager: …but a supervisor still watches the review, to resume the session if it comes back unmet', launched == 1, launched)
+
+    unmet = store.get(tid)
+    unmet['data'].update(verification_pending=False, reason_code='unmet', reason='D2 output is not sorted',
+                         verdicts=[{'outcome': 'unmet', 'turn': 1, 'items': [{'id': 'D1', 'status': 'met'},
+                                   {'id': 'D2', 'status': 'unmet'}], 'fix': ['sort the second stage output']}])
+    store.save(unmet, 'working', 'test_unmet')
+    out, state, launched = stop('Done, I think.')
+    check('manager: review returned unmet → the session gets the unmet item and the fix, not a generic "continue"',
+          out and out.get('decision') == 'block' and 'D2 unmet' in out['reason'] and 'sort the second stage output' in out['reason']
+          and state.get('reason') == 'review_unmet', out or state)
+
+    attach.claim(store, tid, remaining=['which sort order'], question='Ascending or descending?')
+    out, state, launched = stop('I asked the user which order to use.')
+    check('manager: waiting for the user → the stop is allowed, recorded as waiting_for_user',
+          not (out and out.get('decision') == 'block') and state.get('reason') == 'waiting_for_user', out or state)
+    check('manager: …and no supervisor (no terminal opened for nothing)', launched == 0, launched)
+
+    attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': 'Ascending order, please.'}, 'claude')
+    answered = store.get(tid)
+    check('setup: the answer returns the task to working and leaves the old question behind (the 15:58-16:13 state)',
+          answered['status'] == 'working' and (answered['data'].get('executor_result') or {}).get('question'))
+    out, state, launched = stop('Sorted ascending; here is the result.')
+    check('manager: after the user answered, the stale question no longer reads as waiting — the work is managed again '
+          '(the answer is a change to the request: revise the goals)', out and out.get('decision') == 'block'
+          and state.get('reason') == 'requirements_changed' and launched == 1, (out, state.get('reason'), launched))
+    attach.set_done(store, tid, [], keep=True)
+    out, state, launched = stop('Sorted ascending; here is the result.')
+    check('manager: …goals confirmed, every item has evidence → verify against the goal and claim',
+          out and out.get('decision') == 'block' and state.get('reason') == 'finished_unclaimed', (out, state.get('reason')))
+    check('manager: …and the supervisor does not stop at once on the stale question',
+          supervision.tick(store, tid, session, lambda argv: (0, '')) != 'input_required')
+
+    done = store.get(tid)
+    done['data'].update(reason_code=None, executor_result={})
+    store.save(done, 'verified', 'completion_verified')
+    out, state, launched = stop('All verified.')
+    check('manager: verified → complete; nothing resumed, no supervisor, no MANAGER line in the brief',
+          not (out and out.get('decision') == 'block') and launched == 0
+          and 'MANAGER (' not in attach.brief_text(store, store.get(tid)), out)
+    check('manager: diagnose reads a verified task as complete', manager.diagnose(store.get(tid))['reason'] == 'complete')
+    store.close()
+
+
 def main():
     os.environ['PYTHONDONTWRITEBYTECODE'] = '1'  # calc.py is rewritten within one second; a stale .pyc would fake a failure
     base = Path(tempfile.mkdtemp(prefix='orbit-verify-attach-'))
@@ -331,6 +431,7 @@ def main():
     check('claude: foreign hook survives uninstall', data['hooks']['Stop'][0]['hooks'][0]['command'] == 'echo keep' and 'UserPromptSubmit' not in data['hooks'])
     store.close()
     verify_supervision(base)
+    verify_manager(base)
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 
