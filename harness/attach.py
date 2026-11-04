@@ -1190,7 +1190,8 @@ def _handle(store, event, payload, host):
             if len(text) < MIN_TASK_PROMPT or kind in ('trivial', 'question'):
                 # A question or a go-ahead with no open task starts nothing.
                 return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
-            task = create(store, root, text, host, session, draft=kind == 'unsure',
+            # The user's prompt is not ours to refuse: keep the ledger's first 24000 characters of a longer one.
+            task = create(store, root, text[:24000], host, session, draft=kind == 'unsure',
                           context=recent_prompts(payload.get('transcript_path'), text))
         else:
             try:
