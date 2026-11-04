@@ -97,7 +97,7 @@ def main():
     attach.set_done(store, confirm['id'], ['D1 the API examples show the new parameters'])
     confirm = store.get(confirm['id'])
     check('the executor confirms a draft by defining the completion', not confirm['data'].get('draft') and confirm['status'] == 'working')
-    check('…and the confirmed task does not close at the end of the turn', stop(store, d_root, 'D2') is None
+    check('…and the confirmed task continues at the end of the turn', (stop(store, d_root, 'D2') or {}).get('decision') == 'block'
           and store.get(confirm['id'])['status'] == 'working')
     c_root = make_repo(base, 'repo-changed')
     attach.set_switch(store, 'on', c_root)

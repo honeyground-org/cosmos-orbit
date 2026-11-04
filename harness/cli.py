@@ -132,6 +132,8 @@ def main(argv=None):
     evolve_cmd.add_argument('--repo', help='A clone of the upstream repository for propose and merge')
     evolve_cmd.add_argument('--run', action='store_true', help='Run one evolution attempt now')
     evolve_cmd.add_argument('--candidate', help='The candidate key to attempt (default: the most frequent due one)')
+    supervision_cmd = sub.add_parser('supervision', help='Show or set unfinished-task terminal continuation: auto | tell; does not change context handoff')
+    supervision_cmd.add_argument('value', nargs='?', choices=('auto', 'tell'))
     wake_cmd = sub.add_parser('wake', help='Another session sent a message: wake the receiving session (types one line when its input is empty)')
     wake_cmd.add_argument('--session', action='append', default=[], help='The receiving session ID (repeatable)')
     wake_cmd.add_argument('--surface', action='append', default=[], help='The receiving cmux surface or tmux pane (repeatable)')
@@ -401,6 +403,9 @@ def main(argv=None):
             if args.mode or args.repo:
                 evolve.configure(store, args.mode, args.repo)
             result = evolve.run(store, args.candidate) if args.run else evolve.view(store)
+        elif args.command == 'supervision':
+            from . import supervision
+            result = supervision.configure(store, args.value)
         elif args.command == 'wake':
             from . import wake
             if not args.session and not args.surface:
