@@ -10,8 +10,10 @@ when the keys arrive. Two things were learned from the first real run (Claude Co
   - a prompt the hook blocked comes back into the input line, so '/clear' typed after it was sent as part of the
     old text. The input is emptied first with ctrl+u, once per line (measured: one press removes one line, a
     press on an empty input does nothing; ctrl+l and Escape left the text in place);
-  - the carry line is typed only once the fresh session has taken the task over. If it has not within the wait,
-    nothing more is typed and the handoff falls back to telling the user.
+  - the carry line is typed only once the fresh session has taken the task over. If its own hook did not take it
+    (seen 2026-11-04: it started in another folder than the task's and skipped it), the typist hands the task to
+    the session that appeared in this pane after the /clear. If none did within the wait, nothing more is typed
+    and the handoff falls back to telling the user.
 """
 import json
 import os
@@ -121,7 +123,9 @@ def _main(request):
         store = Store(request['home'])
 
         def adopted():
-            return (store.get(request['task'])['data'].get('handoff_state') or {}).get('state') == 'adopted'
+            # Taken over by the fresh session's own hook, or handed to the session that appeared in this pane.
+            from .continuity import adopt_in_panel
+            return adopt_in_panel(store, request['task'], request['terminal']['target'])
     try:
         run(request['terminal'], [tuple(step) for step in request['steps']], adopted=adopted)
         return 0

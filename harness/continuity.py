@@ -502,6 +502,63 @@ def auto_failed(store, task_id, reason):
         pass
 
 
+ADOPT_GRACE_SECONDS = 3.0  # the fresh session's own hook decides first; the typist steps in only after it
+
+
+def adopt_in_panel(store, task_id, panel, grace=ADOPT_GRACE_SECONDS):
+    """The typist's side of an auto handoff: True once the task is taken over in `panel`.
+
+    Orbit typed /clear in that pane, so the session whose hooks appear there afterwards is the fresh one; a pane
+    holds one session at a time. Its own SessionStart hook normally takes the task. When it did not (it was
+    marked as having no task, or the task lock was busy that instant), the typist hands the task to it here,
+    so the carry line follows. A session already working on another task of its own is never taken from it."""
+    from .attach import NO_TASK, SESSION_LOCK_WAIT
+    try:
+        task = store.get(task_id)
+    except ValueError:
+        return False
+    state = task['data'].get('handoff_state') or {}
+    if state.get('state') == 'adopted':
+        return True
+    if state.get('state') != 'auto' or state.get('panel') != panel or not state.get('auto_at'):
+        return False
+    row = store.db.execute('SELECT session, at FROM terminals WHERE target=? AND session!=? AND at>=? '
+                           'ORDER BY at DESC LIMIT 1', (panel, state.get('session') or '', state['auto_at'])).fetchone()
+    if not row:
+        return False                                     # nothing started in the pane yet
+    fresh = row['session']
+    bound = store.session_task(fresh)
+    if bound and bound['task_id'] and bound['task_id'] != task_id:
+        return False                                     # it works on a task of its own: never take that away
+    if bound is None:
+        from datetime import datetime, timezone
+        try:
+            first = datetime.fromisoformat(row['at'])
+        except ValueError:
+            return False
+        if (datetime.now(timezone.utc) - first).total_seconds() < grace:
+            return False                                 # its own hook may still be deciding
+    try:
+        with store.lock('task:' + task_id), store.lock('sessions:' + task_id, timeout=SESSION_LOCK_WAIT):
+            task = store.get(task_id)
+            state = task['data'].get('handoff_state') or {}
+            if state.get('state') == 'adopted':
+                return True
+            if state.get('state') != 'auto' or state.get('panel') != panel:
+                return False
+            bound = store.session_task(fresh)
+            if bound and bound['task_id'] not in (NO_TASK, task_id):
+                return False
+            state.update(state='adopted', adopted_by=fresh)
+            store.save(task, task['status'], 'handoff_adopted', {'session': fresh, 'by': 'typist', 'layer': 'context'})
+            store.bind_session(fresh, task_id, (bound or {}).get('workspace') or task['workspace'])
+            if state.get('session') and state['session'] != fresh:
+                store.end_session(state['session'])
+            return True
+    except (RuntimeError, ValueError):
+        return False                                     # busy this instant: the typist asks again
+
+
 def mark_carried_served(store, task, session):
     """The fresh session has received the carried request in its brief: no later session receives it again."""
     carried = task['data'].get('carried_prompt') or {}

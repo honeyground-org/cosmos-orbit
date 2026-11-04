@@ -445,8 +445,11 @@ def resolve_task(store, root, session, source=None, transcript=None):
     here = (_pane() or {}).get('target')
     invited, busy = [], False
     for item in store.list():
-        if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:
+        if item['status'] in CLOSED:
             continue
+        same_folder = Path(item['workspace']).resolve() == root
+        if not same_folder and not (here and source == 'clear'):
+            continue                                     # another folder's handoff: only a /clear in its own pane takes it
         task = store.get(item['id'])
         state = task['data'].get('handoff_state') or {}
         if task['data'].get('mode') == 'attached' and invitation_open(state):
@@ -458,7 +461,15 @@ def resolve_task(store, root, session, source=None, transcript=None):
                 pane, holds = _owner_pane(store, state.get('session'))
                 if pane and pane != here and holds:
                     continue                             # its session still holds another pane: /clear there takes it
-                mine = bool(pane) and pane == here
+                # The session's own record is gone once it ended (a /clear ends it before the fresh one starts), so
+                # the pane it was told in, kept in the handoff, still says where its /clear comes from.
+                mine = bool(here) and here in (pane, state.get('pane'))
+            # The task's folder is where the shell was when it began: an agent that cd'd into a worktree leaves it
+            # there, while the fresh session after /clear starts where the host was launched. Observed 2026-11-04
+            # 17:40: Orbit typed /clear in the pane, the fresh session started one folder up, skipped its own
+            # handoff for the folder, and the user's carried request ("merge and install") was never run.
+            if not same_folder and not mine:
+                continue
             invited.append((mine, state.get('at') or task['updated'], task))
     invited.sort(key=lambda row: row[1], reverse=True)   # newest first …
     invited.sort(key=lambda row: not row[0])             # … after this pane's own (a stable sort keeps that order)
@@ -479,6 +490,12 @@ def resolve_task(store, root, session, source=None, transcript=None):
                 return store.get(task['id'])
         except (RuntimeError, ValueError):
             busy = True                                  # never adopt without the lock; try again on its next event
+    row = store.session_task(session)
+    if row and row['task_id']:
+        try:
+            return store.get(row['task_id'])             # the typist handed this pane's task over meanwhile: keep it
+        except ValueError:
+            pass
     latest = current_task(store, root)
     if latest is not None:
         try:
@@ -1444,11 +1461,15 @@ def context_decision(store, task, settle=False, message_only=False):
         return None
     if message_only and 'decision' in reply:
         return None
+    from .typist import detect
+    pane = (detect() or {}).get('target') if new_state == 'told' else None
     try:
         with store.lock('task:' + task['id']):
             task = store.get(task['id'])
             task['data'].setdefault('handoff_state', {})['state'] = new_state
             task['data']['handoff_state'][new_state + '_at'] = now()
+            if pane:
+                task['data']['handoff_state']['pane'] = pane  # where its /clear comes from, once its own record is gone
             store.save(task, task['status'], 'handoff_' + new_state, {'tokens': live.get('tokens'), 'layer': 'context'})
     except (RuntimeError, ValueError):
         return None
