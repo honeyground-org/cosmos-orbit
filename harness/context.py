@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import uuid
 
-DEFAULT_LIMIT = 200000  # see continuity.py: the measured handoff point
+from .continuity import DEFAULT_HANDOFF_AT as DEFAULT_LIMIT  # one built-in point for both entrances
 
 
 def positive(value):

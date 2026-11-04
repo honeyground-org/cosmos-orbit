@@ -9,8 +9,10 @@ GROUPS = [
         ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, and SessionEnd for Claude Code) once. Inert until something is switched on.'),
         ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
          'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
-        ('cosmos-orbit context [200k | on | off] [--global]   ·   export ORBIT_HANDOFF_AT=250k',
-         'Mid-task handoff point, same three scopes as on/off (default 200k, measured). Without a value: the point and the live context here.'),
+        ('cosmos-orbit context [350k | on | off | reset] [--global]   ·   export ORBIT_HANDOFF_AT=250k',
+         'Mid-task handoff point, same three scopes as on/off (built-in 350k). Stored in <home>/settings.json (section "handoff"): '
+         'the command writes it, a hand edit applies at the next hook event, reset removes a stored point. Without a value: '
+         'the point, where it came from, the settings file and the live context here.'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit wake --session ID [--surface PANE] [--from NAME] [--when-busy wait|skip] [--check]',

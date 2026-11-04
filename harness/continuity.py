@@ -4,7 +4,13 @@ A long session re-reads its whole context on every turn. Measured on 99 real Cla
 14 days, the median session started at 78k tokens and peaked at 506k. Replaying those sessions with a
 fresh-context handoff at 200k saved 31-51% of cost-equivalent tokens (input x1, cache write x1.25, cache
 read x0.1) across re-read assumptions of 15k-80k tokens per handoff; 150k thrashed when re-reading was
-heavy. The defaults below follow that measurement (scripts/measure_context_growth.py repeats it locally).
+heavy. The built-in default is 350k: replayed again on 113 sessions (2026-11-04) it still saved 32-38% while
+handing off 3-6x less often than 200k (150-177 handoffs instead of 444-1,075), so a session is interrupted far
+less for a few points of saving. scripts/measure_context_growth.py repeats the comparison locally.
+
+The point is a setting, not a constant: `<home>/settings.json` holds it (section "handoff"), the
+`cosmos-orbit context` command writes it, a hand edit takes effect at the next hook event, and
+ORBIT_HANDOFF_AT overrides it for one terminal.
 
 Nothing here calls a model. A handoff is rebuilt from the ledger plus one short checkpoint the executor
 writes about what the ledger cannot know: the approach in progress and the next concrete step.
@@ -22,16 +28,18 @@ import subprocess
 
 from .store import now
 
-DEFAULT_HANDOFF_AT = 200_000
+DEFAULT_HANDOFF_AT = 350_000
 MIN_GROWTH = 60_000          # never hand off a session that has not grown this much since it started
-GLOBAL_KEY = 'handoff_at'
-PROJECT_PREFIX = 'handoff_at:'
+SETTINGS_FILE = 'settings.json'
+LEGACY_GLOBAL_KEY = 'handoff_at'        # before the settings file these lived in the ledger's preferences table
+LEGACY_PROJECT_PREFIX = 'handoff_at:'
+LEGACY_MODE_KEY = 'handoff_mode'
 TAIL_BYTES = 4_000_000
 RECORD_STEP = 10_000          # store a measurement when it moved this much (keeps the ledger readable)
 INVITE_TTL_SECONDS = 12 * 3600  # an open handoff nobody took expires (observed: taken 18 hours later by unrelated work)
 OPEN_STATES = ('recommended', 'asked', 'checkpointed', 'told', 'auto', 'auto_failed')
 INVITING_STATES = ('checkpointed', 'told', 'auto', 'auto_failed')
-MODE_KEY = 'handoff_mode'     # 'tell' (default): ask the user to type /clear · 'auto': type it where a typist exists
+MODES = ('tell', 'auto')      # 'tell' (default): ask the user to type /clear · 'auto': type it where a typist exists
 
 
 # ---------------------------------------------------------------- settings
@@ -52,40 +60,148 @@ def parse_tokens(value, strict=True):
     return tokens
 
 
+def settings_path(store):
+    return Path(store.home) / SETTINGS_FILE
+
+
+def _migrate_legacy(store, path):
+    """Move handoff settings from the ledger's preferences table into the file, once, so one place holds them."""
+    if path.exists():
+        return
+    rows = [row for row in store.db.execute("SELECT key, value FROM preferences WHERE key LIKE 'handoff%'")
+            if row[0] in (LEGACY_GLOBAL_KEY, LEGACY_MODE_KEY) or row[0].startswith(LEGACY_PROJECT_PREFIX)]
+    if not rows:
+        return
+    section = {}
+    for key, value in rows:
+        if key == LEGACY_MODE_KEY:
+            if value in MODES:
+                section['mode'] = value
+        elif key == LEGACY_GLOBAL_KEY:
+            section['at'] = int(value)
+        else:
+            section.setdefault('projects', {})[key[len(LEGACY_PROJECT_PREFIX):]] = int(value)
+    _write_file(path, {'handoff': section})
+    with store.db:
+        store.db.executemany('DELETE FROM preferences WHERE key=?', [(row[0],) for row in rows])
+
+
+def _write_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name('%s.%d.tmp' % (path.name, os.getpid()))
+    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    os.replace(temporary, path)
+
+
+def read_settings(store):
+    """(the whole settings file, problem or None). A missing file is empty; a broken one never raises in a hook."""
+    path = settings_path(store)
+    _migrate_legacy(store, path)
+    try:
+        text = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        return {}, 'cannot read %s: %s' % (path, exc)
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except ValueError as exc:
+        return {}, '%s is not valid JSON (%s)' % (path, exc)
+    if not isinstance(data, dict):
+        return {}, '%s must hold a JSON object' % path
+    return data, None
+
+
+def _section(data):
+    section = data.get('handoff')
+    return section if isinstance(section, dict) else {}
+
+
+def _projects(section):
+    projects = section.get('projects')
+    return projects if isinstance(projects, dict) else {}
+
+
+def _tokens(value):
+    """A value from the file: a number, '350k', 'on' or 'off'; None when absent or unreadable."""
+    if value is None or isinstance(value, (list, dict)):
+        return None
+    try:
+        return parse_tokens(value)
+    except ValueError:
+        return None
+
+
+def update_settings(store, change):
+    """Read, change and write the file under a lock. A file that cannot be parsed is the user's to fix: never overwrite it."""
+    with store.lock('settings-file', timeout=2.0):
+        data, problem = read_settings(store)
+        if problem:
+            raise ValueError(problem + ' - fix or remove it, then run the command again')
+        section = data.get('handoff')
+        if not isinstance(section, dict):
+            section = data['handoff'] = {}
+        change(section)
+        _write_file(settings_path(store), data)
+    return data
+
+
 def resolve_threshold(store, root):
-    """Winner first: ORBIT_HANDOFF_AT environment → project → global → built-in default. 0 means off."""
+    """Winner first: ORBIT_HANDOFF_AT environment → settings file project → settings file default → built-in. 0 means off."""
     env = os.environ.get('ORBIT_HANDOFF_AT')
     if env:
         try:
             return parse_tokens(env, strict=False), 'environment'
         except ValueError:
             pass
-    value = store.preference(PROJECT_PREFIX + str(Path(root).resolve()))
+    section = _section(read_settings(store)[0])
+    value = _tokens(_projects(section).get(str(Path(root).resolve())))
     if value is not None:
-        return int(value), 'project'
-    value = store.preference(GLOBAL_KEY)
+        return value, 'project'
+    value = _tokens(section.get('at'))
     if value is not None:
-        return int(value), 'default'
+        return value, 'default'
     return DEFAULT_HANDOFF_AT, 'built-in'
 
 
 def set_threshold(store, value, root=None, global_default=False):
     tokens = parse_tokens(value)
     if global_default:
-        store.preference(GLOBAL_KEY, str(tokens))
-        return {'scope': 'default', 'handoff_at': tokens}
-    store.preference(PROJECT_PREFIX + str(Path(root).resolve()), str(tokens))
-    return {'scope': 'project', 'root': str(Path(root).resolve()), 'handoff_at': tokens}
+        update_settings(store, lambda section: section.__setitem__('at', tokens))
+        return {'scope': 'default', 'handoff_at': tokens, 'settings_file': str(settings_path(store))}
+    project = str(Path(root).resolve())
+
+    def change(section):
+        projects = section.get('projects')
+        if not isinstance(projects, dict):
+            projects = section['projects'] = {}
+        projects[project] = tokens
+    update_settings(store, change)
+    return {'scope': 'project', 'root': project, 'handoff_at': tokens, 'settings_file': str(settings_path(store))}
+
+
+def clear_threshold(store, root=None, global_default=False):
+    """Remove a stored point so the next scope applies again (`cosmos-orbit context reset [--global]`)."""
+    project = str(Path(root).resolve()) if root is not None else None
+
+    def change(section):
+        if global_default:
+            section.pop('at', None)
+        else:
+            _projects(section).pop(project, None)
+    update_settings(store, change)
+    return {'scope': 'default' if global_default else 'project', 'root': project, 'handoff_at': None,
+            'settings_file': str(settings_path(store))}
 
 
 def handoff_mode(store):
-    return 'auto' if store.preference(MODE_KEY) == 'auto' else 'tell'
+    return 'auto' if _section(read_settings(store)[0]).get('mode') == 'auto' else 'tell'
 
 
 def set_handoff_mode(store, mode):
-    if mode not in ('auto', 'tell'):
+    if mode not in MODES:
         raise ValueError('The handoff mode is auto or tell')
-    store.preference(MODE_KEY, mode)
+    update_settings(store, lambda section: section.__setitem__('mode', mode))
     return mode
 
 
@@ -116,11 +232,23 @@ def close_on_compaction(data, session):
 
 def threshold_view(store, root):
     tokens, source = resolve_threshold(store, root)
-    projects = {row[0][len(PROJECT_PREFIX):]: int(row[1]) for row in
-                store.db.execute('SELECT key, value FROM preferences WHERE key LIKE ?', (PROJECT_PREFIX + '%',))}
-    default = store.preference(GLOBAL_KEY)
+    data, problem = read_settings(store)
+    section = _section(data)
+    problems = [problem] if problem else []
+    projects = {}
+    for project, value in _projects(section).items():
+        projects[project] = _tokens(value)
+        if projects[project] is None:
+            problems.append('handoff.projects["%s"] = %r is not a token count (ignored)' % (project, value))
+    default = _tokens(section.get('at'))
+    if section.get('at') is not None and default is None:
+        problems.append('handoff.at = %r is not a token count (ignored)' % (section.get('at'),))
+    if section.get('mode') is not None and section.get('mode') not in MODES:
+        problems.append('handoff.mode = %r is not auto or tell (tell applies)' % (section.get('mode'),))
+    path = settings_path(store)
     return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0},
-            'default': int(default) if default is not None else DEFAULT_HANDOFF_AT,
+            'default': default if default is not None else DEFAULT_HANDOFF_AT, 'built_in': DEFAULT_HANDOFF_AT,
+            'settings_file': {'path': str(path), 'exists': path.exists(), 'problems': problems},
             'projects': projects, 'min_growth': min_growth(),
             'environment': os.environ.get('ORBIT_HANDOFF_AT'),
             'handoff_mode': handoff_mode(store), 'typist': (__import__('harness.typist', fromlist=['detect']).detect() or {}).get('kind')}

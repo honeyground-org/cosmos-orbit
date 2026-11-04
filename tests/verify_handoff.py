@@ -88,6 +88,7 @@ def age(store, tid, seconds):
 def main():
     base = Path(tempfile.mkdtemp(prefix='orbit-verify-handoff-'))
     store = Store(base / 'home')
+    continuity.set_threshold(store, '200k', global_default=True)  # the scenarios below drive sessions past 200k
 
     print('① a compaction closes the open handoff, and the session is measured again from there')
     root = make_repo(base, 'repo-compact')
