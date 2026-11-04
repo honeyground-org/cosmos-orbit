@@ -95,6 +95,12 @@ def event_view(row):
         note = '%s · %sk' % (data.get('trigger') or '', (data.get('tokens') or data.get('from') or 0) // 1000)
     elif row['kind'] == 'automatic_checkpoint':
         note = 'fresh session from the ledger · %s' % ((data.get('measurement') or {}).get('tokens') or '')
+    elif row['kind'] == 'handoff_auto':
+        note = 'typing /clear in %s' % (data.get('terminal') or 'the terminal')
+    elif row['kind'] == 'handoff_auto_failed':
+        note = data.get('reason') or ''
+    elif row['kind'] == 'message_wake':
+        note = '%s%s · %s' % (data.get('outcome') or '', (' · from ' + data['sender']) if data.get('sender') else '', data.get('terminal') or '')
     return {'seq': row['seq'], 'task_id': row['task_id'], 'kind': row['kind'], 'at': row['at'],
             'note': str(note)[:600], 'age': age_seconds(row['at']),
             'layer': data.get('layer'), 'direction': data.get('direction'),
@@ -382,8 +388,25 @@ def snapshot(store, task_id=None):
         health = {'checked_at': now(), 'engines': {}, 'policy': 'unavailable', 'error': str(error)}
     return {'at': now(), 'scope': 'managed', 'home': str(store.home), 'cursor': cursor,
             'worker_running': worker_running, 'tasks': tasks, 'total': len(summaries),
-            'health': health,
+            'health': health, 'continuity': continuity_summary(store),
             'events': global_events, 'labels': LABELS, 'model_options': model_options()}
+
+
+def continuity_summary(store):
+    """Who may type into a terminal, which panes a message can wake, and the self-evolution switch (read-only)."""
+    from . import continuity, evolve, wake
+    try:
+        value = evolve.state(store)
+        last = (value.get('history') or [{}])[-1]
+        evolution = {'mode': value['mode'], 'candidates': len(value['candidates']), 'due': len(evolve.due(value)),
+                     'last': {k: last.get(k) for k in ('at', 'key', 'outcome', 'status') if last.get(k)} or None}
+    except Exception as error:  # noqa: BLE001 - the view never fails because of one panel
+        evolution = {'mode': 'unknown', 'error': str(error)[:200]}
+    try:
+        woken = wake.summary(store)
+    except Exception as error:  # noqa: BLE001
+        woken = {'reachable': 0, 'recent': [], 'error': str(error)[:200]}
+    return {'handoff_mode': continuity.handoff_mode(store), 'wake': woken, 'evolve': evolution}
 
 
 def clean(text):
@@ -406,7 +429,16 @@ def terminal(data, lang='en', width=110):
     rows = [t['title'] + '  |  ' + t['worker'] + ': ' + t['on' if data['worker_running'] else 'off'],
             t['scope'], '%s %d  ·  %s %d  ·  %d / %d' %
             (t['active'], sum(x['busy'] for x in data['tasks']), t['attention'],
-             sum(x['attention'] for x in data['tasks']), len(data['tasks']), data['total']), '']
+             sum(x['attention'] for x in data['tasks']), len(data['tasks']), data['total'])]
+    flow = data.get('continuity') or {}
+    if flow:
+        wake_rows = (flow.get('wake') or {})
+        last = (wake_rows.get('recent') or [{}])[0]
+        rows.append('handoff: %s  ·  message wake: %d pane(s)%s  ·  self-evolution: %s (%d due)' % (
+            flow.get('handoff_mode'), wake_rows.get('reachable', 0),
+            (' · last ' + str(last.get('outcome'))) if last.get('outcome') else '',
+            (flow.get('evolve') or {}).get('mode'), (flow.get('evolve') or {}).get('due') or 0))
+    rows.append('')
     goal_width = max(12, width - 48)
     rows.append(fit(t['task'], 14) + fit(t['state'], 22) + fit(t['provider'], 12) + t['goal'])
     rows.append('─' * min(width, 150))

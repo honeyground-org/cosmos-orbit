@@ -132,6 +132,13 @@ def main(argv=None):
     evolve_cmd.add_argument('--repo', help='A clone of the upstream repository for propose and merge')
     evolve_cmd.add_argument('--run', action='store_true', help='Run one evolution attempt now')
     evolve_cmd.add_argument('--candidate', help='The candidate key to attempt (default: the most frequent due one)')
+    wake_cmd = sub.add_parser('wake', help='Another session sent a message: wake the receiving session (types one line when its input is empty)')
+    wake_cmd.add_argument('--session', action='append', default=[], help='The receiving session ID (repeatable)')
+    wake_cmd.add_argument('--surface', action='append', default=[], help='The receiving cmux surface or tmux pane (repeatable)')
+    wake_cmd.add_argument('--from', dest='sender', default='', help='Who sent the message (shown in notifications)')
+    wake_cmd.add_argument('--when-busy', choices=('wait', 'skip'), default='wait',
+                          help='wait (default): wake it after the current turn · skip: the channel delivers during a turn')
+    wake_cmd.add_argument('--check', action='store_true', help='Only report what each receiving screen shows; type nothing')
     checkpoint_cmd = sub.add_parser('checkpoint', help='Record the next step and working notes so a fresh session can continue')
     checkpoint_cmd.add_argument('id')
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
@@ -393,6 +400,21 @@ def main(argv=None):
             if args.mode or args.repo:
                 evolve.configure(store, args.mode, args.repo)
             result = evolve.run(store, args.candidate) if args.run else evolve.view(store)
+        elif args.command == 'wake':
+            from . import wake
+            if not args.session and not args.surface:
+                raise ValueError('wake needs --session or --surface')
+            if args.check:
+                rows = []
+                for kind, value in [('session', s) for s in args.session] + [('surface', s) for s in args.surface]:
+                    terminal, reason = wake.resolve(store, **{kind: value})
+                    if terminal:
+                        code, screen = wake._run(wake.screen_command(terminal))
+                        reason = wake.read_state(screen) if code == 0 else 'unreadable'
+                    rows.append({kind: value, 'state': reason})
+                result = {'check': rows}
+            else:
+                result = wake.wake(store, args.session, args.surface, args.sender, args.when_busy)
         elif args.command == 'checkpoint':
             from .continuity import record_checkpoint
             result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files),

@@ -64,6 +64,17 @@ cannot hold for itself:
 
 Everything else is left to the native CLI, and Orbit judges itself by one thing: the result.
 
+### At a glance: what Orbit does for you
+
+| | What happens | Why it matters |
+|---|---|---|
+| **The goal survives** | Your request and every correction are fixed in a ledger and re-presented after compaction and in the next session. | A compacted session no longer forgets what you asked for. |
+| **An independent review** | A completion claim needs evidence per item and passes one read-only review in a fresh context. | The session does not grade its own work. |
+| **Handoff at a measured point** | At 200k tokens the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
+| **Messages wake an idle session** | When another session (Codex or Claude Code) sends a message, **the receiving session is woken by itself** once its input line is empty. **Your own typing is never erased.** | No more typing "check it" into a session to make it read its mail ([details](#messages-between-sessions-an-idle-session-wakes-up-by-itself)). |
+| **Self-evolution in two layers** | **What your use teaches stays on your machine as data; only general fixes can reach the code**, through four gates. | Orbit improves without the code becoming personal ([details](#self-evolution-agent-orbit-improves-itself-without-making-the-code-personal)). |
+| **One view of all of it** | The engine room and `cosmos-orbit watch` show tasks, evidence, reviews, the handoff mode, the panes a message can wake and the self-evolution mode. | What Orbit did is visible, not assumed ([details](#observe-the-same-work)). |
+
 ## Attach Orbit to the session you already use
 
 Requires macOS or Linux, Python 3.9+, Git, and an installed, authenticated provider CLI.
@@ -283,6 +294,14 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      question is still answered in place (it needs the answer you just read); the next request
      hands off. Claude Code only, and only in cmux or tmux; elsewhere Orbit tells you, as above.
      `cosmos-orbit context tell` goes back to telling.
+
+     **Measured on a real session (Claude Code 2.1, cmux, 2026-11-04): the request typed after the
+     checkpoint was held, `/clear` typed, and the fresh session in the same pane took the task over 2
+     seconds later and ran the request from its brief.** Three rules came from the first real runs:
+     the input is emptied first, because a prompt the hook blocked comes back into the input line
+     (cmux receives ctrl+u only as the raw byte, one press per line); only the session in the same
+     pane may take the handoff; and the carry line is typed only after that takeover, so it can never
+     land in the old session.
 4. An open handoff that nobody took **expires after 12 hours** and closes on compaction, so it can
    never hand a task to an unrelated session opened later in the same folder.
 5. Unattended work does the same without you: past the point, the next executor turn starts a
@@ -310,6 +329,66 @@ The handoff point follows the same three scopes as the on/off switch:
 
 `cosmos-orbit context on` restores the default. Unattended tasks take the point at creation;
 `--context-budget TOKENS` overrides it for one task. Measurement continues when handoff is off.
+
+## Messages between sessions: an idle session wakes up by itself
+
+Sessions can talk to each other: Codex to Claude Code, Claude Code to Claude Code, through a mailbox
+that each host reads in its hooks. **A hook runs only when something happens in that session**: you
+submit a prompt, a tool call ends, a turn ends. **A session waiting at its input line runs no hook, so a
+message sat unread until you typed "check it" into that session yourself**, which made you the
+messenger.
+
+**Orbit closes that gap.** Every Orbit hook records the terminal its session runs in (a cmux surface or
+a tmux pane). The sender calls one command right after it delivers a message:
+
+```sh
+cosmos-orbit wake --session RECEIVER_SESSION_ID --from codex     # or --surface PANE; both repeatable
+cosmos-orbit wake --session RECEIVER_SESSION_ID --check          # only report what that screen shows
+```
+
+A detached waker then looks at the receiver's screen and acts on what it sees:
+
+| The receiving screen | What Orbit does |
+|---|---|
+| working (`esc to interrupt`) | `--when-busy wait` (default): waits until the turn ends, then wakes it · `--when-busy skip`: nothing, because the mailbox delivers at the next tool call or turn end |
+| the input line is empty | **types one fixed line and Enter**; the receiving prompt hook delivers the message with it |
+| **you are typing there** | **never erases anything**: one notification, then it waits until the input is empty |
+| not an input box (a dialog, a shell) | types nothing; notifies and keeps looking |
+| not in cmux or tmux | notifies only (nothing can type there) |
+
+The line is fixed ASCII: `Orbit: a message from another session arrived. Read it and fold it into the
+task; reply only if a reply is needed.` **Orbit's prompt hook recognises it: it is never recorded as
+your prompt, never changes the goal, never triggers a handoff, and the session is told that the message
+is another agent's words, not your instruction.**
+
+Bounds, so two agents cannot keep each other busy: one waker per pane (it delivers every message
+waiting there), at least 20 seconds between two typed wakes in one pane, at most 20 per pane per hour,
+and a waker gives up after 30 minutes (the message stays in the mailbox). A pane that a newer session
+took over is not woken for the old one. **Typing follows the same switch as the automatic handoff**:
+`cosmos-orbit context auto` types, `cosmos-orbit context tell` only notifies.
+
+How the screen is read (measured on Claude Code 2.1 and Codex, plain text without colours): working
+shows `esc to interrupt`; Claude Code's input is the `❯` line between two rules, empty when nothing
+follows it or only its `Try "…"` placeholder; Codex's input is the `›` line, empty when it shows one of
+the placeholders found in its binary. **Anything else counts as your text: the safe direction.**
+
+Verified: `tests/verify_wake.py` (screens measured from real sessions; every rule has a control, and
+eight deliberate breakages each turn it red; real typing into a throwaway tmux session), and a live run
+in cmux with Claude Code: with text left in the input, nothing was touched for 7 seconds and one
+notification appeared; once the input was emptied, the line was typed, submitted and answered.
+
+Connecting a mailbox is one call in its send command, for example:
+
+```python
+import shutil, subprocess
+orbit = shutil.which('cosmos-orbit')
+if orbit:   # best effort: a send never fails because of it
+    subprocess.run([orbit, 'wake', '--from', sender, '--when-busy', 'skip' if delivers_mid_turn else 'wait',
+                    '--session', receiver_session_id], capture_output=True, timeout=20)
+```
+
+Where it keeps its records, under the Orbit home: the `terminals` table (session → pane), `wake/log.jsonl`
+(each waker run and its outcome), and a `message_wake` event in the receiving session's task.
 
 ## Unattended in a private clone
 
@@ -430,7 +509,11 @@ cosmos-orbit evolve
 ```
 
 The terminal and engine-room view use the same task store, completion checklist, executor
-evidence, call history, fixed-check exit codes and stop/retry reason, for both entrances. Effects
+evidence, call history, fixed-check exit codes and stop/retry reason, for both entrances. **Both also
+show continuity at a glance: the handoff mode (who types `/clear`), how many panes a message can wake
+and the last wake's outcome, and the self-evolution mode with its due candidates.** A task's detail
+says when Orbit is typing the handoff or when that failed and you need to type `/clear` yourself, and
+its history lists automatic handoffs and message wakes. Effects
 represent observed execution and transport; unknown context and remote progress remain unknown.
 The six-language view respects reduced motion. Use the same `--home PATH` (or `HARNESS_HOME`) for
 hooks, worker and observers. Observation does not start model work.

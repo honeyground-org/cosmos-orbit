@@ -72,7 +72,10 @@ def build():
                                       'notes': 'Synthetic fixture: approach and decisions the ledger does not already hold.',
                                       'files': [{'path': 'src/module.py', 'exists': True}]}] if i == 6 else [])
     state = dict(tasks=tasks, scope='demo', worker_running=True, at='', events=[], model_options={},
-                 labels=dict(en=dict(running='Running', idle='Idle')))
+                 labels=dict(en=dict(running='Running', idle='Idle')),
+                 continuity={'handoff_mode': 'auto', 'evolve': {'mode': 'local', 'candidates': 0, 'due': 0, 'last': None},
+                             'wake': {'reachable': 3, 'recent': [{'at': '2026-11-04T05:17:35+00:00', 'terminal': 'cmux',
+                                                                  'target': 'demo-pane', 'sender': 'codex', 'outcome': 'woken'}]}})
     history_start = html.index('async function loadEarlier(')
     history_end = html.index("$('newTask').onclick", history_start)
     html = html[:history_start] + "async function loadEarlier(){}\n" + html[history_end:]
@@ -82,7 +85,7 @@ def build():
     start = html.index('async function poll()')
     end = html.index('\nasync function action', start)
     html = html[:start] + 'const demoState=' + json.dumps(state) + ''';let demoTick=0;
-const demoEvents=[['model_started','Orbit sends the goal and retained work to the engine.'],['model_finished','The engine returns a proposed result to Orbit.'],['session_checkpoint','Orbit records a context checkpoint.'],['checks_recorded','Orbit records fixed-check evidence.'],['feedback_queued','A new instruction reaches the control layer.']];
+const demoEvents=[['model_started','Orbit sends the goal and retained work to the engine.'],['model_finished','The engine returns a proposed result to Orbit.'],['session_checkpoint','Orbit records a context checkpoint.'],['checks_recorded','Orbit records fixed-check evidence.'],['feedback_queued','A new instruction reaches the control layer.'],['message_wake','Another session sent a message; Orbit woke this idle session.']];
 async function poll(){
  demoTick++;data=demoState;data.at=new Date().toISOString();
  data.tasks.forEach((t,i)=>{const [kind,note]=demoEvents[(demoTick+i)%demoEvents.length];t.events.unshift({seq:demoTick,at:data.at,kind,note});t.events=t.events.slice(0,12)});

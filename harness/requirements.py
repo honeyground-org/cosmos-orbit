@@ -162,8 +162,11 @@ def classify(text, learned=None):
     if _SYSTEM.match(stripped):
         return 'system'
     from .typist import CARRY_LINE
+    from .wake import WAKE_LINE
     if stripped == CARRY_LINE:
         return 'trivial'      # typed by Orbit's auto handoff: the request itself is already in the ledger
+    if stripped == WAKE_LINE:
+        return 'trivial'      # typed by Orbit for a message from another session: not the user's words
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
     if not bare or bare in _TRIVIAL or _GO_ONLY.match(_compact(stripped) or ' '):
         return 'trivial'

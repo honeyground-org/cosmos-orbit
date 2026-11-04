@@ -48,6 +48,8 @@ class Store:
             reply TEXT, attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
             error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL,
             UNIQUE(task_id,contract_hash,target,question));
+          CREATE TABLE IF NOT EXISTS terminals (session TEXT PRIMARY KEY, host TEXT, kind TEXT, cli TEXT, target TEXT,
+            surface TEXT, state TEXT NOT NULL, at TEXT NOT NULL);
         ''')
 
     def create(self, workspace, provider, prompt):
