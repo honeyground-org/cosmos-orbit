@@ -29,8 +29,8 @@ PROJECT_PREFIX = 'handoff_at:'
 TAIL_BYTES = 4_000_000
 RECORD_STEP = 10_000          # store a measurement when it moved this much (keeps the ledger readable)
 INVITE_TTL_SECONDS = 12 * 3600  # an open handoff nobody took expires (observed: taken 18 hours later by unrelated work)
-OPEN_STATES = ('recommended', 'asked', 'checkpointed', 'told', 'auto')
-INVITING_STATES = ('checkpointed', 'told', 'auto')
+OPEN_STATES = ('recommended', 'asked', 'checkpointed', 'told', 'auto', 'auto_failed')
+INVITING_STATES = ('checkpointed', 'told', 'auto', 'auto_failed')
 MODE_KEY = 'handoff_mode'     # 'tell' (default): ask the user to type /clear · 'auto': type it where a typist exists
 
 
@@ -353,11 +353,25 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
         state.update(state='auto', auto_at=now())
         store.save(task, task['status'], 'handoff_auto', {'terminal': terminal['kind'], 'layer': 'context'})
-    (spawn or typist.spawn)(terminal, typist.handoff_steps(host), store.home / 'hooks.log')
+    (spawn or typist.spawn)(terminal, typist.handoff_steps(host, typist.clear_presses(text)), store.home / 'hooks.log',
+                            home=store.home, task=task['id'])
     live = data.get('context_live') or {}
     return {'decision': 'block', 'reason': (
         'Orbit: handing off to a fresh context (context %s tokens >= handoff point %s). Your request is carried over '
         'and runs there by itself; there is nothing to retype.' % (_k(live.get('tokens')), _k(state.get('limit'))))}
+
+
+def auto_failed(store, task_id, reason):
+    """The typist could not hand off: fall back to telling. The request stays carried for a manual /clear."""
+    try:
+        with store.lock('task:' + task_id):
+            task = store.get(task_id)
+            state = task['data'].get('handoff_state') or {}
+            if state.get('state') == 'auto':
+                state.update(state='auto_failed', failed_at=now())
+                store.save(task, task['status'], 'handoff_auto_failed', {'reason': str(reason)[:200], 'layer': 'context'})
+    except (RuntimeError, ValueError):
+        pass
 
 
 def mark_carried_served(store, task, session):
@@ -401,6 +415,9 @@ def handoff_lines(data, prefix, tid, closed=False):
             lines.append("CONTEXT %s tokens ≥ handoff point %s. At the next natural boundary record a checkpoint: "
                          "%s checkpoint %s --next '…' --notes '…' [--file path]. A fresh session then continues from the ledger "
                          "instead of re-reading this context." % (_k(live.get('tokens')), _k(state.get('limit')), prefix, tid))
+        elif state.get('state') == 'auto_failed':
+            lines.append('HANDOFF READY, but the automatic /clear did not take effect: ask the user to type /clear; '
+                         'the request they made is carried over to the fresh session.')
         elif state.get('state') in ('checkpointed', 'told'):
             lines.append('HANDOFF READY: checkpoint saved. Orbit cannot clear this session itself: the user types /clear '
                          '(Claude Code) or /new (Codex) and the fresh session takes this task over; otherwise the next '

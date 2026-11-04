@@ -147,7 +147,7 @@ def main():
     fake = {'kind': 'cmux', 'cli': '/bin/echo', 'target': 'PANEL-1'}
     try:
         typist.detect = lambda env=None: fake
-        typist.spawn = lambda terminal, steps, log: typed.append((terminal, steps))
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
         tid_e, pay_e, _, told_e = tell(store, root_e, base, 'e1')
         out = attach.handle(store, 'prompt', dict(pay_e, prompt='Also add CSV export for the report'), 'claude')
         check('tell mode (default): the request goes through, nothing typed (control)', out is None or 'decision' not in out)
@@ -163,8 +163,13 @@ def main():
         request = 'Add CSV export for the report\nwith one row per item'
         out = attach.handle(store, 'prompt', dict(pay_f, prompt=request), 'claude')
         check('a request is blocked here and carried over', out and out.get('decision') == 'block' and 'carried over' in out['reason'], out)
-        check('the typist got /clear, Enter, the fixed carry line, Enter',
-              typed and [s[1] for s in typed[-1][1] if s[0] != 'wait'] == ['/clear', 'enter', typist.CARRY_LINE, 'enter'], typed)
+        keys = [s[1] for s in typed[-1][1] if s[0] in ('key', 'text')] if typed else []
+        presses = keys.index('/clear') if '/clear' in keys else -1
+        check('the typist empties the input first (one ctrl+u per line of the restored request, at least), then '
+              '/clear, Enter, the carry line, Enter', presses >= 2 and set(keys[:presses]) == {'ctrl+u'}
+              and keys[presses:] == ['/clear', 'enter', typist.CARRY_LINE, 'enter'], keys)
+        check('…and the carry line waits until the task was taken over', typed and ('adopted', 25.0) in typed[-1][1]
+              and typed[-1][2] == tid_f, typed[-1][1] if typed else None)
         data = store.get(tid_f)['data']
         check('the request is in the ledger (carried_prompt) and the state is auto',
               data['carried_prompt']['text'] == request and data['handoff_state']['state'] == 'auto' and 'handoff_auto' in kinds(store, tid_f))
@@ -198,18 +203,53 @@ def main():
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
-    check('cmux: send-panel text, send-key-panel enter', typist.command(cmux, text='/clear') == ['cmux', 'send-panel', '--panel', 'P', '--', '/clear']
-          and typist.command(cmux, key='enter') == ['cmux', 'send-key-panel', '--panel', 'P', 'enter'])
-    check('tmux: send-keys -l text, send-keys Enter', typist.command(tmux, text='/clear') == ['tmux', 'send-keys', '-t', '%3', '-l', '/clear']
-          and typist.command(tmux, key='enter') == ['tmux', 'send-keys', '-t', '%3', 'Enter'])
+    check('cmux: send-panel text, send-key-panel enter and ctrl+u', typist.command(cmux, text='/clear') == ['cmux', 'send-panel', '--panel', 'P', '--', '/clear']
+          and typist.command(cmux, key='enter') == ['cmux', 'send-key-panel', '--panel', 'P', 'enter']
+          and typist.command(cmux, key='ctrl+u') == ['cmux', 'send-key-panel', '--panel', 'P', 'ctrl+u'])
+    check('tmux: send-keys -l text, send-keys Enter and C-u', typist.command(tmux, text='/clear') == ['tmux', 'send-keys', '-t', '%3', '-l', '/clear']
+          and typist.command(tmux, key='enter') == ['tmux', 'send-keys', '-t', '%3', 'Enter']
+          and typist.command(tmux, key='ctrl+u') == ['tmux', 'send-keys', '-t', '%3', 'C-u'])
+    check('ctrl+u presses cover every line of the request (wrapped lines too)', typist.clear_presses('one line') == 3
+          and typist.clear_presses('a\nb\nc') == 5 and typist.clear_presses('x' * 130) == 5)
     check('Codex types /new', [v for k, v in typist.handoff_steps('codex') if k == 'text'][0] == '/new')
     check('detect: nothing outside cmux or tmux (control)', typist.detect({}) is None)
     ran = []
     try:
-        typist.run(tmux, typist.handoff_steps('claude'), runner=lambda argv: ran.append(argv) or (1 if len(ran) == 2 else 0), sleep=lambda s: None)
+        typist.run(tmux, typist.handoff_steps('claude', 2), runner=lambda argv: ran.append(argv) or (1 if argv[-1] == '/clear' else 0),
+                   sleep=lambda s: None, adopted=lambda: True)
         check('a failed key stops the typing', False)
     except RuntimeError:
-        check('a failed key stops the typing (the carry line is never typed after a failed /clear)', len(ran) == 2)
+        check('a failed key stops the typing (the carry line is never typed after a failed /clear)', not any(typist.CARRY_LINE in a for a in ran))
+    ran, ticks = [], iter(range(0, 1000, 5))
+    try:
+        typist.run(tmux, typist.handoff_steps('claude', 2), runner=lambda argv: ran.append(argv) or 0, sleep=lambda s: None,
+                   adopted=lambda: False, clock=lambda: next(ticks))
+        check('no takeover → the carry line is not typed', False)
+    except RuntimeError as error:
+        check('no takeover within the wait → the carry line is not typed into the old session (the observed second defect)',
+              not any(typist.CARRY_LINE in a for a in ran) and 'did not take the task over' in str(error), ran)
+    ran = []
+    typist.run(tmux, typist.handoff_steps('claude', 2), runner=lambda argv: ran.append(argv) or 0, sleep=lambda s: None, adopted=lambda: True)
+    check('takeover seen → the carry line is typed (control)', any(typist.CARRY_LINE in a for a in ran))
+
+    print('④-b a failed automatic handoff falls back to telling, and a manual /clear still carries the request')
+    root_k = make_repo(base, 'repo-failed')
+    attach.set_switch(store, 'on', root_k)
+    tid_k, pay_k, _, _ = tell(store, root_k, base, 'k1')
+    with store.lock('task:' + tid_k):
+        task = store.get(tid_k)
+        task['data']['handoff_state'].update(state='auto', auto_at=now())
+        task['data']['carried_prompt'] = {'text': 'Add CSV export', 'at': now(), 'from_session': 'k1'}
+        store.save(task, task['status'], 'test_setup', {})
+    continuity.auto_failed(store, tid_k, 'the fresh session did not take the task over')
+    data = store.get(tid_k)['data']
+    lines = continuity.handoff_lines(data, 'cosmos-orbit', tid_k)
+    check('state auto_failed and the brief asks for a manual /clear', data['handoff_state']['state'] == 'auto_failed'
+          and any('did not take effect' in l for l in lines) and 'handoff_auto_failed' in kinds(store, tid_k), lines)
+    start = attach.handle(store, 'session-start', {'cwd': str(root_k), 'session_id': 'k2', 'source': 'clear'}, 'claude')
+    brief = start['hookSpecificOutput']['additionalContext'] if start else ''
+    check('…the manual /clear session takes it over and gets the carried request', (store.session_task('k2') or {}).get('task_id') == tid_k
+          and 'Add CSV export' in brief, brief[-300:])
 
     print('⑤ the CLI switch')
     cli = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home)]
@@ -222,17 +262,24 @@ def main():
     if not shutil.which('tmux'):
         print('  skip  tmux is not installed')
     else:
-        name = 'orbit-verify-%d' % os.getpid()
-        sink = base / 'typed.txt'
-        subprocess.run(['tmux', 'new-session', '-d', '-s', name, 'cat > %s' % sink], check=True)
-        try:
-            pane = subprocess.run(['tmux', 'list-panes', '-t', name, '-F', '#{pane_id}'], capture_output=True, text=True).stdout.strip()
-            typist.run({'kind': 'tmux', 'cli': shutil.which('tmux'), 'target': pane}, typist.handoff_steps('claude', settle=0.2, start=0.2))
-            time.sleep(0.5)
-            lines = sink.read_text().splitlines() if sink.exists() else []
-            check('the pane received /clear and the carry line, each submitted', lines == ['/clear', typist.CARRY_LINE], lines)
-        finally:
-            subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
+        for label, steps, expected in (
+                ('control — the first real run: /clear typed after the restored request joins it',
+                 [('text', '/clear'), ('key', 'enter')], ['restored blocked request/clear']),
+                ('ctrl+u first: the pane receives /clear and the carry line, each on its own',
+                 typist.handoff_steps('claude', 2, settle=0.2), ['/clear', typist.CARRY_LINE])):
+            name = 'orbit-verify-%d-%d' % (os.getpid(), len(expected[0]))
+            sink = base / ('typed-%d.txt' % len(expected[0]))
+            subprocess.run(['tmux', 'new-session', '-d', '-s', name, 'cat > %s' % sink], check=True)
+            try:
+                pane = subprocess.run(['tmux', 'list-panes', '-t', name, '-F', '#{pane_id}'], capture_output=True, text=True).stdout.strip()
+                time.sleep(0.3)
+                subprocess.run(['tmux', 'send-keys', '-t', pane, '-l', 'restored blocked request'], check=True)  # like the host
+                typist.run({'kind': 'tmux', 'cli': shutil.which('tmux'), 'target': pane}, steps, adopted=lambda: True)
+                time.sleep(0.5)
+                lines = sink.read_text().splitlines() if sink.exists() else []
+                check(label, lines == expected, lines)
+            finally:
+                subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
 
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
