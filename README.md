@@ -190,6 +190,41 @@ Unattended work follows the same rule: a correction marks the definitions stale,
 response proposes the revised set, and Orbit adopts it as a new revision. A completion claim made
 while the definitions are still stale goes back to the executor instead of to the review.
 
+## Self-evolution, without making the code personal
+
+Orbit improves itself in two layers, and keeps them apart on purpose.
+
+**The personal layer is always on and never leaves your machine.** What your usage teaches - how you
+phrase a question versus a request, where your sessions should hand off - is learned from your own
+store and applied automatically. `cosmos-orbit evolve` shows it; `cosmos-orbit evolve --reset-learned`
+forgets it. None of it is ever written into the code.
+
+**The public layer is off by default; a maintainer turns it on.** When the same Orbit defect repeats -
+a hook that fails, a review that ends without an answer, a ledger someone had to correct - an agent
+works in an isolated worktree of the upstream repository: it writes a failing check first, then the
+smallest general fix. The change is merged only if every gate passes:
+
+1. **Checks:** every check passes in the worktree, and a new check fails on the base commit (it
+   really captures the defect).
+2. **No personal traces:** no added line carries the user's home, name, host, addresses, ids,
+   workspace paths or any phrase from their own prompts.
+3. **No vocabulary in code:** added lines are plain ASCII. Words people use belong to the personal
+   layer, as learned data; a fix that is really a value or a word list tuned to one person is refused.
+4. **Generality:** a fresh, read-only reviewer judges the change useful to any user, with any language
+   and projects, and free of regressions.
+
+A change that fails any gate is never pushed. Runs are event-driven (a hook sees a repeated defect),
+one at a time; a candidate is tried again only when it occurs again, at most three times. Turning it on
+counts only what happens from then on.
+
+```sh
+cosmos-orbit evolve                                        # personal layer, candidates, recent runs
+cosmos-orbit evolve --mode propose --repo ~/src/cosmos-orbit   # gated fixes kept as local branches + reports
+cosmos-orbit evolve --mode merge --repo ~/src/cosmos-orbit     # maintainers: gated fixes pushed and installed
+cosmos-orbit evolve --run                                  # one attempt now
+cosmos-orbit evolve --mode local                           # back to learning only
+```
+
 ## Context and mid-task handoff
 
 A session re-reads its whole context on every turn, cached or not, and long contexts also dilute

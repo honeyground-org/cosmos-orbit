@@ -271,7 +271,8 @@ def remember_label(store, task_id, text, label, by):
     from .requirements import learn, ending_key
     table = learn(learned(store), text, label)
     store.preference(LEARNED_KEY, json.dumps(table, ensure_ascii=False))
-    store._event(task_id, 'prompt_labeled', {'ending': ending_key(text), 'label': label, 'by': by})
+    with store.db:
+        store._event(task_id, 'prompt_labeled', {'ending': ending_key(text), 'label': label, 'by': by})
 
 
 def workspace_marks(root):
@@ -1074,7 +1075,10 @@ def handle(store, event, payload, host):
     try:
         return _handle(store, event, payload, host)
     except Exception as error:  # a hook must not break the user's session
-        hook_log(store, event + ' error: ' + repr(error))
+        import traceback
+        frames = [f for f in traceback.extract_tb(error.__traceback__) if os.sep + 'harness' + os.sep in f.filename]
+        where = (' at %s:%s' % (Path(frames[-1].filename).name, frames[-1].name)) if frames else ''
+        hook_log(store, event + ' error: ' + repr(error)[:300] + where)
         return None
 
 
@@ -1085,6 +1089,9 @@ def _handle(store, event, payload, host):
     if value != 'on' or not is_git:
         return None
     session = payload.get('session_id')
+    if event in ('session-end', 'stop'):
+        from .evolve import maybe_start
+        maybe_start(store)  # one cheap check; a due self-evolution run starts in the background
     if event == 'session-end':
         if session:
             store.end_session(session)  # the event that frees its task for the next session

@@ -1,6 +1,7 @@
 """Natural-language tasks, durable feedback and an optional serial worker."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -9,7 +10,7 @@ import time
 from .engine import Engine
 from .context import limit_for
 from .providers import doctor
-from .store import Store
+from .store import Store, now
 from .workspace import verify
 from . import failures
 
@@ -125,8 +126,12 @@ def main(argv=None):
     detach_cmd.add_argument('id', nargs='?')
     detach_cmd.add_argument('--workspace', default='.')
     sub.add_parser('lessons', help='Corrections repeated across tasks (guard-rule candidates)').add_argument('--min', type=int, default=2)
-    evolve_cmd = sub.add_parser('evolve', help='Self-evolution: what this installation learned locally')
+    evolve_cmd = sub.add_parser('evolve', help='Self-evolution: local learning, and (maintainers) repeated defects fixed behind gates')
     evolve_cmd.add_argument('--reset-learned', action='store_true', help='Forget the locally learned prompt endings')
+    evolve_cmd.add_argument('--mode', choices=('local', 'propose', 'merge'), help='local (default) · propose: gated fix kept as a local branch · merge: gated fix pushed and installed')
+    evolve_cmd.add_argument('--repo', help='A clone of the upstream repository for propose and merge')
+    evolve_cmd.add_argument('--run', action='store_true', help='Run one evolution attempt now')
+    evolve_cmd.add_argument('--candidate', help='The candidate key to attempt (default: the most frequent due one)')
     checkpoint_cmd = sub.add_parser('checkpoint', help='Record the next step and working notes so a fresh session can continue')
     checkpoint_cmd.add_argument('id')
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
@@ -171,7 +176,20 @@ def main(argv=None):
     recover = sub.add_parser('recover', help='Preserve files and abandon a historical pending file proposal')
     recover.add_argument('id')
     recover.add_argument('--keep-current-files', required=True, action='store_true')
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exit_:
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if exit_.code not in (0, None) and 'hook' in raw:
+            # A hook the CLI rejects fails in the host with only a usage line; record it so it can be seen and fixed.
+            home = raw[raw.index('--home') + 1] if '--home' in raw[:-1] else os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')
+            try:
+                log = Path(home).expanduser() / 'hooks.log'
+                with log.open('a', encoding='utf-8') as handle:
+                    handle.write(now() + ' hook usage error: ' + ' '.join(a for a in raw if not a.startswith('/'))[:300] + '\n')
+            except OSError:
+                pass
+        raise
     if args.command is None:
         from .launcher import launch
         return launch(args.home)
@@ -361,13 +379,13 @@ def main(argv=None):
             from .attach import lessons
             result = lessons(store, args.min)
         elif args.command == 'evolve':
-            from .attach import learned, LEARNED_KEY
+            from . import evolve
+            from .attach import LEARNED_KEY
             if args.reset_learned:
                 store.preference(LEARNED_KEY, '{}')
-            table = learned(store)
-            result = {'learned_endings': len(table), 'settled': sorted(
-                k for k, v in table.items() if sum(v.values()) >= 2 and 0 in (v.get('change', 0), v.get('no_change', 0))),
-                'stored_in': str(store.home)}
+            if args.mode or args.repo:
+                evolve.configure(store, args.mode, args.repo)
+            result = evolve.run(store, args.candidate) if args.run else evolve.view(store)
         elif args.command == 'checkpoint':
             from .continuity import record_checkpoint
             result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files),

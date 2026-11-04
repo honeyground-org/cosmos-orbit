@@ -36,7 +36,8 @@ GROUPS = [
         ('cosmos-orbit watch --once   ·   cosmos-orbit status TASK_ID', 'One model-free snapshot, or the full record of one task.'),
         ('cosmos-orbit verify TASK_ID', 'Recheck a claimed result now: fixed checks plus one independent review. Missing evidence is not completion.'),
         ('cosmos-orbit lessons', 'Corrections repeated across tasks: candidates for a guard rule, counted from the ledger.'),
-        ('cosmos-orbit evolve   ·   cosmos-orbit evolve --reset-learned', 'What this installation learned locally from the executor\'s decisions (never in the code), or forget it.')])
+        ('cosmos-orbit evolve   ·   cosmos-orbit evolve --reset-learned', 'What this installation learned locally from the executor\'s decisions (never in the code), or forget it.'),
+        ('cosmos-orbit evolve --mode propose|merge --repo PATH', 'Maintainers: repeated Orbit defects fixed in a worktree behind four gates (checks, no personal traces, no vocabulary, general review).')])
 ]
 NOTE = ('Use --home PATH (or HARNESS_HOME) consistently for hooks, worker and observers. '
         'Viewing help, briefs or the dashboard never starts model work; the only model call after a claim is the one review.')
