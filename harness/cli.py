@@ -125,6 +125,8 @@ def main(argv=None):
     detach_cmd.add_argument('id', nargs='?')
     detach_cmd.add_argument('--workspace', default='.')
     sub.add_parser('lessons', help='Corrections repeated across tasks (guard-rule candidates)').add_argument('--min', type=int, default=2)
+    evolve_cmd = sub.add_parser('evolve', help='Self-evolution: what this installation learned locally')
+    evolve_cmd.add_argument('--reset-learned', action='store_true', help='Forget the locally learned prompt endings')
     checkpoint_cmd = sub.add_parser('checkpoint', help='Record the next step and working notes so a fresh session can continue')
     checkpoint_cmd.add_argument('id')
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
@@ -358,6 +360,14 @@ def main(argv=None):
         elif args.command == 'lessons':
             from .attach import lessons
             result = lessons(store, args.min)
+        elif args.command == 'evolve':
+            from .attach import learned, LEARNED_KEY
+            if args.reset_learned:
+                store.preference(LEARNED_KEY, '{}')
+            table = learned(store)
+            result = {'learned_endings': len(table), 'settled': sorted(
+                k for k, v in table.items() if sum(v.values()) >= 2 and 0 in (v.get('change', 0), v.get('no_change', 0))),
+                'stored_in': str(store.home)}
         elif args.command == 'checkpoint':
             from .continuity import record_checkpoint
             result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files),

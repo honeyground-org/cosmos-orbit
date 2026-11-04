@@ -108,12 +108,15 @@ taker) or when the sessions that held it have ended (Claude Code reports Session
 so a Codex task stays with its session until a handoff). Only a session that is new when Orbit first
 sees it can take over; a session already open without a task — or one that was mid-conversation when the
 switch was turned on — starts its own. A conversation resumed under a new id keeps its own task. Prompts
-from one session never land in another session's task. Host notifications are ignored.
+from one session never land in another session's task, and a session keeps its open task wherever its
+shell moves (`cd` into another repository does not switch tasks). Host notifications are ignored.
 
 What happens in an attached session:
 
-1. The first substantial prompt becomes the goal. Every later prompt is recorded; a prompt that
-   answers an open question is applied as a correction. The goal is never silently rewritten.
+1. The first substantial request becomes the goal; a question starts nothing. A new task keeps the
+   user's last few prompts from the host's transcript as context, so a short follow-up ("fix it")
+   still means something to a fresh session and to the reviewer. Every later prompt is recorded; a
+   prompt that answers an open question is applied as a correction. The goal is never silently rewritten.
    Corrections typed with `cosmos-orbit feedback` are marked as command-line corrections: the
    executor's own shell can run that command, so the reviewer weighs them as claims. Your prompts
    are your words.
@@ -149,13 +152,22 @@ Real work keeps growing: a case is added, a feature widens, a rule changes. Ever
 revise what "done" means, or the review checks yesterday's task. Orbit makes that a rule instead of
 a habit:
 
-1. Each prompt is classified without a model. A go-ahead (`continue`, `진행해`) or an information
-   question is only recorded; a request phrased as a question ("can you also add CSV export?") and a
-   short refusal ("no", "안돼") count as changes. When unsure, Orbit counts it: a missed change costs
-   more than one `done --keep`. Host notifications that arrive through the same hook (background tasks, monitors,
-   slash-command echoes) are ignored: only a person's words set or change a goal. Anything else is a
-   **requirement change**: it joins the corrections that bind the independent review, and the
-   session gets one short notice, not the whole brief again.
+1. Each prompt is classified without a model, and **Orbit decides only the clear cases**. A go-ahead
+   (`continue`, `진행해`) or a question ("did you update the README?", "잘 반영됐어?") is only
+   recorded; a request ("can you also add CSV export?", "fix the login"), a short refusal ("no",
+   "안돼") or added scope ("PDF too?") is a **requirement change**: it joins the corrections that bind
+   the independent review, and the session gets one short notice, not the whole brief again. Host
+   notifications that arrive through the same hook (background tasks, monitors, slash-command echoes)
+   are ignored: only a person's words set or change a goal.
+   A message that names work without asking for it ("README update?") is **unsure**, and the
+   executor — which reads the whole conversation — decides. With no open task Orbit opens a *draft*:
+   `done` confirms it, and a draft nobody confirmed closes by itself at the end of the turn when no
+   file changed (if files changed, the executor is asked once). Inside a task it is a *possible
+   change*: the claim waits for `done --add` or `done --keep`, without a Stop interruption.
+   Each such decision is a label, and the labels teach **this installation**: once the executor has
+   decided the same ending the same way twice, Orbit classifies it on its own. What one person's
+   phrasing turns out to mean stays in that person's store; the code holds the mechanism, never
+   anyone's phrases. `cosmos-orbit evolve --reset-learned` forgets it.
 2. Until the result and verification goals are revised, a completion claim is refused and the Stop
    hook asks the executor once to revise them. The executor understands the change, so it writes
    the revision:
@@ -339,6 +351,7 @@ cosmos-orbit status TASK_ID
 cosmos-orbit events TASK_ID
 cosmos-orbit result TASK_ID
 cosmos-orbit lessons
+cosmos-orbit evolve
 ```
 
 The terminal and engine-room view use the same task store, completion checklist, executor

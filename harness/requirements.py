@@ -5,6 +5,11 @@ the result goals (completion definitions) and the verification goals (fixed chec
 is reviewed, or the review checks yesterday's task. This module classifies a new user message, records the
 pending change, and keeps an append-only revision history. It never calls a model: the executor, which
 understands the change, writes the revised definitions; Orbit makes sure that happens and records it.
+
+Orbit decides only the clear cases. A message that names work without asking for it ("README 업데이트?") is
+'unsure': the executor, which reads the whole conversation, decides, and its decision becomes a label that
+teaches this installation (see `learn`). What one person's phrasing turns out to mean stays in that person's
+store; the code holds the mechanism, never anyone's phrases.
 """
 import re
 
@@ -18,12 +23,6 @@ _TRIVIAL = {
 }
 
 
-_REQUEST = re.compile(
-    r'(해\s?줘|해\s?줄|해\s?주|주세요|줄래|줄\s?수|바꿔|바꾸|추가|넣어|빼\s?줘|빼고|지원|고쳐|고치|만들어|수정|업데이트|반영|'
-    r'해야|하자|할래|해\s?볼래|되게|되도록|하도록|처리해|적용|줘|주라|주시|수\s?있을까|수\s?있나|수\s?있어|될까|'
-    r"\bcan you\b|\bcould you\b|\bwould you\b|\bwill you\b|\bplease\b|\balso\b|\badd\b|\bmake\b|\bsupport\b|"
-    r"\bchange\b|\bshould\b|\blet's\b|\bfix\b|\bupdate\b|\binclude\b|\bremove\b|\bhandle\b|\binstead\b|"
-    r"\btoo\s*\?|\bas well\b|\bhow about\b|\bwhat about\b)")
 # Scope added with no request verb at all: Korean "PDF도?" / "탭도 되나요?" ("…too?") and "PDF는요?" ("what about…?"),
 # English "And PDF?". The word before 도 must be a word plus the particle, not a noun that ends in 도 (정도, 속도 …).
 _ALSO_KO = re.compile(r'(\S+)도\s*(?:[?？]|(?:되|돼|가능|있|할|해|같이|포함|넣)[^?？]*[?？])')
@@ -68,25 +67,109 @@ def _adds_scope(text):
     return any(m.group(1).lstrip('(\'"') + '도' not in _NOT_PARTICLE for m in _ALSO_KO.finditer(text))
 
 
-def classify(text):
-    """'system' | 'requirement' | 'question' | 'trivial'. Only a person's words can set or change a goal:
-    host notifications (background tasks, monitors, slash-command echoes) arrive through the same hook and are
-    ignored. A question or a go-ahead does not change what must be delivered."""
+# An explicit ask is a request even when the sentence ends like a question ("수정해줄 수 있어?", "Can you add …?").
+_ASK = re.compile(
+    r'(해\s?줘|해\s?줄|해\s?주세요|해\s?주시|주세요|줄래|줄\s?수|주실|주라|수\s?있을까|수\s?있나|수\s?있어|될까|'
+    r'해\s?볼래|해\s?보자|해\s?봐|하자|할래|면\s?어때|게\s?어때|건\s?어때|'
+    r"\bcan you\b|\bcould you\b|\bwould you\b|\bwill you\b|\bplease\b|\blet's\b|\bhow about\b|\bwhat about\b|"
+    r"\btoo\s*\?|\bas well\b|\binstead\b)")
+# Imperative verbs and obligations: a request, unless the sentence ends as a status question ("고쳐졌어?").
+_IMPERATIVE = re.compile(
+    r'(고쳐(?![졌진져])|고치자|바꿔(?!졌)|바꾸자|넣어(?!졌)|빼\s?줘|빼고|만들어(?![졌진져])|추가\s?해|수정\s?해|업데이트\s?해|'
+    r'반영\s?해|적용\s?해|지원\s?해|처리\s?해|해야|하도록|되도록|되게|줘|'
+    r"\badd\b|\bmake\b|\bsupport\b|\bchange\b|\bshould\b|\bfix\b|\bupdate\b|\binclude\b|\bremove\b|\bhandle\b|\balso\b)")
+# Words that only name work. Without an ask or an imperative the message may be a question about that work.
+_WORK = re.compile(r'(수정|업데이트|추가|반영|지원|적용|변경|개선|삭제|구현|고침|implement)')
+# Endings that make a Korean sentence a question even without "?" ("…된 것인지").
+_ASKING_END = re.compile(r'(인지|는지|은지|건지|나요|습니까|거니|건가|인가요|는가요)$')
+# Status questions: about what is or was, not a request for new work.
+_STATUS_END = re.compile(r'(인지|는지|은지|건지|던지|거야|거지|거니|거예요|건가|건가요|인가|인가요|는가|나요|습니까|'
+                         r'맞아|맞나|맞지|맞죠|맞니|아니야|아닌가|아냐|되나|되니|돼|돼요|됩니까)$')
+_PAST_TAIL = {'', '어', '어요', '나', '나요', '니', '지', '죠', '지요', '는지', '는가', '냐', '습니까', '을까', '던가', '네', '군', '구나', '음'}
+_EN_STATUS = re.compile(r"^(did|does|do|is|are|am|was|were|has|have|had|isn't|wasn't|didn't|doesn't|hasn't|haven't|aren't|weren't)\b")
+
+
+def _last_word(text):
+    words = re.sub(r'[\s?？!.~。…]+$', '', text).split()
+    return words[-1] if words else ''
+
+
+def _past(word):
+    """A Korean past-tense ending: a syllable with the ㅆ final consonant, then at most a short sentence ending."""
+    for index in range(len(word) - 1, -1, -1):
+        code = ord(word[index]) - 0xAC00
+        if 0 <= code < 11172 and code % 28 == 20:
+            return word[index + 1:] in _PAST_TAIL
+    return False
+
+
+def _status_question(text):
+    if _EN_STATUS.match(text.lower()):
+        return True
+    word = _last_word(text)
+    return bool(word) and (bool(_STATUS_END.search(word)) or _past(word))
+
+
+def ending_key(text):
+    """What this installation learns from: the last word and whether the message asked something."""
+    stripped = (text or '').strip()
+    return _last_word(stripped).lower()[:24] + ('?' if stripped.endswith(('?', '？')) else '')
+
+
+def classify(text, learned=None):
+    """'system' | 'trivial' | 'question' | 'requirement' | 'unsure'.
+
+    Only a person's words can set or change a goal: host notifications arrive through the same hook and are
+    ignored. A question or a go-ahead does not change what must be delivered. 'unsure' goes to the executor;
+    `learned` ({ending: {'change': n, 'no_change': m}}) resolves it once this installation has seen how the
+    executor decided the same ending before."""
     stripped = (text or '').strip()
     if _SYSTEM.match(stripped):
         return 'system'
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
     if not bare or bare in _TRIVIAL or _GO_ONLY.match(_compact(stripped) or ' '):
         return 'trivial'
-    if stripped.endswith(('?', '？')) and not _REQUEST.search(stripped.lower()) and not _adds_scope(stripped):
-        return 'question'  # an information question; a request phrased as a question falls through
-    return 'requirement'  # when unsure, count it: a missed change costs more than one `done --keep`
+    lowered = stripped.lower()
+    asking = stripped.endswith(('?', '？')) or bool(_ASKING_END.search(_last_word(stripped)))
+    if not asking:
+        return 'requirement'  # a statement that reaches the agent is an instruction; a missed change costs more
+    if _ASK.search(lowered) or _adds_scope(stripped):
+        return 'requirement'
+    if _status_question(stripped):
+        return 'question'      # "잘 수정된 것인지?", "Did you update the README?"
+    if _IMPERATIVE.search(lowered):
+        return 'requirement'
+    if _WORK.search(lowered):
+        counts = (learned or {}).get(ending_key(stripped)) or {}
+        change, no_change = counts.get('change', 0), counts.get('no_change', 0)
+        if change + no_change >= 2 and not no_change:
+            return 'requirement'
+        if change + no_change >= 2 and not change:
+            return 'question'
+        return 'unsure'
+    return 'question'
 
 
-def mark_pending(data, text, source):
+def learn(learned, text, label):
+    """Count how the executor decided an 'unsure' message (label 'change' or 'no_change'). Returns the table."""
+    if label not in ('change', 'no_change'):
+        raise ValueError('label must be change or no_change')
+    key = ending_key(text)
+    if not key:
+        return learned
+    row = learned.setdefault(key, {'change': 0, 'no_change': 0})
+    row[label] = row.get(label, 0) + 1
+    if len(learned) > 500:  # a bounded table: drop the least-used endings
+        for stale in sorted(learned, key=lambda k: sum(learned[k].values()))[:len(learned) - 500]:
+            learned.pop(stale, None)
+    return learned
+
+
+def mark_pending(data, text, source, unsure=False):
     previous = data.get('requirements_pending') or {}
     data['requirements_pending'] = {'at': now(), 'text': (text or '').strip()[:600], 'source': source,
-                                    'count': (previous.get('count') or 0) + 1, 'rev': data.get('done_rev') or 0}
+                                    'count': (previous.get('count') or 0) + 1, 'rev': data.get('done_rev') or 0,
+                                    'unsure': bool(unsure) and (not previous or bool(previous.get('unsure')))}
     return data['requirements_pending']
 
 
@@ -162,6 +245,10 @@ def pending_line(data, prefix, tid):
     pending = data.get('requirements_pending')
     if not pending:
         return None
+    if pending.get('unsure'):
+        return ('POSSIBLE CHANGE (%s, after rev %s): "%s". Orbit is unsure this changes what must be delivered. If it does: '
+                "%s done %s --add 'D… what it requires'; if it does not (a question): %s done %s --keep. Needed before claiming."
+                % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid, prefix, tid))
     return ('REQUIREMENTS CHANGED (%s, after rev %s): "%s". Revise the result and verification goals before claiming: '
             "%s done %s --add 'D… what the change requires' [--check '[\"python3\",\"-m\",\"pytest\",\"…\"]'] "
             "(or the same command with your rewritten items 'D1 …' 'D2 …', or with --keep if they already cover it)"

@@ -256,6 +256,76 @@ def current_task(store, root):
     return task
 
 
+LEARNED_KEY = 'learned_prompt_endings'
+
+
+def learned(store):
+    """How the executor decided 'unsure' messages on this installation (stays in the local store)."""
+    try:
+        return json.loads(store.preference(LEARNED_KEY) or '{}')
+    except ValueError:
+        return {}
+
+
+def remember_label(store, task_id, text, label, by):
+    from .requirements import learn, ending_key
+    table = learn(learned(store), text, label)
+    store.preference(LEARNED_KEY, json.dumps(table, ensure_ascii=False))
+    store._event(task_id, 'prompt_labeled', {'ending': ending_key(text), 'label': label, 'by': by})
+
+
+def workspace_marks(root):
+    """A cheap fingerprint of what changed in the working tree: status lines, their sizes and times, and HEAD."""
+    try:
+        out = subprocess.run(['git', '-C', str(root), 'status', '--porcelain=v1', '-z'], capture_output=True, timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    digest = hashlib.sha256(out + (_head(root) or '').encode())
+    for entry in out.split(b'\0'):
+        if len(entry) > 3:
+            try:
+                info = (Path(root) / os.fsdecode(entry[3:])).stat()
+                digest.update(('%d:%d' % (info.st_mtime_ns, info.st_size)).encode())
+            except OSError:
+                digest.update(b'gone')
+    return digest.hexdigest()
+
+
+def recent_prompts(path, current, limit=3):
+    """The user's last few prompts before this one, from the host's own transcript (Claude Code or Codex)."""
+    from .requirements import classify
+    from .continuity import tail_lines
+    if not path:
+        return []
+    try:
+        lines = tail_lines(path, 1_000_000)
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        if '"user' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        text = None
+        if event.get('type') == 'user' and not event.get('isMeta') and not event.get('isSidechain'):
+            content = (event.get('message') or {}).get('content')
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = [c.get('text', '') for c in content if isinstance(c, dict) and c.get('type') == 'text']
+                text = '\n'.join(parts) if parts and len(parts) == len(content) else None
+        elif event.get('type') == 'event_msg' and (event.get('payload') or {}).get('type') == 'user_message':
+            text = event['payload'].get('message')
+        if text and text.strip() and classify(text) not in ('system', 'trivial'):
+            found.append(text.strip())
+    if found and found[-1] == (current or '').strip():
+        found.pop()
+    return found[-limit:]
+
+
 NO_TASK = ''  # a session row with no task: the session was seen without one, so it never inherits another's later
 SESSION_LOCK_WAIT = 2.0  # seconds; the sessions lock is held only for one check and one write
 
@@ -309,9 +379,11 @@ def resolve_task(store, root, session, source=None, transcript=None):
     if row and row['task_id']:
         try:
             task = store.get(row['task_id'])
-            if task['data'].get('mode') == 'attached' and Path(task['workspace']).resolve() == root:
+            here = Path(task['workspace']).resolve() == root
+            # A session keeps its open task wherever its shell moves: the agent's `cd` changes the hook's cwd.
+            if task['data'].get('mode') == 'attached' and (here or task['status'] not in CLOSED):
                 if row.get('ended'):
-                    store.bind_session(session, task['id'], root)  # it came back (resume): live again, nobody else takes it
+                    store.bind_session(session, task['id'], task['workspace'])  # it came back (resume): live again
                 return task
         except ValueError:
             pass
@@ -412,8 +484,12 @@ def parse_checks(values):
     return commands
 
 
-def create(store, root, prompt, host, session=None, checks=(), done=None, max_turns=8):
-    """Create the ledger for a session that already exists; no clone, no model call."""
+def create(store, root, prompt, host, session=None, checks=(), done=None, max_turns=8, draft=False, context=()):
+    """Create the ledger for a session that already exists; no clone, no model call.
+
+    draft: Orbit is unsure the prompt asks for work; the executor confirms it with `done`, or it closes by itself
+    at the end of the turn when nothing changed. context: the user's earlier prompts in this session, so that a
+    follow-up ("fix it") can be understood by the executor after a fresh start and by the reviewer."""
     if host not in ('codex', 'claude'):
         raise ValueError('Host must be claude or codex')
     root, is_git = project_root(root)
@@ -432,12 +508,16 @@ def create(store, root, prompt, host, session=None, checks=(), done=None, max_tu
     data['options'] = {'model': None}
     data.update(mode='attached', host=host, done_evidence={}, prompts=[{'at': now(), 'text': prompt[:600], 'session': session}],
                 briefs={'served': 0, 'last_at': None}, verification_pending=False,
-                session_ids=[session] if session else [], attached_at=now(), previous_task=previous)
+                session_ids=[session] if session else [], attached_at=now(), previous_task=previous,
+                context_prompts=[_one_line(c, 300) for c in context][-3:])
+    if draft:
+        data['draft'] = {'at': now(), 'marks': workspace_marks(root)}
     store.save(task, 'received', 'options_recorded', data['options'])
     from .simple_loop import initialize
     initialize(store, task, done, max_turns)
     task['data']['development']['phase'] = 'ready'
-    store.save(task, 'working', 'attached', {'workspace': str(root), 'host': host, 'session': session, 'checks': len(commands)})
+    store.save(task, 'working', 'attached', {'workspace': str(root), 'host': host, 'session': session, 'checks': len(commands),
+                                             'draft': bool(draft), 'context': len(task['data']['context_prompts'])})
     store.attach(str(root), task['id'])
     if session:
         store.bind_session(session, task['id'], root)
@@ -480,7 +560,7 @@ def _apply_prompt(store, task, text, session=None):
     from . import requirements
     data = task['data']
     prompts = data.setdefault('prompts', [])
-    kind = requirements.classify(text)
+    kind = requirements.classify(text, learned(store))
     if kind == 'system':
         return  # a host notification, not the user's words
     prompts.append({'at': now(), 'text': text[:600], 'session': session, 'kind': kind})
@@ -490,7 +570,7 @@ def _apply_prompt(store, task, text, session=None):
         if session not in sessions:
             sessions.append(session)
             del sessions[:-20]
-    if kind == 'requirement' or task['status'] == 'needs_input':
+    if kind in ('requirement', 'unsure') or task['status'] == 'needs_input':
         data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
                                                  'at': now(), 'source': 'prompt', 'kind': kind})
     status = task['status']
@@ -499,8 +579,8 @@ def _apply_prompt(store, task, text, session=None):
         data['development']['phase'] = 'ready'
         data['resumes'].append({'turn': data.get('turns', 0), 'because': 'feedback', 'sent': [text[:600]]})
         status = 'working'
-    if kind == 'requirement' and data.get('done_fixed'):
-        requirements.mark_pending(data, text, 'prompt')
+    if kind in ('requirement', 'unsure') and data.get('done_fixed'):
+        requirements.mark_pending(data, text, 'prompt', unsure=kind == 'unsure')
         store.save(task, status, 'requirement_added', {'chars': len(text), 'session': session, 'rev': data.get('done_rev') or 0,
                                                        'text': text[:200], 'layer': 'control'})
     elif status != task['status']:
@@ -560,7 +640,13 @@ def set_done(store, task_id, texts, origin='executor', add=False, keep=False, ch
             raise ValueError('done applies to attached tasks; use feedback --done for managed tasks')
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
+        pending = dict(data.get('requirements_pending') or {})
+        draft = data.pop('draft', None)
         row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands)
+        if draft:
+            remember_label(store, task_id, task['prompt'], 'change', origin)  # the executor confirmed the work
+        if pending.get('unsure'):
+            remember_label(store, task_id, pending['text'], 'no_change' if row['kept'] else 'change', origin)
         if commands:
             data['development']['verified_tree'] = None  # new checks run at the next claim
         kind = 'done_kept' if row['kept'] else 'goal_fixed'
@@ -810,6 +896,13 @@ def brief_text(store, task, event='prompt', for_digest=False):
     if data.get('verification_pending'):
         head += ' · independent verification pending'
     lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 400)]
+    if data.get('draft') and task['status'] not in CLOSED:
+        lines.append("DRAFT: Orbit is unsure this prompt asks for work. If it does, define the completion (that confirms "
+                     "the task): %s done %s 'D1 …'. If it is only a question, just answer — the draft closes by itself "
+                     "when the turn ends and nothing changed." % (prefix, tid))
+    if data.get('context_prompts'):
+        lines.append('CONTEXT (the user\'s earlier prompts in this session): '
+                     + ' · '.join('"' + _one_line(c, 160) + '"' for c in data['context_prompts']))
     feedback = data.get('feedback') or []
     if feedback:
         lines.append('CORRECTIONS (%d): ' % len(feedback) + ' · '.join(
@@ -1033,9 +1126,12 @@ def _handle(store, event, payload, host):
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
         if task is None or task['status'] in CLOSED:
-            if len(text) < MIN_TASK_PROMPT:
+            kind = classify(text, learned(store))
+            if len(text) < MIN_TASK_PROMPT or kind in ('trivial', 'question'):
+                # A question or a go-ahead with no open task starts nothing.
                 return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
-            task = create(store, root, text, host, session)
+            task = create(store, root, text, host, session, draft=kind == 'unsure',
+                          context=recent_prompts(payload.get('transcript_path'), text))
         else:
             try:
                 task = record_prompt(store, task, text, session)
@@ -1084,8 +1180,34 @@ def stop_decision(store, task, payload):
             except (ValueError, OSError) as error:
                 hook_log(store, 'worker start failed: ' + str(error))
         return {'systemMessage': 'Orbit: fixed checks passed; the independent review of task %s runs in the background. The verdict arrives in the next brief or `%s status %s`.' % (task['id'], prefix, task['id'])}
+    draft = data.get('draft')
+    if draft and task['status'] not in CLOSED and not [d for d in data.get('done') or [] if d['id'].startswith('D')]:
+        changed = workspace_marks(task['workspace']) != draft.get('marks')
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                if not task['data'].get('draft'):
+                    return None
+                if not changed:
+                    task['data'].pop('draft', None)
+                    task['data'].update(reason='Orbit was unsure this prompt asked for work; the executor did not '
+                                               'confirm it and nothing changed.', reason_code='not_a_request')
+                    store.save(task, 'stalled', 'draft_dismissed', {'layer': 'control'})
+                    store.detach(str(Path(task['workspace']).resolve()))
+                    remember_label(store, task['id'], task['prompt'], 'no_change', 'orbit')
+                    return None
+                if task['data']['draft'].get('asked'):
+                    return None
+                task['data']['draft']['asked'] = now()
+                store.save(task, task['status'], 'draft_asked', {'layer': 'control'})
+        except (RuntimeError, ValueError):
+            return None
+        return {'decision': 'block', 'reason': (
+            'Orbit: files changed while Orbit was unsure whether "%s" asked for work. If it is work, define the completion: '
+            "%s done %s 'D1 …' 'D2 …'. If it was not, run %s detach %s."
+            % (_one_line(task['prompt'], 200), prefix, task['id'], prefix, task['id']))}
     pending = data.get('requirements_pending')
-    if pending and not pending.get('asked') and task['status'] not in CLOSED:
+    if pending and not pending.get('asked') and not pending.get('unsure') and task['status'] not in CLOSED:
         try:
             with store.lock('task:' + task['id']):
                 task = store.get(task['id'])
