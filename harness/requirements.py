@@ -116,38 +116,75 @@ def ending_key(text):
     return _last_word(stripped).lower()[:24] + ('?' if stripped.endswith(('?', '？')) else '')
 
 
+def _asking(text):
+    return text.endswith(('?', '？')) or bool(_ASKING_END.search(_last_word(text)))
+
+
+def _question_kind(text):
+    """A single sentence that asks something: 'requirement' | 'question' | 'unsure'."""
+    lowered = text.lower()
+    if _ASK.search(lowered) or _adds_scope(text):
+        return 'requirement'
+    if _status_question(text):
+        return 'question'      # "잘 수정된 것인지?", "Did you update the README?"
+    if _IMPERATIVE.search(lowered):
+        return 'requirement'
+    return 'unsure' if _WORK.search(lowered) else 'question'
+
+
+# Sentence boundaries: end punctuation followed by space, or a line break. "~/.claude" and "1.5" are not boundaries.
+_SENTENCE = re.compile(r'(?<=[.!?？。])\s+|\n+')
+# Orders that work in a plain statement too ("…해 주세요.", "…하자."). Question-shaped asks ("수 있어", "can you")
+# are left out on purpose: in a statement they describe ("이런 분석을 확인할 수 있어." = "you can see this analysis").
+_ORDER = re.compile(r"(주세요|주시|하자|해\s?봐|해\s?보자|\bplease\b|\blet's\b|\binstead\b)")
+
+
+def _context_kind(sentence):
+    """A statement that precedes the final question: context, unless it gives an order or names work."""
+    lowered = sentence.lower()
+    if _IMPERATIVE.search(lowered) or _ORDER.search(lowered):
+        return 'requirement'
+    return 'unsure' if _WORK.search(lowered) else 'question'
+
+
 def classify(text, learned=None):
     """'system' | 'trivial' | 'question' | 'requirement' | 'unsure'.
 
     Only a person's words can set or change a goal: host notifications arrive through the same hook and are
     ignored. A question or a go-ahead does not change what must be delivered. 'unsure' goes to the executor;
     `learned` ({ending: {'change': n, 'no_change': m}}) resolves it once this installation has seen how the
-    executor decided the same ending before."""
+    executor decided the same ending before.
+
+    A message of several sentences that ends in a question is judged sentence by sentence: what is asked is the
+    final question, and the statements before it are context unless they themselves give an order or name work.
+    Matching the whole message at once let a describing clause in the context ("…확인할 수 있어.") read as an ask."""
     stripped = (text or '').strip()
     if _SYSTEM.match(stripped):
         return 'system'
+    from .typist import CARRY_LINE
+    if stripped == CARRY_LINE:
+        return 'trivial'      # typed by Orbit's auto handoff: the request itself is already in the ledger
     bare = re.sub(r'[\s.!~。…]+$', '', stripped.lower()).strip()
     if not bare or bare in _TRIVIAL or _GO_ONLY.match(_compact(stripped) or ' '):
         return 'trivial'
-    lowered = stripped.lower()
-    asking = stripped.endswith(('?', '？')) or bool(_ASKING_END.search(_last_word(stripped)))
-    if not asking:
+    if not _asking(stripped):
         return 'requirement'  # a statement that reaches the agent is an instruction; a missed change costs more
-    if _ASK.search(lowered) or _adds_scope(stripped):
+    parts = [part.strip() for part in _SENTENCE.split(stripped) if part and part.strip()]
+    if len(parts) < 2:
+        kinds = [_question_kind(stripped)]
+    else:
+        kinds = [_question_kind(part) if _asking(part) else _context_kind(part) for part in parts]
+    if 'requirement' in kinds:
         return 'requirement'
-    if _status_question(stripped):
-        return 'question'      # "잘 수정된 것인지?", "Did you update the README?"
-    if _IMPERATIVE.search(lowered):
+    if 'unsure' not in kinds:
+        return 'question'
+    counts = (learned or {}).get(ending_key(stripped)) or {}
+    change, no_change = counts.get('change', 0), counts.get('no_change', 0)
+    if change + no_change >= 2 and not no_change:
         return 'requirement'
-    if _WORK.search(lowered):
-        counts = (learned or {}).get(ending_key(stripped)) or {}
-        change, no_change = counts.get('change', 0), counts.get('no_change', 0)
-        if change + no_change >= 2 and not no_change:
-            return 'requirement'
-        if change + no_change >= 2 and not change:
-            return 'question'
-        return 'unsure'
-    return 'question'
+    if change + no_change >= 2 and not change:
+        return 'question'
+    return 'unsure'
 
 
 def learn(learned, text, label):

@@ -110,6 +110,22 @@ def main():
     for text in ('결과는?', '속도는?', '이유는?', '테스트 결과는요?', '지금 체크아웃된 브랜치 이름은?', '왜 실패했는지 원인은?'):
         check('information question stays a question (control): ' + text, requirements.classify(text) == 'question')
 
+    # several sentences ending in a question: the final question is what is asked; the statements are context
+    context = '빌드 캐시가 디스크를 많이 써.\n그래서 이런 통계를 확인할 수 있어.\n\n'
+    for text in (context + '이 문제를 줄일 방법이 있을까? 어떻게 생각해?',
+                 'The cache uses a lot of disk. The report shows where it goes. What do you think?'):
+        check('context statements, then an opinion question → question: ' + text[-16:], requirements.classify(text) == 'question',
+              requirements.classify(text))
+    for text in (context + '이 문제를 줄여 줄 수 있어?',          # the final question is an ask (control)
+                 'README 수정해 줘. 가능해?',                     # an order in the context still counts (control)
+                 'Logs show the hook failed. Can you check why? What do you think?'):
+        check('…but an ask anywhere stays a requirement (control): ' + text[-16:], requirements.classify(text) == 'requirement',
+              requirements.classify(text))
+    check('…and a statement naming work goes to the executor: unsure',
+          requirements.classify('README 업데이트가 필요해. 어떻게 생각해?') == 'unsure')
+    check('a single sentence is judged as before: "확인할 수 있어?" is an ask (control)',
+          requirements.classify('이 통계를 확인할 수 있어?') == 'requirement')
+
     for text in ('<task-notification>\n<task-id>b1</task-id>\n<summary>Monitor event</summary>\n</task-notification>',
                  '<system-reminder>x</system-reminder>', '<local-command-caveat>x</local-command-caveat>', '<command-name>/model</command-name>'):
         check('system: ' + text[:24].replace('\n', ' '), requirements.classify(text) == 'system')
@@ -187,7 +203,6 @@ def main():
         check('malformed check refused', False)
     except ValueError:
         check('malformed check refused', True)
-
     print('⑤ the review is bound by the change; a change during the review reopens the work')
     original = providers.Provider
     providers.Provider = FakeReviewer
@@ -341,6 +356,23 @@ def main():
     brief = attach.brief_text(store, store.get(task2['id']))
     check('brief: DONE (rev 2) and the REQUIREMENTS CHANGED line', 'DONE (rev 2)' in brief and 'REQUIREMENTS CHANGED' in brief)
     store.close()
+    print('⑩ the CLI accepts the order the brief shows: `done ID --add "…"`')
+    store = Store(base / 'home')  # the sections above closed theirs
+    root10 = make_repo(base, 'repo-cli')
+    attach.set_switch(store, 'on', root10)
+    attach.handle(store, 'prompt', {'cwd': str(root10), 'session_id': 's10', 'prompt': 'Build a price list with totals'}, 'claude')
+    tid = attach.current_task(store, root10)['id']
+    attach.set_done(store, tid, ['Totals are printed'])
+    before = store.get(tid)['data']['done_rev']
+    cli = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home)]
+    ran = subprocess.run(cli + ['done', tid, '--add', 'Totals are rounded to cents'], capture_output=True, text=True)
+    task = store.get(tid)
+    check('CLI `done ID --add "…"` appends the item', ran.returncode == 0 and task['data']['done_rev'] == before + 1
+          and task['data']['done'][-1]['text'].endswith('Totals are rounded to cents'), (ran.stderr or ran.stdout)[-300:])
+    ran = subprocess.run(cli + ['done', tid, '--add', '--no-such-option', 'x'], capture_output=True, text=True)
+    check('…an unknown option is still refused (control)', ran.returncode == 2 and 'unrecognized arguments' in ran.stderr
+          and store.get(tid)['data']['done_rev'] == before + 1, ran.stderr[-200:])
+
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 

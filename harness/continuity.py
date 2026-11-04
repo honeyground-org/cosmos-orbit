@@ -8,6 +8,11 @@ heavy. The defaults below follow that measurement (scripts/measure_context_growt
 
 Nothing here calls a model. A handoff is rebuilt from the ledger plus one short checkpoint the executor
 writes about what the ledger cannot know: the approach in progress and the next concrete step.
+
+A hook cannot clear its own session. So a handoff ends in one of three ways: the user types /clear (or /new),
+the host compacts the session itself, or - with `cosmos-orbit context auto` in cmux or tmux - Orbit types it
+(see typist.py). A compaction closes the open handoff and measures again from the compacted size, and an
+open handoff expires: an invitation nobody took must never hand a task to an unrelated session later.
 """
 import json
 import os
@@ -23,6 +28,10 @@ GLOBAL_KEY = 'handoff_at'
 PROJECT_PREFIX = 'handoff_at:'
 TAIL_BYTES = 4_000_000
 RECORD_STEP = 10_000          # store a measurement when it moved this much (keeps the ledger readable)
+INVITE_TTL_SECONDS = 12 * 3600  # an open handoff nobody took expires (observed: taken 18 hours later by unrelated work)
+OPEN_STATES = ('recommended', 'asked', 'checkpointed', 'told', 'auto')
+INVITING_STATES = ('checkpointed', 'told', 'auto')
+MODE_KEY = 'handoff_mode'     # 'tell' (default): ask the user to type /clear · 'auto': type it where a typist exists
 
 
 # ---------------------------------------------------------------- settings
@@ -69,6 +78,42 @@ def set_threshold(store, value, root=None, global_default=False):
     return {'scope': 'project', 'root': str(Path(root).resolve()), 'handoff_at': tokens}
 
 
+def handoff_mode(store):
+    return 'auto' if store.preference(MODE_KEY) == 'auto' else 'tell'
+
+
+def set_handoff_mode(store, mode):
+    if mode not in ('auto', 'tell'):
+        raise ValueError('The handoff mode is auto or tell')
+    store.preference(MODE_KEY, mode)
+    return mode
+
+
+def invitation_open(state, at=None):
+    """A checkpointed handoff a fresh session may still take: not compacted, not adopted, not expired."""
+    if (state or {}).get('state') not in INVITING_STATES:
+        return False
+    from datetime import datetime, timezone
+    stamp = state.get('auto_at') or state.get('told_at') or state.get('checkpoint_at') or state.get('at')
+    if not stamp:
+        return True  # a record from before handoffs carried times: never expires, as before
+    try:
+        then = datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    current = at or datetime.now(timezone.utc)
+    return (current - then).total_seconds() <= INVITE_TTL_SECONDS
+
+
+def close_on_compaction(data, session):
+    """The host compacted the session itself: that was the handoff. Close it and measure again from here."""
+    state = data.get('handoff_state') or {}
+    if state.get('session') == session and state.get('state') in OPEN_STATES:
+        state.update(state='compacted', compacted_at=now())
+        return True
+    return False
+
+
 def threshold_view(store, root):
     tokens, source = resolve_threshold(store, root)
     projects = {row[0][len(PROJECT_PREFIX):]: int(row[1]) for row in
@@ -77,7 +122,8 @@ def threshold_view(store, root):
     return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0},
             'default': int(default) if default is not None else DEFAULT_HANDOFF_AT,
             'projects': projects, 'min_growth': min_growth(),
-            'environment': os.environ.get('ORBIT_HANDOFF_AT')}
+            'environment': os.environ.get('ORBIT_HANDOFF_AT'),
+            'handoff_mode': handoff_mode(store), 'typist': (__import__('harness.typist', fromlist=['detect']).detect() or {}).get('kind')}
 
 
 def min_growth():
@@ -186,6 +232,7 @@ def observe(store, task, payload, host, event, source=None):
                 kind, payload_out = 'compacted', {'trigger': 'observed', 'from': previous, 'to': tokens}
                 live['start'] = tokens
                 data['context_dropped'] = True
+                close_on_compaction(data, live.get('session'))
             if live.get('start') is None:
                 live['start'] = tokens
                 if log and log[-1].get('session') == live.get('session'):
@@ -200,7 +247,8 @@ def observe(store, task, payload, host, event, source=None):
                     limit=limit_for_session(threshold, live.get('start')))
         state = data.get('handoff_state') or {}
         if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
-                and state.get('session') != live.get('session') and task['status'] not in ('stalled', 'interrupted')):
+                and (state.get('session') != live.get('session') or state.get('state') == 'compacted')
+                and task['status'] not in ('stalled', 'interrupted')):
             data['handoff_state'] = {'session': live.get('session'), 'state': 'recommended', 'tokens': live['tokens'],
                                      'limit': live['limit'], 'at': now()}
             kind, payload_out = 'handoff_recommended', {'tokens': live['tokens'], 'limit': live['limit'],
@@ -279,6 +327,55 @@ def auto_checkpoint(store, task, trigger):
                              by='orbit', kind='auto')
 
 
+def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=None, spawn=None):
+    """Auto mode: the user's next request after a checkpointed handoff starts the fresh context by itself.
+
+    The request is carried in the ledger, the prompt is blocked here, and a detached typist types /clear and one
+    fixed line; the fresh session takes the task over and finds the request in its brief. Only Claude Code (its
+    prompt hook can block a prompt), only in cmux or tmux (something can type), only a request or a go-ahead: a
+    question about the last answer needs that answer, so it is answered in place and the next request hands off.
+    Returns the hook reply, or None to let the prompt through."""
+    if closed or host != 'claude' or kind not in ('requirement', 'trivial') or handoff_mode(store) != 'auto':
+        return None
+    state = task['data'].get('handoff_state') or {}
+    if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
+        return None
+    from . import typist
+    terminal = typist.detect() if terminal is None else terminal
+    if not terminal:
+        return None
+    with store.lock('task:' + task['id']):
+        task = store.get(task['id'])
+        data = task['data']
+        state = data.get('handoff_state') or {}
+        if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
+            return None
+        data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
+        state.update(state='auto', auto_at=now())
+        store.save(task, task['status'], 'handoff_auto', {'terminal': terminal['kind'], 'layer': 'context'})
+    (spawn or typist.spawn)(terminal, typist.handoff_steps(host), store.home / 'hooks.log')
+    live = data.get('context_live') or {}
+    return {'decision': 'block', 'reason': (
+        'Orbit: handing off to a fresh context (context %s tokens >= handoff point %s). Your request is carried over '
+        'and runs there by itself; there is nothing to retype.' % (_k(live.get('tokens')), _k(state.get('limit'))))}
+
+
+def mark_carried_served(store, task, session):
+    """The fresh session has received the carried request in its brief: no later session receives it again."""
+    carried = task['data'].get('carried_prompt') or {}
+    if not carried.get('text') or not session or session == carried.get('from_session') or carried.get('served_to'):
+        return
+    try:
+        with store.lock('task:' + task['id']):
+            current = store.get(task['id'])
+            row = current['data'].get('carried_prompt') or {}
+            if row.get('at') == carried.get('at') and not row.get('served_to'):
+                row['served_to'] = session
+                store.save(current, current['status'], 'carried_prompt_served', {'session': session, 'layer': 'context'})
+    except (RuntimeError, ValueError):
+        pass
+
+
 def handoff_lines(data, prefix, tid, closed=False):
     """Brief lines about context and continuation; the numbers stay out of the brief digest."""
     lines = []
@@ -305,8 +402,14 @@ def handoff_lines(data, prefix, tid, closed=False):
                          "%s checkpoint %s --next '…' --notes '…' [--file path]. A fresh session then continues from the ledger "
                          "instead of re-reading this context." % (_k(live.get('tokens')), _k(state.get('limit')), prefix, tid))
         elif state.get('state') in ('checkpointed', 'told'):
-            lines.append('HANDOFF READY: checkpoint saved. The user can type /clear (Claude Code) or /new (Codex); '
-                         'the brief and checkpoint return in the fresh session.')
+            lines.append('HANDOFF READY: checkpoint saved. Orbit cannot clear this session itself: the user types /clear '
+                         '(Claude Code) or /new (Codex) and the fresh session takes this task over; otherwise the next '
+                         'automatic compaction closes the handoff.')
+    carried = data.get('carried_prompt') or {}
+    if carried.get('text') and not closed and current and current != carried.get('from_session') \
+            and carried.get('served_to') in (None, current):
+        lines.append('CARRIED OVER (the request the user made just before this fresh context; do it now): '
+                     + _one(carried['text'], 1200))
     return lines
 
 

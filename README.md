@@ -190,40 +190,66 @@ Unattended work follows the same rule: a correction marks the definitions stale,
 response proposes the revised set, and Orbit adopts it as a new revision. A completion claim made
 while the definitions are still stale goes back to the executor instead of to the review.
 
-## Self-evolution, without making the code personal
+## Self-evolution agent: Orbit improves itself, without making the code personal
 
-Orbit improves itself in two layers, and keeps them apart on purpose.
+Orbit has a built-in evolution agent. It watches for things that went wrong in Orbit itself and improves
+in two layers, kept apart on purpose: what one person's use teaches stays on that person's machine as
+data, and only general fixes can reach the public code.
 
-**The personal layer is always on and never leaves your machine.** What your usage teaches - how you
-phrase a question versus a request, where your sessions should hand off - is learned from your own
-store and applied automatically. `cosmos-orbit evolve` shows it; `cosmos-orbit evolve --reset-learned`
-forgets it. None of it is ever written into the code.
+**The personal layer is always on and never leaves your machine.** What your usage teaches is learned
+from your own store and applied automatically: how you phrase a question versus a request (once the
+executor has decided the same ending the same way twice, Orbit classifies it on its own) and where your
+sessions should hand off. `cosmos-orbit evolve` shows it; `cosmos-orbit evolve --reset-learned` forgets
+it. None of it is ever written into the code.
 
-**The public layer is off by default; a maintainer turns it on.** When the same Orbit defect repeats -
-a hook that fails, a review that ends without an answer, a ledger someone had to correct - an agent
-works in an isolated worktree of the upstream repository: it writes a failing check first, then the
-smallest general fix. The change is merged only if every gate passes:
+**The public layer is off by default; a maintainer turns it on.** It fixes repeated *defects of Orbit*,
+never preferences:
 
-1. **Checks:** every check passes in the worktree, and a new check fails on the base commit (it
-   really captures the defect).
-2. **No personal traces:** no added line carries the user's home, name, host, addresses, ids,
-   workspace paths or any phrase from their own prompts.
-3. **No vocabulary in code:** added lines are plain ASCII. Words people use belong to the personal
-   layer, as learned data; a fix that is really a value or a word list tuned to one person is refused.
-4. **Generality:** a fresh, read-only reviewer judges the change useful to any user, with any language
-   and projects, and free of regressions.
+| Signal (read from the ledger and `hooks.log`) | Becomes a candidate after |
+|---|---|
+| A hook the CLI rejected or that raised (the host shows only a usage line) | 1 occurrence |
+| A provider call that failed (`needs_input` with `provider_failure`) | 2 occurrences |
+| A review that rejected the verifier's own output (`verifier_rejected`) | 2 occurrences |
+| A ledger someone had to correct by hand (`ledger_corrected`) | 2 occurrences |
 
-A change that fails any gate is never pushed. Runs are event-driven (a hook sees a repeated defect),
-one at a time; a candidate is tried again only when it occurs again, at most three times. Turning it on
-counts only what happens from then on.
+Signals are anonymised before anything else sees them: home paths, e-mail addresses, ids and non-ASCII
+text are replaced, and repeated digits are folded, so a candidate is a defect class, not a record of
+your work. A hook that sees a due candidate starts one background run; runs never overlap.
+
+One run, step by step:
+
+1. A fresh worktree of the upstream repository at the latest `origin/main`.
+2. An agent (Claude Code, with Orbit switched off for its own session) writes a failing check first,
+   `tests/verify_<name>.py` built from synthetic data, then the smallest general fix. If the right fix
+   is really a value or a word list tuned to one person, it answers *not a code defect* and stops.
+3. Four gates, all of which must pass:
+   1. **Checks:** every check passes in the worktree, and a new check fails on the base commit (it
+      really captures the defect).
+   2. **No personal traces:** no added line carries the user's home, name, host, addresses, ids,
+      workspace paths or four words in a row from their own prompts.
+   3. **No vocabulary in code:** added lines are plain ASCII. Words people use belong to the personal
+      layer, as learned data.
+   4. **Generality:** a fresh, read-only reviewer judges the change useful to any user, with any
+      language and projects, and free of regressions.
+4. The outcome depends on the mode: `propose` keeps the gated commit as a local `evolve/<candidate>`
+   branch with a report; `merge` pushes it to `main` and reinstalls Orbit from the merged tree. A
+   change that fails any gate is never pushed, and nothing is installed.
+
+A candidate is tried again only when it occurs again after an attempt, at most three times, and a
+fixed defect that comes back reopens its candidate. Turning the public layer on counts only what happens
+from then on: defects people already fixed by hand are not candidates.
 
 ```sh
-cosmos-orbit evolve                                        # personal layer, candidates, recent runs
+cosmos-orbit evolve                                            # mode, personal layer, candidates, recent runs
 cosmos-orbit evolve --mode propose --repo ~/src/cosmos-orbit   # gated fixes kept as local branches + reports
 cosmos-orbit evolve --mode merge --repo ~/src/cosmos-orbit     # maintainers: gated fixes pushed and installed
-cosmos-orbit evolve --run                                  # one attempt now
-cosmos-orbit evolve --mode local                           # back to learning only
+cosmos-orbit evolve --run                                      # one attempt now
+cosmos-orbit evolve --mode local                               # back to learning only
 ```
+
+Where it keeps its records, all under the Orbit home (`~/.local/share/local-harness` by default):
+`hooks.log` (the signals), `evolve.log` (each background run), `evolve/<candidate>.md` (proposals) and the
+ledger events `evolution_merged`, `evolution_proposed` and `evolution_rejected` with every gate's result.
 
 ## Context and mid-task handoff
 
@@ -241,11 +267,24 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      --notes 'mod.py extracted; app.py still imports nothing' --file mod.py
    ```
 
-3. The next Stop tells you once: type `/clear` (Claude Code) or `/new` (Codex). The fresh session
-   starts with the brief, the checkpoint and a note to open only the files it needs and not to
-   repeat finished work. Nothing to copy, nothing written by hand; the ledger records the rotation.
-4. If native compaction comes first, the PreCompact hook writes a checkpoint from the ledger when the
-   executor wrote none, and the full brief returns after compaction.
+3. The next Stop tells you once. **A hook cannot clear its own session** (neither host offers that),
+   so the handoff ends one of three ways:
+   - **You type `/clear`** (Claude Code) or `/new` (Codex). The fresh session takes the task over and
+     starts with the brief, the checkpoint and a note to open only the files it needs and not to
+     repeat finished work. Nothing to copy, nothing written by hand; the ledger records the rotation.
+   - **The host compacts the session itself.** The PreCompact hook writes a checkpoint from the
+     ledger when the executor wrote none, the full brief returns after compaction, and the handoff
+     is closed: the session is measured again from its compacted size and told again only when it
+     grows past the point once more.
+   - **Orbit types it (auto mode, opt-in).** In cmux or tmux something can type into the session's
+     pane. With `cosmos-orbit context auto`, your next request after the checkpoint is held back and
+     carried in the ledger, Orbit types `/clear` and one fixed line into the pane, and the fresh
+     session takes the task over and runs that request from its brief: nothing to retype. A
+     question is still answered in place (it needs the answer you just read); the next request
+     hands off. Claude Code only, and only in cmux or tmux; elsewhere Orbit tells you, as above.
+     `cosmos-orbit context tell` goes back to telling.
+4. An open handoff that nobody took **expires after 12 hours** and closes on compaction, so it can
+   never hand a task to an unrelated session opened later in the same folder.
 5. Unattended work does the same without you: past the point, the next executor turn starts a
    fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
    tool traces, remaining work, changed files). No extra model call writes the handoff.
@@ -267,6 +306,7 @@ The handoff point follows the same three scopes as the on/off switch:
 | Every project | `cosmos-orbit context 300k --global` | `cosmos-orbit context off --global` | `cosmos-orbit settings` |
 | One project | `cosmos-orbit context 150k` | `cosmos-orbit context off` | `cosmos-orbit context` |
 | One terminal session | `export ORBIT_HANDOFF_AT=250k` | `export ORBIT_HANDOFF_AT=off` | `cosmos-orbit context` |
+| Who types `/clear` | `cosmos-orbit context auto` (cmux, tmux) | `cosmos-orbit context tell` (default) | `cosmos-orbit context` |
 
 `cosmos-orbit context on` restores the default. Unattended tasks take the point at creation;
 `--context-budget TOKENS` overrides it for one task. Measurement continues when handoff is off.

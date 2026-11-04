@@ -373,6 +373,7 @@ def resolve_task(store, root, session, source=None, transcript=None):
     handoff checkpoint invited the next session (one taker), or nobody else is working on the project's latest
     task (its sessions ended — Claude Code reports SessionEnd). A session seen before without a task, or one
     already in conversation when Orbit first sees it (the switch was turned on mid-session), starts its own."""
+    from .continuity import invitation_open
     root = Path(root).resolve()
     if not session:
         return current_task(store, root)
@@ -424,15 +425,15 @@ def resolve_task(store, root, session, source=None, transcript=None):
             continue
         task = store.get(item['id'])
         state = task['data'].get('handoff_state') or {}
-        if task['data'].get('mode') == 'attached' and state.get('state') in ('checkpointed', 'told'):
+        if task['data'].get('mode') == 'attached' and invitation_open(state):
             invited.append((state.get('at') or task['updated'], task))
     for _, candidate in sorted(invited, key=lambda pair: pair[0], reverse=True):
         try:
             with store.lock('task:' + candidate['id']), store.lock('sessions:' + candidate['id'], timeout=SESSION_LOCK_WAIT):
                 task = store.get(candidate['id'])
                 state = task['data'].get('handoff_state') or {}
-                if state.get('state') not in ('checkpointed', 'told'):
-                    continue                             # another new session took this invitation first
+                if not invitation_open(state):
+                    continue                             # taken by another new session, compacted or expired
                 if _live_owners(store, task['id'], session, state.get('session')):
                     continue                             # a new session already took the task after its owner ended
                 state.update(state='adopted', adopted_by=session)
@@ -1110,7 +1111,9 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         task = watched(task, payload.get('source'))
-        return _context('SessionStart', serve_brief(store, task, 'session-start', session))
+        brief = serve_brief(store, task, 'session-start', session)
+        continuity.mark_carried_served(store, task, session)
+        return _context('SessionStart', brief)
     if event == 'pre-compact':
         if task is None or task['status'] in CLOSED:
             return None
@@ -1120,6 +1123,7 @@ def _handle(store, event, payload, host):
             with store.lock('task:' + task['id']):
                 task = store.get(task['id'])
                 task['data']['context_dropped'] = True
+                continuity.close_on_compaction(task['data'], (task['data'].get('context_live') or {}).get('session') or session)
                 store.save(task, task['status'], 'compacted', {'trigger': payload.get('trigger') or 'auto', 'layer': 'context',
                                                                'tokens': (task['data'].get('context_live') or {}).get('tokens')})
         except (RuntimeError, ValueError) as error:
@@ -1145,7 +1149,13 @@ def _handle(store, event, payload, host):
             except RuntimeError:
                 hook_log(store, 'prompt not recorded (task busy) ' + task['id'])
         task = watched(task)
-        return _context('UserPromptSubmit', serve_brief(store, task, 'prompt', session))
+        handed = continuity.auto_handoff(store, task, session, text, classify(text, learned(store)), host,
+                                         closed=task['status'] in CLOSED)
+        if handed:
+            return handed
+        brief = serve_brief(store, task, 'prompt', session)
+        continuity.mark_carried_served(store, task, session)
+        return _context('UserPromptSubmit', brief)
     if event == 'stop':
         if task is None:
             return None
@@ -1271,12 +1281,20 @@ def context_decision(store, task, settle=False, message_only=False):
         new_state = 'asked'
     elif state.get('state') in ('checkpointed',) or (state.get('state') == 'recommended' and closed):
         checkpointed = state.get('state') == 'checkpointed'
-        reply = {'systemMessage': (
-            'Orbit: context %s tokens ≥ handoff point %s for task %s. %sType /clear (Claude Code) or /new (Codex) to continue '
-            'in a fresh context; %s automatically. Change the point: cosmos-orbit context 300k · turn off: cosmos-orbit context off'
-            % (_k(live.get('tokens')), _k(state.get('limit')), task['id'],
-               'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''),
-               'the brief and checkpoint return' if checkpointed else 'the brief returns'))}
+        from .continuity import handoff_mode
+        from .typist import detect
+        head = 'Orbit: context %s tokens ≥ handoff point %s for task %s. %s' % (
+            _k(live.get('tokens')), _k(state.get('limit')), task['id'],
+            'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''))
+        if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') == 'claude' and detect():
+            body = ('Your next request starts a fresh context by itself (auto handoff) and is carried over; a question is '
+                    'answered here first. Back to asking: cosmos-orbit context tell')
+        else:
+            body = ('Orbit cannot clear this session itself: type /clear (Claude Code) or /new (Codex) now and the fresh '
+                    'session takes the task over with %s. If you keep going, the next automatic compaction closes the '
+                    'handoff instead. Change the point: cosmos-orbit context 300k · off: cosmos-orbit context off'
+                    % ('the brief and the checkpoint' if checkpointed else 'the brief'))
+        reply = {'systemMessage': head + body}
         new_state = 'told'
     else:
         return None
@@ -1286,6 +1304,7 @@ def context_decision(store, task, settle=False, message_only=False):
         with store.lock('task:' + task['id']):
             task = store.get(task['id'])
             task['data'].setdefault('handoff_state', {})['state'] = new_state
+            task['data']['handoff_state'][new_state + '_at'] = now()
             store.save(task, task['status'], 'handoff_' + new_state, {'tokens': live.get('tokens'), 'layer': 'context'})
     except (RuntimeError, ValueError):
         return None

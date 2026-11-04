@@ -137,7 +137,7 @@ def main(argv=None):
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
     checkpoint_cmd.add_argument('--notes', default='')
     checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
-    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: on | off | 200k [PATH] [--global]')
+    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: on | off | 200k [PATH] [--global] · auto | tell (who types /clear)')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
@@ -177,7 +177,14 @@ def main(argv=None):
     recover.add_argument('id')
     recover.add_argument('--keep-current-files', required=True, action='store_true')
     try:
-        args = parser.parse_args(argv)
+        args, extra = parser.parse_known_args(argv)
+        if extra:
+            # `done ID --add "D3 ..."` is the order the brief shows: argparse has already closed `text` when it meets
+            # --add, so item texts after an option arrive here. They are items; anything else is still an error.
+            if getattr(args, 'command', None) == 'done' and not any(e.startswith('-') for e in extra):
+                args.text = list(args.text or []) + extra
+            else:
+                parser.error('unrecognized arguments: ' + ' '.join(extra))
     except SystemExit as exit_:
         raw = list(sys.argv[1:] if argv is None else argv)
         if exit_.code not in (0, None) and 'hook' in raw:
@@ -396,7 +403,9 @@ def main(argv=None):
             if args.value is not None and args.path is None and ('/' in args.value or Path(args.value).expanduser().is_dir()):
                 args.path, args.value = args.value, None  # `cosmos-orbit context PATH` shows that project
             root = project_root(args.path)[0]
-            if args.value is not None:
+            if args.value in ('auto', 'tell'):
+                changed = {'handoff_mode': continuity.set_handoff_mode(store, args.value)}
+            elif args.value is not None:
                 changed = continuity.set_threshold(store, args.value, root, args.global_default)
             else:
                 changed = None
