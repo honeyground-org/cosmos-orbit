@@ -336,6 +336,19 @@ def _pane():
     return detect()
 
 
+def _owner_pane(store, session):
+    """(pane, holds) for the session that wrote a handoff: the pane it last ran in (None when unknown) and whether
+    it still holds it (no newer session seen there since). Hooks record every session's pane (wake.note)."""
+    if not session:
+        return None, False
+    row = store.db.execute('SELECT target, at FROM terminals WHERE session=? AND kind IS NOT NULL', (session,)).fetchone()
+    if not row or not row['target']:
+        return None, False
+    newer = store.db.execute('SELECT 1 FROM terminals WHERE target=? AND at>? AND session!=?',
+                             (row['target'], row['at'], session)).fetchone()
+    return row['target'], newer is None
+
+
 def _live_owners(store, task_id, session, *also_ignore):
     return [r for r in store.task_sessions(task_id) if not r['ended'] and r['session'] != session and r['session'] not in also_ignore]
 
@@ -424,6 +437,11 @@ def resolve_task(store, root, session, source=None, transcript=None):
     if not fresh:
         store.bind_session(session, NO_TASK, root)       # already in conversation when first seen: never inherits
         return None
+    # Which open handoff is this session's? Several can be open in one project at once (one pane told, another
+    # where Orbit typed /clear). Observed 2026-11-04: a fresh session in the pane where Orbit had just typed /clear
+    # took the newer handoff of a session that was still working in another pane; its own request was held and
+    # never delivered, and the two sessions then took turns on the other task. So the pane decides, time only orders.
+    here = (_pane() or {}).get('target')
     invited, busy = [], False
     for item in store.list():
         if Path(item['workspace']).resolve() != root or item['status'] in CLOSED:
@@ -431,10 +449,19 @@ def resolve_task(store, root, session, source=None, transcript=None):
         task = store.get(item['id'])
         state = task['data'].get('handoff_state') or {}
         if task['data'].get('mode') == 'attached' and invitation_open(state):
-            if state.get('state') == 'auto' and state.get('panel') and (_pane() or {}).get('target') != state['panel']:
-                continue                                 # Orbit typed /clear in another pane: that session takes it
-            invited.append((state.get('at') or task['updated'], task))
-    for _, candidate in sorted(invited, key=lambda pair: pair[0], reverse=True):
+            if state.get('state') == 'auto' and state.get('panel'):
+                if here != state['panel']:
+                    continue                             # Orbit typed /clear in another pane: that session takes it
+                mine = True                              # Orbit typed /clear here, for this task
+            else:
+                pane, holds = _owner_pane(store, state.get('session'))
+                if pane and pane != here and holds:
+                    continue                             # its session still holds another pane: /clear there takes it
+                mine = bool(pane) and pane == here
+            invited.append((mine, state.get('at') or task['updated'], task))
+    invited.sort(key=lambda row: row[1], reverse=True)   # newest first …
+    invited.sort(key=lambda row: not row[0])             # … after this pane's own (a stable sort keeps that order)
+    for _, _, candidate in invited:
         try:
             with store.lock('task:' + candidate['id']), store.lock('sessions:' + candidate['id'], timeout=SESSION_LOCK_WAIT):
                 task = store.get(candidate['id'])

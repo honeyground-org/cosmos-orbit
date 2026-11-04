@@ -303,7 +303,10 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      pane may take the handoff; and the carry line is typed only after that takeover, so it can never
      land in the old session.
 4. An open handoff that nobody took **expires after 12 hours** and closes on compaction, so it can
-   never hand a task to an unrelated session opened later in the same folder.
+   never hand a task to an unrelated session opened later in the same folder. When several are open
+   in one folder, **the pane decides**: a fresh session takes the handoff Orbit typed `/clear` for in
+   its own pane first, and never one whose session is still working in another pane (it becomes
+   available once that session ends). Time only orders what is left.
 5. Unattended work does the same without you: past the point, the next executor turn starts a
    fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
    tool traces, remaining work, changed files). No extra model call writes the handoff.
