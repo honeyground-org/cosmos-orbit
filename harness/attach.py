@@ -54,7 +54,12 @@ def normalise(value):
 
 
 def resolve(store, root):
-    """Winner first: ORBIT environment → project setting → global default → off."""
+    """Winner first: ORBIT environment → project setting → enclosing folder → global default → off.
+
+    A switch stored on a folder that is not itself a repository (`cosmos-orbit on ~/work`) covers every
+    repository beneath it, so a workspace holding many repositories is one command, and a repository
+    cloned there later is covered too. The nearest stored switch wins, so `off` in one repository still
+    silences it."""
     root = Path(root).resolve()
     env = normalise(os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT'))
     if env:
@@ -62,6 +67,10 @@ def resolve(store, root):
     value = normalise(store.preference(PROJECT_PREFIX + str(root)))
     if value:
         return value, 'project'
+    for parent in root.parents:
+        value = normalise(store.preference(PROJECT_PREFIX + str(parent)))
+        if value:
+            return value, 'folder:' + str(parent)
     value = normalise(store.preference(DEFAULT_KEY))
     if value:
         return value, 'default'
