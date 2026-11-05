@@ -597,6 +597,61 @@ def held_back(data, session):
                 and state.get('session') == session)
 
 
+def stale_adoption(store, task, session, text, at=None):
+    """True when `session` took this task over at its start, never ran a turn for it, and its first request comes
+    after an invitation would have expired (INVITE_TTL_SECONDS): that request is not this task's.
+
+    Observed 2026-11-05: a fresh session took the harness task at 11-04 14:54 (after a failed automatic /clear) and
+    sat idle for twenty hours. The next morning the user used that pane for unrelated product work; every request
+    was recorded as a correction of the harness task, the stop guard demanded harness claims, and the 11:49 handoff
+    carried the harness goal. A session that worked on its task keeps it however long it pauses; Orbit's own lines
+    (the carry line, continuations, wakes) always continue it."""
+    from . import typist
+    from .requirements import classify
+    from .supervision import RESUME_LINE
+    from .wake import WAKE_LINE
+    text = (text or '').strip()
+    if not session or not text or text.startswith('/') or text in (typist.CARRY_LINE, RESUME_LINE, WAKE_LINE):
+        return False
+    if classify(text) == 'system':
+        return False
+    data = task['data']
+    state = data.get('handoff_state') or {}
+    if state.get('state') != 'adopted' or state.get('adopted_by') != session:
+        return False
+    if any(p.get('session') == session for p in data.get('prompts') or []):
+        return False                                     # it worked on the task: it keeps it
+    binding = store.session_task(session)
+    if not binding or binding.get('task_id') != task['id'] or not binding.get('at'):
+        return False
+    from datetime import datetime, timezone
+    try:
+        bound = datetime.fromisoformat(binding['at'])
+    except ValueError:
+        return False
+    return ((at or datetime.now(timezone.utc)) - bound).total_seconds() > INVITE_TTL_SECONDS
+
+
+def release_adoption(store, task_id, session, root):
+    """Free an idle takeover (stale_adoption): the session gets no task (its request starts its own), and the task
+    keeps its ledger and checkpoint without an open invitation, so the same pane's next /clear does not take it
+    again. Returns True when released."""
+    from .attach import NO_TASK
+    with store.lock('task:' + task_id):
+        task = store.get(task_id)
+        state = task['data'].get('handoff_state') or {}
+        if state.get('state') != 'adopted' or state.get('adopted_by') != session:
+            return False
+        binding = store.session_task(session) or {}
+        state.update(state='released', released_at=now(), released_from=session)
+        store.save(task, task['status'], 'adoption_released',
+                   {'session': session, 'bound_at': binding.get('at'), 'layer': 'context',
+                    'reason': 'took the task at its start, ran no turn for it, and its first request came after the '
+                              'invitation would have expired; that request starts its own task'})
+        store.bind_session(session, NO_TASK, root)
+    return True
+
+
 def mark_carried_served(store, task, session):
     """The session has received the carried request in its brief: no other session receives it again."""
     carried = task['data'].get('carried_prompt') or {}

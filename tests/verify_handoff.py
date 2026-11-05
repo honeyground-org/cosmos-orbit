@@ -327,6 +327,52 @@ def main():
     check('…the user kept typing until the wait ran out: nothing typed, the failure is reported (control)',
           error and 'expired_typing' in error, error)
 
+    print('③-d a session that took a task at its start and sat idle does not fold next-day work into it (2026-11-05)')
+    # Observed: the fresh session took the harness task at 11-04 14:54 (after a failed automatic /clear) and sat idle;
+    # at 11-05 10:38 the user used that pane for unrelated product work, which Orbit recorded as corrections of the
+    # harness task; the stop guard demanded harness claims and the 11:49 handoff carried the harness goal.
+    def bound_hours_ago(session, hours):
+        from datetime import datetime, timedelta, timezone
+        stamp = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with store.db:
+            store.db.execute('UPDATE session_tasks SET at=? WHERE session=?', (stamp, session))
+    other = 'Build the content studio web page: series, episodes and video production steps'
+    for name, hours, line, takes in (('idle-day', 20, other, False), ('idle-carry', 20, typist.CARRY_LINE, True),
+                                     ('idle-soon', 2, other, True)):
+        root_s = make_repo(base, 'repo-' + name)
+        attach.set_switch(store, 'on', root_s)
+        tid_s, pay_s, _, _ = tell(store, root_s, base, name + '-1')
+        fresh = name + '-2'
+        attach.handle(store, 'session-start', {'cwd': str(root_s), 'session_id': fresh, 'source': 'clear'}, 'claude')
+        took = (store.session_task(fresh) or {}).get('task_id') == tid_s
+        bound_hours_ago(fresh, hours)
+        before = len(store.get(tid_s)['data']['prompts'])
+        attach.handle(store, 'prompt', {'cwd': str(root_s), 'session_id': fresh, 'prompt': line}, 'claude')
+        after = store.get(tid_s)['data']
+        now_bound = (store.session_task(fresh) or {}).get('task_id')
+        if takes:
+            check('%s: %dh, %s → the request stays with the task it took (control)' % (name, hours, 'carry line' if line == typist.CARRY_LINE else 'a request'),
+                  took and now_bound == tid_s and len(after['prompts']) == before + 1, (took, now_bound, len(after['prompts']) - before))
+        else:
+            new = store.get(now_bound) if now_bound else None
+            check('idle-day: 20h idle after taking the task, an unrelated request is not recorded on it (the incident)',
+                  took and len(after['prompts']) == before and now_bound and now_bound != tid_s, (took, now_bound, len(after['prompts']) - before))
+            check('…it starts its own task with that request', new is not None and new['prompt'].startswith('Build the content studio'),
+                  new and new['prompt'][:60])
+            check('…the old task is released, not offered again (no open invitation)',
+                  after['handoff_state'].get('state') == 'released' and not continuity.invitation_open(after['handoff_state'])
+                  and 'adoption_released' in kinds(store, tid_s), after['handoff_state'])
+    root_w = make_repo(base, 'repo-worked')
+    attach.set_switch(store, 'on', root_w)
+    tid_w, pay_w, _, _ = tell(store, root_w, base, 'worked-1')
+    attach.handle(store, 'session-start', {'cwd': str(root_w), 'session_id': 'worked-2', 'source': 'clear'}, 'claude')
+    attach.handle(store, 'prompt', {'cwd': str(root_w), 'session_id': 'worked-2', 'prompt': 'Continue with the remaining tests in tests/test_mod.py'}, 'claude')
+    bound_hours_ago('worked-2', 20)
+    attach.handle(store, 'prompt', {'cwd': str(root_w), 'session_id': 'worked-2', 'prompt': 'Also add a CSV export to the report module'}, 'claude')
+    check('control: a session that worked on the task keeps it a day later (only an idle takeover is released)',
+          (store.session_task('worked-2') or {}).get('task_id') == tid_w
+          and store.get(tid_w)['data']['prompts'][-1]['text'].startswith('Also add a CSV'), store.session_task('worked-2'))
+
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
