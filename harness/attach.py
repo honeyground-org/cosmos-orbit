@@ -1265,6 +1265,13 @@ def _handle(store, event, payload, host):
             hook_log(store, 'pre-compact checkpoint skipped: ' + str(error))
         return None
     if event == 'prompt':
+        if task and task['status'] not in CLOSED and continuity.stale_adoption(store, task, session, payload.get('prompt')):
+            try:
+                if continuity.release_adoption(store, task['id'], session, root):
+                    hook_log(store, 'idle takeover released: %s no longer holds %s' % (session, task['id']))
+                    task = None                          # the request starts its own task below
+            except (RuntimeError, ValueError) as error:
+                hook_log(store, 'idle takeover not released: ' + repr(error)[:200])
         during_turn = False
         if task:
             from . import supervision

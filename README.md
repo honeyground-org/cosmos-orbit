@@ -343,7 +343,12 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
    never hand a task to an unrelated session opened later in the same folder. When several are open
    in one folder, **the pane decides**: a fresh session takes the handoff Orbit typed `/clear` for in
    its own pane first, and never one whose session is still working in another pane (it becomes
-   available once that session ends). Time only orders what is left.
+   available once that session ends). Time only orders what is left. **A takeover nobody used is
+   released too**: a session that took a task over at its start, ran no turn for it, and gets its
+   first request more than 12 hours later does not fold that request into the task; the request
+   starts its own task, and the old task keeps its checkpoint without an open invitation (2026-11-05:
+   a pane left idle overnight after a takeover received the next morning's unrelated work, which was
+   recorded as corrections of the old task and handed off under its goal).
 5. Unattended work does the same without you: past the point, the next executor turn starts a
    fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
    tool traces, remaining work, changed files). No extra model call writes the handoff.
