@@ -198,6 +198,17 @@ def handoff_mode(store):
     return 'auto' if _section(read_settings(store)[0]).get('mode') == 'auto' else 'tell'
 
 
+def background_on(store):
+    """The background handoff through Orbit's Claude Code mod (default on; `cosmos-orbit context background off`
+    makes Orbit ignore the mod and hand off by typing, as without it)."""
+    return _section(read_settings(store)[0]).get('background') is not False
+
+
+def set_background(store, on):
+    update_settings(store, lambda section: section.__setitem__('background', bool(on)))
+    return bool(on)
+
+
 def set_handoff_mode(store, mode):
     if mode not in MODES:
         raise ValueError('The handoff mode is auto or tell')
@@ -254,7 +265,7 @@ def threshold_view(store, root):
             'settings_file': {'path': str(path), 'exists': path.exists(), 'problems': problems},
             'projects': projects, 'min_growth': min_growth(),
             'environment': os.environ.get('ORBIT_HANDOFF_AT'),
-            'handoff_mode': handoff_mode(store), 'typist': (__import__('harness.typist', fromlist=['detect']).detect() or {}).get('kind')}
+            'handoff_mode': handoff_mode(store), 'background': background_on(store), 'typist': (__import__('harness.typist', fromlist=['detect']).detect() or {}).get('kind')}
 
 
 def min_growth():
@@ -562,12 +573,14 @@ def mod_hello(store, session):
 
 
 def mod_present(store, session):
-    return bool(session and store.preference(MOD_KEY + session))
+    return bool(session and background_on(store) and store.preference(MOD_KEY + session))
 
 
 def claim_handoff(store, session, by):
     """Exactly one of the mod and the typist performs an automatic handoff. Returns (task id, '') when `by` holds
     it now (it took it, or held it already), else (None, why)."""
+    if by == 'mod' and not background_on(store):
+        return None, 'the background handoff is off (cosmos-orbit context background on)'
     binding = store.session_task(session) if session else None
     if not binding or not binding.get('task_id'):
         return None, 'the session has no task'
