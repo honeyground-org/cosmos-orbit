@@ -25,6 +25,25 @@ HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prom
 HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10),), 'codex': HOOK_EVENTS}
 CLOSED = ('verified', 'stalled', 'interrupted')
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
+# The claim words, negated in the same clause: '완료로 주장하지 않습니다', '완료로 기록한 건 없어요', 'not done yet'.
+NEGATED_CLAIM = re.compile(r"(완료|끝났|마쳤|구현했|수정했|반영했)[^\n.,!?고며]{0,10}?(않|아니|없|못)"
+                           r"|(아직|안|못)\s?(완료|끝났|마쳤|구현|수정|반영)"
+                           r"|\b(not|never|isn't|wasn't|aren't|hasn't|haven't)\b[^\n.,;!?]{0,20}?"
+                           r"\b(done|completed|finished|implemented|fixed|verified)\b", re.I)
+ASKS_USER = re.compile(r"(\?|할까요|될까요|괜찮을까요|좋을까요|드릴까요|하시겠어요|해\s?주세요)[\s*_`)]*$")
+
+
+def claims_completion(message):
+    """True when a reply's last part says the task is done. Not a claim (both misfires seen 2026-11-05): a reply that
+    ends by asking the user, claim words only in a table or status row ('| D1 | ✅ 완료 |'), or only negated
+    ('완료로 주장하지 않습니다'). The stop guard blocked an answer to the user's own question for each of these."""
+    lines = [line.strip() for line in str(message or '')[-1500:].splitlines() if line.strip()]
+    prose = [line for line in lines if not line.startswith('|')]
+    if prose and ASKS_USER.search(prose[-1]):
+        return False
+    return any(CLAIM_WORDS.search(NEGATED_CLAIM.sub(' ', line)) for line in prose)
+
+
 BRIEF_LIMIT = 2400
 MIN_TASK_PROMPT = 20
 
@@ -1439,7 +1458,7 @@ def stop_decision(store, task, payload):
     executor = data.get('executor_result') or {}
     d_items = [d for d in data.get('done') or [] if not d['id'].startswith('C') and d['id'] != 'G0']
     claimed_this_turn = (data.get('claimed_at') or '') > last_prompt
-    if (task['status'] == 'working' and message and CLAIM_WORDS.search(message[-1500:]) and not executor.get('finished')
+    if (task['status'] == 'working' and message and claims_completion(message) and not executor.get('finished')
             and data.get('reason_code') != 'unmet'  # after an unmet review the manager names the unmet items instead
             and not claimed_this_turn and (data.get('claim_nudged_turn') != data.get('turns') or not d_items)):
         try:

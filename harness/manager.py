@@ -46,7 +46,7 @@ def _row(reason, next_step, items=(), **extra):
 
 def diagnose(task, paused=False, message='', handoff=False):
     """Why this task's session stopped and what should happen next. Pure: reads the task only."""
-    from .attach import CLOSED, CLAIM_WORDS
+    from .attach import CLOSED, claims_completion
     data = task['data']
     status = task['status']
     executor = data.get('executor_result') or {}
@@ -87,7 +87,7 @@ def diagnose(task, paused=False, message='', handoff=False):
     # the claim makes it yesterday's list (it named the question the user has since answered).
     last_prompt = ((data.get('prompts') or [{}])[-1]).get('at') or ''
     remaining = (executor.get('remaining') or []) if (data.get('claimed_at') or '') >= last_prompt else []
-    said_done = bool(message) and bool(CLAIM_WORDS.search(str(message)[-1500:]))
+    said_done = claims_completion(message)
     if not remaining and (not missing or said_done):
         return _row('finished_unclaimed',
                     'Verify the result against the goal now: re-read GOAL and every correction, check each D item against '
