@@ -339,7 +339,9 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      task over 0.4 s later and ran the carried request; the input was empty. Enable it for every session by
      adding the folder `install.sh` copies (`~/.local/share/local-harness-app/claude-mod`) to
      `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of `~/.claude/settings.json`, or for one session with
-     `claude --plugin-dir <that folder>`.
+     `claude --plugin-dir <that folder>`. `cosmos-orbit context background off` makes Orbit ignore the mod (it
+     hands off by typing, as without it); `cosmos-orbit context background on` turns it back on, and
+     `cosmos-orbit context background` shows the switch.
 
      **Codex (codex-cli 0.166, measured in tmux 2026-11-05).** Codex keeps the prompt hook's block, and the
      blocked request does not come back into the input, so nothing is emptied. Orbit types `/new`, answers

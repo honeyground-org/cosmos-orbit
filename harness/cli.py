@@ -157,7 +157,8 @@ def main(argv=None):
     checkpoint_cmd.add_argument('--notes', default='')
     checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
     context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global] · '
-                                                 'auto | tell (who types /clear) · stored in <home>/settings.json, editable by hand')
+                                                 'auto | tell (who types /clear) · background on|off (the Claude Code mod) · '
+                                                 'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
@@ -406,7 +407,8 @@ def main(argv=None):
             from . import continuity, typist
             if args.hello:
                 continuity.mod_hello(store, args.session)
-                result = {'hello': True, 'handoff_prefix': continuity.HANDOFF_PREFIX}
+                result = {'hello': True, 'handoff_prefix': continuity.HANDOFF_PREFIX,
+                          'background': continuity.background_on(store)}
             else:
                 task_id, why = continuity.claim_handoff(store, args.session, 'mod')
                 if not task_id:
@@ -452,6 +454,12 @@ def main(argv=None):
         elif args.command == 'context':
             from .attach import project_root, current_task
             from . import continuity
+            if args.value == 'background' and args.path in ('on', 'off', None):
+                on = continuity.set_background(store, args.path == 'on') if args.path else continuity.background_on(store)
+                print(json.dumps({'background': on, 'changed': args.path is not None,
+                                  'note': 'the background handoff needs the Claude Code mod loaded (README: Background handoff)'},
+                                 ensure_ascii=False, indent=2))
+                return 0
             if args.value is not None and args.path is None and ('/' in args.value or Path(args.value).expanduser().is_dir()):
                 args.path, args.value = args.value, None  # `cosmos-orbit context PATH` shows that project
             root = project_root(args.path)[0]

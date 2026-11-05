@@ -695,7 +695,22 @@ def main():
         out = attach.handle(store, 'prompt', dict(pay_n, prompt='Add CSV export for the report'), 'claude')
         check('a plain terminal without the mod: the request goes through, nothing is spawned (control)',
               (out or {}).get('decision') != 'block' and len(typed) == count, out)
-        cli = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home), 'handoff-claim']
+        orbit = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home)]
+        off = subprocess.run(orbit + ['context', 'background', 'off'], capture_output=True, text=True)
+        tid_o, pay_o, _ = ready('repo-mod-off', 'mo1', fake)
+        continuity.mod_hello(store, 'mo1')
+        count = len(typed)
+        attach.handle(store, 'prompt', dict(pay_o, prompt='Add CSV export for the report'), 'claude')
+        refused_o, why_o = continuity.claim_handoff(store, 'mo1', 'mod')
+        check('background off (cosmos-orbit context background off): the mod is ignored, the typist types at once, '
+              'a mod claim is refused', off.returncode == 0 and '"background": false' in off.stdout
+              and len(typed) == count + 1 and 'mod_grace' not in [k for k, _ in typed[-1][1]]
+              and refused_o is None and 'off' in why_o, (off.stdout[-80:], why_o))
+        on = subprocess.run(orbit + ['context', 'background', 'on'], capture_output=True, text=True)
+        shown = subprocess.run(orbit + ['context', 'background'], capture_output=True, text=True)
+        check('…background on again, and the switch shows its state (control)',
+              on.returncode == 0 and continuity.background_on(store) and '"background": true' in shown.stdout, shown.stdout[-80:])
+        cli = orbit + ['handoff-claim']
         hello = subprocess.run(cli + ['--hello', '--session', 'mc1'], capture_output=True, text=True)
         tid_c, pay_c, _ = ready('repo-mod-cli', 'mc1', fake)
         attach.handle(store, 'prompt', dict(pay_c, prompt='Add CSV export for the report'), 'claude')
