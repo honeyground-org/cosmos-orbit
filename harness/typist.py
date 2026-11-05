@@ -69,11 +69,84 @@ def clear_presses(text):
     return min(400, len(lines) + sum(len(line) // 60 for line in lines) + 2)
 
 
-def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0):
-    """Empty the input, /clear (Claude Code) or /new (Codex), and the carry line once the task was taken over."""
+def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, deliver_wait=60.0, expect=''):
+    """Claude Code: empty the input, /clear, and the carry line once the task was taken over.
+
+    Codex (0.166, measured 2026-11-05 in tmux): the blocked prompt does not come back into the input, so nothing is
+    emptied; /new in a Git repository first asks where the conversation runs (Enter keeps the current worktree);
+    the fresh session's hooks run only when its first prompt is submitted, so the carry line is typed once the screen
+    shows a fresh conversation, and the takeover is confirmed after it. `expect`: the start of the request the hook
+    just blocked; the pane is typed into only when its screen shows that block (see new_conversation)."""
+    if host == 'codex':
+        return [('wait', settle), ('codex_new', {'wait': new_wait, 'expect': expect}), ('deliver', deliver_wait),
+                ('adopted', adopt_wait)]
     return ([('wait', settle)] + [('key', 'ctrl+u')] * presses
-            + [('text', '/new' if host == 'codex' else '/clear'), ('key', 'enter'),
+            + [('text', '/clear'), ('key', 'enter'),
                ('adopted', adopt_wait), ('text', CARRY_LINE), ('key', 'enter')])
+
+
+BLOCKED = 'Blocked by hook'
+
+
+def _signature(text):
+    return ' '.join((text or '').split())
+
+
+def shows_block(screen, expect):
+    """True when the screen shows Codex's block of the request starting with `expect` (normalised spaces)."""
+    flat = _signature(screen)
+    return BLOCKED in flat and (not expect or _signature(expect)[:32] in flat)
+
+
+def find_pane(terminal, expect, lister=None, reader=None):
+    """The one tmux pane whose screen shows this block, or None (none, or more than one).
+
+    Codex can run hooks in its app-server daemon, whose environment is the pane the first Codex of that home was
+    started in (measured 2026-11-05: the hook said %260, a pane closed minutes before; Codex ran in %271). The
+    screen is the truth: it shows the request the hook just blocked."""
+    if terminal['kind'] != 'tmux':
+        return None
+    from .wake import _run
+    lister = lister or (lambda: _run([terminal['cli'], 'list-panes', '-a', '-F', '#{pane_id}'])[1].split())
+    reader = reader or (lambda pane: _run([terminal['cli'], 'capture-pane', '-p', '-t', pane])[1])
+    found = [pane for pane in lister() if shows_block(reader(pane), expect)]
+    return dict(terminal, target=found[0]) if len(found) == 1 else None
+
+
+def new_conversation(terminal, wait, press, screen, sleep=time.sleep, clock=time.monotonic, expect='', find=None):
+    """Codex: confirm the pane, /new at an empty input, Enter on the 'where' question, until the screen is a fresh
+    conversation. Returns the terminal typed into. Raises when the pane cannot be confirmed or the conversation is
+    not fresh, so neither /new nor the carry line reaches another session's pane or the old conversation."""
+    from .wake import CODEX_WHERE, PASTE_GAP, codex_fresh, read_state
+    deadline = clock() + wait
+    before, answered = None, 0
+    if not shows_block(screen(terminal), expect):
+        found = (find or find_pane)(terminal, expect)
+        if not found:
+            raise RuntimeError('the pane %s does not show the blocked request and no other pane does; nothing was '
+                               'typed' % terminal['target'])
+        terminal = found
+    while True:
+        text = screen(terminal)
+        if before is None:
+            if read_state(text) == 'empty':
+                before = text
+                press(command(terminal, text='/new'))
+                sleep(PASTE_GAP)
+                press(command(terminal, key='enter'))
+                sleep(1.0)
+                continue
+        elif CODEX_WHERE in text and answered < 2:
+            press(command(terminal, key='enter'))         # 1. Use current Git worktree (selected)
+            answered += 1
+            sleep(1.0)
+            continue
+        elif text != before and codex_fresh(text):
+            return terminal
+        if clock() >= deadline:
+            raise RuntimeError('no fresh Codex conversation within %ds (%s); the carry line was not typed'
+                               % (wait, 'the input never emptied' if before is None else 'after /new'))
+        sleep(0.5)
 
 
 def carry_steps(settle=2.0, wait=60.0):
@@ -82,7 +155,8 @@ def carry_steps(settle=2.0, wait=60.0):
     return [('wait', settle), ('deliver', wait)]
 
 
-def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None):
+def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None, screen=None,
+        find=None):
     """Perform the steps; returns the argv list that ran. Stops at the first failure.
 
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
@@ -91,9 +165,23 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
     own typing."""
     runner = runner or (lambda argv: subprocess.run(argv, capture_output=True, timeout=15).returncode)
     done = []
+
+    def press(argv):
+        done.append(argv)
+        if runner(argv) != 0:
+            raise RuntimeError('typing failed (%s exit)' % terminal['kind'])
+
     for kind, value in steps:
         if kind == 'wait':
             sleep(value)
+            continue
+        if kind == 'codex_new':
+            if screen is None:
+                from .wake import _run, screen_command
+                screen = lambda where: _run(screen_command(where))[1]  # noqa: E731
+            options = value if isinstance(value, dict) else {'wait': value}
+            terminal = new_conversation(terminal, options.get('wait', 40.0), press, screen, sleep=sleep, clock=clock,
+                                        expect=options.get('expect', ''), find=find)
             continue
         if kind == 'deliver':
             if deliver is None:

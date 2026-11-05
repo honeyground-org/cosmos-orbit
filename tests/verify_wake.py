@@ -154,6 +154,21 @@ def main():
           and not fake.typed() and len(fake.notified()) == 1)
     fake = Fake([claude()], after=claude(('❯ ' + wake.WAKE_LINE,)))
     check('typed but still in the input afterwards: reported, not called woken', run(fake)[0] == 'not_submitted')
+    class Pasted(Fake):
+        # Codex 0.166 (measured 2026-11-05): an Enter right after the text leaves it in the input; the next submits.
+        def __call__(self, argv):
+            self.ran.append(argv)
+            if 'read-screen' in argv or 'capture-pane' in argv:
+                enters = sum(1 for a in self.ran if a[-1] == 'enter')
+                if any(wake.WAKE_LINE in a for a in self.ran):
+                    return 0, ('› ' + wake.WAKE_LINE + '\n\n  model · path') if enters < 2 else '• Working (1s • esc to interrupt)'
+                return 0, '› Ask Codex to do anything\n\n  model · path'
+            return 0, ''
+    fake = Pasted([])
+    outcome, typed = run(fake)
+    check('Codex keeps the line after the first Enter (a paste): one more Enter submits it, nothing else is typed',
+          outcome == 'woken' and [a[-1] for a in fake.typed()] == [wake.WAKE_LINE, 'enter', 'enter']
+          and not fake.cleared(), fake.typed())
     fake = Fake(['› Ask Codex to do anything\n\n  model · path'], after='• Working (1s • esc to interrupt)')
     check('codex with its placeholder: woken', run(fake)[0] == 'woken' and len(fake.typed()) == 2)
 

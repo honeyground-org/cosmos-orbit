@@ -502,14 +502,14 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
     """Auto mode: the user's next request after a checkpointed handoff starts the fresh context by itself.
 
     The request is carried in the ledger, the prompt is blocked here, and a detached typist types /clear and one
-    fixed line; the fresh session takes the task over and finds the request in its brief. Only Claude Code (its
-    prompt hook can block a prompt), only in cmux or tmux (something can type), only a request or a go-ahead: a
+    fixed line; the fresh session takes the task over and finds the request in its brief. Claude Code and Codex
+    (both keep a prompt hook's block), only in cmux or tmux (something can type), only a request or a go-ahead: a
     question about the last answer needs that answer, so it is answered in place and the next request hands off.
     Never during a turn: a prompt typed while the session works goes into that turn, and keys typed then wait in
     the host's input queue (2026-11-05: the blocked request was lost to that turn and the queued /clear ran four
     minutes later, after the typist had given up). The handoff waits for the first request after the turn ends.
     Returns the hook reply, or None to let the prompt through."""
-    if closed or host != 'claude' or kind not in ('requirement', 'trivial') or handoff_mode(store) != 'auto':
+    if closed or host not in ('claude', 'codex') or kind not in ('requirement', 'trivial') or handoff_mode(store) != 'auto':
         return None
     state = task['data'].get('handoff_state') or {}
     if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
@@ -537,8 +537,9 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
         state.update(state='auto', auto_at=now(), panel=terminal['target'])  # only the session in this pane takes it
         store.save(task, task['status'], 'handoff_auto', {'terminal': terminal['kind'], 'layer': 'context'})
-    (spawn or typist.spawn)(terminal, typist.handoff_steps(host, typist.clear_presses(text)), store.home / 'hooks.log',
-                            home=store.home, task=task['id'])
+    steps = typist.handoff_steps(host, typist.clear_presses(text), expect=text.split('\n')[0][:60])
+    (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'])
+    # Codex keeps its prompt hook's block (measured 0.166); its typist confirms the pane by the block on screen
     live = data.get('context_live') or {}
     return {'decision': 'block', 'reason': (
         'Orbit: handing off to a fresh context (context %s tokens >= handoff point %s). Your request is carried over '

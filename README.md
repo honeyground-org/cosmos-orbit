@@ -324,8 +324,20 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      carried in the ledger, Orbit types `/clear` and one fixed line into the pane, and the fresh
      session takes the task over and runs that request from its brief: nothing to retype. A
      question is still answered in place (it needs the answer you just read); the next request
-     hands off. Claude Code only, and only in cmux or tmux; elsewhere Orbit tells you, as above.
+     hands off. Claude Code and Codex, only in cmux or tmux; elsewhere Orbit tells you, as above.
      `cosmos-orbit context tell` goes back to telling.
+
+     **Codex (codex-cli 0.166, measured in tmux 2026-11-05).** Codex keeps the prompt hook's block, and the
+     blocked request does not come back into the input, so nothing is emptied. Orbit types `/new`, answers
+     "Where should the new conversation run?" with Enter (the current worktree), and types the carry line only
+     once the screen shows a fresh conversation (its logo above an empty input); the fresh session's hooks run
+     when that line is submitted, and the takeover is confirmed after it. Text and an Enter that follows at once
+     are read as a paste, so Enter comes after a pause (and once more if the line is still in the input). Codex
+     can run hooks in its app-server daemon, which reports the pane the first Codex of that home started in, so
+     the pane is confirmed by its screen (the block of this request) before anything is typed; when it is not
+     the reported pane and exactly one other tmux pane shows it, that pane is used, otherwise nothing is typed
+     and you are told. Measured end to end: the request was blocked, `/new` and the question answered, the
+     fresh Codex session took the task over 7 seconds later and did the carried request.
 
      **Measured on a real session (Claude Code 2.1, cmux, 2026-11-04): the request typed after the
      checkpoint was held, `/clear` typed, and the fresh session in the same pane took the task over 2
