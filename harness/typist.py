@@ -69,7 +69,8 @@ def clear_presses(text):
     return min(400, len(lines) + sum(len(line) // 60 for line in lines) + 2)
 
 
-def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, deliver_wait=60.0, expect=''):
+def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, deliver_wait=60.0, expect='',
+                  mod_grace=0):
     """Claude Code: empty the input, /clear, and the carry line once the task was taken over.
 
     Codex (0.166, measured 2026-11-05 in tmux): the blocked prompt does not come back into the input, so nothing is
@@ -80,7 +81,10 @@ def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, d
     if host == 'codex':
         return [('wait', settle), ('codex_new', {'wait': new_wait, 'expect': expect}), ('deliver', deliver_wait),
                 ('adopted', adopt_wait)]
-    return ([('wait', settle)] + [('key', 'ctrl+u')] * presses
+    # Claude Code with Orbit's mod loaded: the mod clears the session and submits the carry line through the host's
+    # own API, nothing typed; the typist waits `mod_grace` for it to take the handoff, then only watches the takeover.
+    grace = [('mod_grace', mod_grace)] if mod_grace else []
+    return ([('wait', settle)] + grace + [('key', 'ctrl+u')] * presses
             + [('text', '/clear'), ('key', 'enter'),
                ('adopted', adopt_wait), ('text', CARRY_LINE), ('key', 'enter')])
 
@@ -156,7 +160,7 @@ def carry_steps(settle=2.0, wait=60.0):
 
 
 def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None, screen=None,
-        find=None):
+        find=None, claim=None):
     """Perform the steps; returns the argv list that ran. Stops at the first failure.
 
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
@@ -171,9 +175,21 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
         if runner(argv) != 0:
             raise RuntimeError('typing failed (%s exit)' % terminal['kind'])
 
+    watch_only = False
     for kind, value in steps:
         if kind == 'wait':
             sleep(value)
+            continue
+        if kind == 'mod_grace':
+            who = claim(value) if claim else 'typist'
+            if who == 'mod':
+                watch_only = True                         # the mod clears and submits; only the takeover is watched
+            elif who != 'typist':
+                raise RuntimeError('the automatic handoff is no longer waiting; nothing was typed')
+            elif not terminal:
+                raise RuntimeError('the mod did not take the handoff and there is no terminal to type into')
+            continue
+        if watch_only and kind != 'adopted':
             continue
         if kind == 'codex_new':
             if screen is None:
@@ -229,9 +245,20 @@ def _main(request):
         def adopted():
             # Taken over by the fresh session's own hook, or handed to the session that appeared in this pane.
             from .continuity import adopt_in_panel
-            return adopt_in_panel(store, request['task'], request['terminal']['target'])
+            return adopt_in_panel(store, request['task'], (request['terminal'] or {}).get('target'))
+
+        def claim(wait):
+            # The mod says it takes the handoff (cosmos-orbit handoff-claim); after `wait` the typist takes it.
+            from .continuity import typist_claim
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                state = store.get(request['task'])['data'].get('handoff_state') or {}
+                if state.get('claimed_by') == 'mod' or state.get('state') == 'adopted':
+                    return 'mod'
+                time.sleep(0.25)
+            return typist_claim(store, request['task'])
     try:
-        run(request['terminal'], [tuple(step) for step in request['steps']], adopted=adopted)
+        run(request['terminal'], [tuple(step) for step in request['steps']], adopted=adopted, claim=claim)
         return 0
     except Exception as error:  # the log is the only place a detached typist can report to
         print(time.strftime('%Y-%m-%dT%H:%M:%S') + ' auto handoff typing error: ' + str(error)[:200], flush=True)

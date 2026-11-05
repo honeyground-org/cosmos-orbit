@@ -1630,7 +1630,9 @@ def context_decision(store, task, settle=False, message_only=False):
         head = 'Orbit: context %s tokens ≥ handoff point %s for task %s. %s' % (
             _k(live.get('tokens')), _k(state.get('limit')), task['id'],
             'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''))
-        if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and detect():
+        from .continuity import mod_present
+        if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') \
+                and (detect() or (data.get('host') == 'claude' and mod_present(store, live.get('session')))):
             body = ('Your next request starts a fresh context by itself (auto handoff) and is carried over; a question is '
                     'answered here first. Back to asking: cosmos-orbit context tell')
         else:

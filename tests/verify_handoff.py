@@ -627,6 +627,89 @@ def main():
         typist.detect, typist.spawn = real_detect, real_spawn
         continuity.set_handoff_mode(store, 'tell')
 
+    print('③-g background handoff through the Claude Code mod: nothing typed, exactly one of mod and typist acts')
+    typed = []
+    try:
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+
+        def ready(name, session, terminal):
+            typist.detect = lambda env=None: terminal
+            root_ = make_repo(base, name)
+            attach.set_switch(store, 'on', root_)
+            tid_, pay_, _, _ = tell(store, root_, base, session)
+            end_turn(store, pay_)
+            return tid_, pay_, root_
+
+        tid_a, pay_a, _ = ready('repo-mod-absent', 'ma1', fake)
+        attach.handle(store, 'prompt', dict(pay_a, prompt='Add CSV export for the report'), 'claude')
+        check('no mod in the session: the typist types at once, no grace (control: no delay without the mod)',
+              typed and 'mod_grace' not in [k for k, _ in typed[-1][1]], typed[-1][1][:3] if typed else None)
+        tid_m, pay_m, root_m = ready('repo-mod', 'mm1', fake)
+        continuity.mod_hello(store, 'mm1')
+        count = len(typed)
+        out = attach.handle(store, 'prompt', dict(pay_m, prompt='Add CSV export for the report'), 'claude')
+        steps = typed[-1][1] if len(typed) > count else []
+        check('the mod is loaded: blocked and carried, the typist first gives the mod its grace',
+              (out or {}).get('decision') == 'block' and out['reason'].startswith(continuity.HANDOFF_PREFIX)
+              and [k for k, _ in steps][:2] == ['wait', 'mod_grace'], (out, steps[:3]))
+        took, why = continuity.claim_handoff(store, 'mm1', 'mod')
+        check('the mod takes it (handoff-claim)', took == tid_m and not why, why)
+        check('…then the typist stands down (exactly one acts)', continuity.typist_claim(store, tid_m) == 'mod')
+        keys, clock_g = [], [0.0]
+        typist.run(fake, [tuple(x) for x in steps], runner=lambda a: keys.append(a) or 0,
+                   sleep=lambda s_: clock_g.__setitem__(0, clock_g[0] + s_), clock=lambda: clock_g[0],
+                   adopted=lambda: True, claim=lambda wait: 'mod')
+        check('…and types nothing at all: it only watches the takeover', keys == [], keys)
+        try:
+            typist.run(fake, [tuple(x) for x in steps], runner=lambda a: keys.append(a) or 0,
+                       sleep=lambda s_: clock_g.__setitem__(0, clock_g[0] + s_), clock=lambda: clock_g[0],
+                       adopted=lambda: False, claim=lambda wait: 'mod')
+            failed = None
+        except RuntimeError as error:
+            failed = str(error)
+        check('…the mod took it but no fresh session took the task over: reported (the user is then told)',
+              failed and 'take the task over' in failed and keys == [], (failed, keys))
+        tid_t, pay_t, _ = ready('repo-mod-late', 'mt1', fake)
+        continuity.mod_hello(store, 'mt1')
+        attach.handle(store, 'prompt', dict(pay_t, prompt='Add CSV export for the report'), 'claude')
+        check('the grace ran out first: the typist takes it …', continuity.typist_claim(store, tid_t) == 'typist')
+        late, why_late = continuity.claim_handoff(store, 'mt1', 'mod')
+        check('…and the mod is refused (it must not clear a session the typist is typing into)',
+              late is None and 'typist' in why_late, why_late)
+        tid_p, pay_p, root_p = ready('repo-mod-plain', 'mp1', None)       # no cmux, no tmux
+        continuity.mod_hello(store, 'mp1')
+        count = len(typed)
+        out = attach.handle(store, 'prompt', dict(pay_p, prompt='Add CSV export for the report'), 'claude')
+        check('a plain terminal with the mod: still handed off (the mod clears it), the typist only watches',
+              (out or {}).get('decision') == 'block' and len(typed) == count + 1 and typed[-1][0] is None
+              and store.get(tid_p)['data']['handoff_state'].get('panel') is None, (out, typed[-1][:1] if typed else None))
+        took_p, _ = continuity.claim_handoff(store, 'mp1', 'mod')
+        start = attach.handle(store, 'session-start', {'cwd': str(root_p), 'session_id': 'mp2', 'source': 'clear'}, 'claude')
+        brief = (start or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+        check("…the session the mod's /clear starts takes the task over and its brief carries the request",
+              took_p == tid_p and (store.session_task('mp2') or {}).get('task_id') == tid_p and 'CARRIED OVER' in brief,
+              (took_p, store.session_task('mp2'), brief[-200:]))
+        tid_n, pay_n, _ = ready('repo-plain-no-mod', 'mn1', None)
+        count = len(typed)
+        out = attach.handle(store, 'prompt', dict(pay_n, prompt='Add CSV export for the report'), 'claude')
+        check('a plain terminal without the mod: the request goes through, nothing is spawned (control)',
+              (out or {}).get('decision') != 'block' and len(typed) == count, out)
+        cli = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home), 'handoff-claim']
+        hello = subprocess.run(cli + ['--hello', '--session', 'mc1'], capture_output=True, text=True)
+        tid_c, pay_c, _ = ready('repo-mod-cli', 'mc1', fake)
+        attach.handle(store, 'prompt', dict(pay_c, prompt='Add CSV export for the report'), 'claude')
+        first = subprocess.run(cli + ['--session', 'mc1'], capture_output=True, text=True)
+        other = subprocess.run(cli + ['--session', 'nobody'], capture_output=True, text=True)
+        check('the command line: --hello says the prefix, a claim returns the carry line, a session with no waiting '
+              'handoff is refused (exit 1)',
+              hello.returncode == 0 and continuity.HANDOFF_PREFIX in hello.stdout and first.returncode == 0
+              and typist.CARRY_LINE in first.stdout and other.returncode == 1,
+              (hello.stdout[-120:], first.stdout[-160:], other.returncode, first.stderr[-200:]))
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
