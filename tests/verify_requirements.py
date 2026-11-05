@@ -160,6 +160,24 @@ def main():
     attach.set_done(store, full['id'], ['D12 twelfth thing'], add=True)
     check('…12 items are accepted (control)', len([d for d in store.get(full['id'])['data']['done'] if d['id'].startswith('D')]) == 12)
 
+    print('①-d a reply is a completion claim only when it says so: not negated, not a status table, not a question')
+    claims = getattr(attach, 'claims_completion', lambda m: bool(attach.CLAIM_WORDS.search(m[-1500:])))
+    not_claims = [
+        # 2026-11-05 11:11, this repository's own session: an answer to the user's question ending in a question
+        '| D1~D10 | ✅ 완료 |\n| D11 | ⏳ 남음 |\n\n진행하라고 하시면 재현 검사부터 시작할게요. 진행할까요?',
+        # 2026-11-05 11:48, another session (screenshot): the claim words only negated
+        '이 Orbit 과제는 하네스 개선 과제입니다. 오늘 한 작업은 이 과제가 아니므로 완료로 주장하지 않습니다. 남은 일을 그대로 기록합니다.',
+        '완료로 기록한 건 없어요. 남은 일은 원장에 적었습니다.',
+        'The export is not done yet; the CSV writer still fails on empty rows.',
+        '| item | state |\n|---|---|\n| tests | ✅ fixed |\nShall I merge it?',
+    ]
+    real_claims = ['구현했고 검사가 모두 통과했습니다.', '완료했습니다. 다음 단계는 없습니다.', 'All fixed and verified; the PR is merged.',
+                   '수정했어요. 완료되었고 문제 없습니다.']
+    wrong = [m[:40] for m in not_claims if claims(m)]
+    check('not a claim: a question at the end, negated claim words, status tables (the two 11-05 misfires)', not wrong, wrong)
+    missed = [m for m in real_claims if not claims(m)]
+    check('…a real completion claim is still caught (control)', not missed, missed)
+
     print('queued verification must yield to changed work')
     queued_root = make_repo(base, 'queued-review')
     queued = attach.create(store, queued_root, 'Implement and deploy the whole feature', 'codex', 'queued', done=['Feature deployed'])
