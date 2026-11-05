@@ -189,6 +189,24 @@ prints what the hooks inject. `cosmos-orbit detach` closes a task without verifi
 task it was bound to by mistake onto a new task of its own, with the corrections and checkpoints they made; the
 old task keeps a record of what moved. It prints the plan; `--apply` does it.
 
+### After the work: verified, reopened, closed, continued
+
+- **Verified is done.** If the session that did the work makes another substantial request while the task is
+  still open, the same task becomes `working` again and its goals are marked to revise (`REOPENED` in the brief).
+  A request from another terminal starts a new task.
+- **Untouched for 12 hours, a task closes** (status `closed`): a verified one (reason `verified`) and an
+  unfinished one whose sessions went quiet (reason `idle`). "Untouched" counts both the task's own record and the
+  last hook of every live session bound to it, so a terminal still in use keeps its task open; a task waiting for
+  Orbit's own review never closes this way. Nothing is deleted, and the closed task's sessions are ended, so no new
+  terminal picks it up as "nobody is on it". Every hook makes the check first, before the hook itself counts as activity.
+- **A closed task comes back only when you ask.** `cosmos-orbit list --closed [--workspace .]` lists closed tasks
+  with their goal, when and why they closed, and their last checkpoint. `cosmos-orbit continue TASK_ID` takes one
+  back: run inside Claude Code or Codex, that session works on it from its next prompt (`--session` names another),
+  and a task the session had just started for the same request closes and its requests move over. Run from a plain
+  shell, the next new session in the task's folder takes it. Orbit never links a new request to a closed task by
+  itself. When a new request looks like one (shared words with its goal or last checkpoints, closed within 7 days, or
+  the same session), the brief names it in one line, as a suggestion.
+
 ## When the request changes
 
 Real work keeps growing: a case is added, a feature widens, a rule changes. Every such change has to

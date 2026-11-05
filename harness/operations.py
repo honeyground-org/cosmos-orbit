@@ -92,6 +92,8 @@ def describe(task, worker_running):
 def describe_simple(task, worker_running):
     """Stable v3 translation keys; legacy wording stays available for old tasks."""
     state = task['status']
+    if state == 'closed':  # untouched for 12 h (lifecycle): shown as what it was, verified or with work remaining
+        state = 'verified' if task.get('reason_code') == 'closed_verified' else 'stalled'
     known = {'received', 'working', 'checking', 'verifying', 'verified', 'needs_input',
              'stalled', 'interrupted', 'paused'}
     recorded = task.get('recorded_status', state)

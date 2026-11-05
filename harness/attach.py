@@ -23,7 +23,7 @@ HOOK_MARK = 'cosmos-orbit hook'  # identifies Orbit entries inside host hook fil
 HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600),
                ('PreCompact', 'pre-compact', 30))
 HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10),), 'codex': HOOK_EVENTS}
-CLOSED = ('verified', 'stalled', 'interrupted')
+CLOSED = ('verified', 'stalled', 'interrupted', 'closed')  # closed: untouched for 12 h, or continued elsewhere (lifecycle)
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 # The claim words, negated in the same clause: '완료로 주장하지 않습니다', '완료로 기록한 건 없어요', 'not done yet'.
 NEGATED_CLAIM = re.compile(r"(완료|끝났|마쳤|구현했|수정했|반영했)[^\n.,!?고며]{0,10}?(않|아니|없|못)"
@@ -1215,9 +1215,20 @@ def brief_text(store, task, event='prompt', for_digest=False):
         state = (data.get('handoff_state') or {})
         continuity = [line.split(':')[0] for line in continuity] + [str(state.get('session')) + str(state.get('state'))]
     lines.extend(continuity)
+    reopened = (data.get('reopens') or [None])[-1]
+    if reopened and task['status'] not in CLOSED and reopened.get('at', '') > ((data.get('done_fixed') or {}).get('at') or ''):
+        lines.append('REOPENED %s (was %s, by %s): the work goes on in this task — revise the goals for the new request '
+                     '(%s done %s --add \'D… \' or --keep) before claiming.' % (
+                         _local(reopened['at'], False), reopened.get('from'), reopened.get('by'), prefix, tid))
     tail = []
     if task['status'] == 'verified':
-        tail.append('VERIFIED. The next substantial request starts a new task.')
+        tail.append('VERIFIED. A substantial request from the session that did this work reopens this task (working, goals '
+                    'to revise); a request from another terminal starts a new task. Untouched for 12 h, it closes.')
+    elif task['status'] == 'closed':
+        closed = data.get('closed') or {}
+        tail.append('CLOSED %s (%s): %s A new request starts a new task. Only if the user asks to go on with this one: '
+                    '%s continue %s' % (_local(closed.get('at')), closed.get('reason') or 'idle',
+                                        data.get('reason') or '', prefix, tid))
     elif task['status'] == 'stalled':
         tail.append('CLOSED (%s). Attach a new request: %s attach "…"' % (data.get('reason_code') or 'stalled', prefix))
     else:
@@ -1340,6 +1351,11 @@ def _handle(store, event, payload, host):
     if value != 'on' or not is_git:
         return None
     session = payload.get('session_id')
+    try:
+        from .lifecycle import sweep
+        sweep(store, session)  # before this hook counts as activity: a task untouched for 12 h closes first
+    except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+        hook_log(store, 'lifecycle sweep skipped: ' + repr(error)[:200])
     if event != 'pre-compact':
         try:
             from .wake import note
@@ -1450,6 +1466,16 @@ def _handle(store, event, payload, host):
                             'request was not run here. Type /clear (Claude Code) or /new (Codex); the fresh session takes it over.'})
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
+        suggested, reopened = None, False
+        if task is not None and task['status'] == 'verified':
+            kind = classify(text, learned(store))
+            if len(text) >= MIN_TASK_PROMPT and kind in ('requirement', 'unsure'):
+                from .lifecycle import reopen_verified
+                try:
+                    again = reopen_verified(store, task['id'], session, text)  # the session goes on: same task
+                    task, reopened = again or task, bool(again)          # (the request is recorded by the reopening)
+                except RuntimeError:
+                    hook_log(store, 'verified task not reopened (busy) ' + task['id'])
         if task is None or task['status'] in CLOSED:
             kind = classify(text, learned(store))
             if len(text) < MIN_TASK_PROMPT or kind in ('trivial', 'question'):
@@ -1458,7 +1484,10 @@ def _handle(store, event, payload, host):
             # The user's prompt is not ours to refuse: keep the ledger's first 24000 characters of a longer one.
             task = create(store, root, text[:24000], host, session, draft=kind == 'unsure',
                           context=recent_prompts(payload.get('transcript_path'), text))
-        else:
+            from .lifecycle import suggestion, suggestion_line
+            similar = suggestion(store, root, session, text, exclude=task['id'])
+            suggested = suggestion_line(similar, session, orbit_command(store)) if similar else None
+        elif not reopened:
             try:
                 task = record_prompt(store, task, text, session)
             except RuntimeError:
@@ -1471,6 +1500,8 @@ def _handle(store, event, payload, host):
         task = continuity.carried_turn(store, task, session)
         brief = serve_brief(store, task, 'prompt', session)
         continuity.mark_carried_served(store, task, session, turn=True)
+        if suggested:
+            brief = (brief + '\n' if brief else '') + suggested  # one line, never a link
         return _context('UserPromptSubmit', brief)
     if event == 'stop':
         if task is None:
