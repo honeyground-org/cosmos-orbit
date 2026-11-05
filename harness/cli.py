@@ -125,6 +125,12 @@ def main(argv=None):
     detach_cmd = sub.add_parser('detach', help='Close the current attached task without verification; the ledger stays')
     detach_cmd.add_argument('id', nargs='?')
     detach_cmd.add_argument('--workspace', default='.')
+    move_cmd = sub.add_parser('move-session', help="Move a session's requests off a task it was bound to by mistake onto "
+                                                    'its own new task (shows the plan; --apply does it)')
+    move_cmd.add_argument('session')
+    move_cmd.add_argument('--since', help='Only requests from this ISO time on (UTC, as the ledger records them)')
+    move_cmd.add_argument('--also', action='append', default=[], help='Another session whose requests move too (e.g. the one before a /clear)')
+    move_cmd.add_argument('--apply', action='store_true', help='Do it; without this only the plan is printed')
     sub.add_parser('lessons', help='Corrections repeated across tasks (guard-rule candidates)').add_argument('--min', type=int, default=2)
     evolve_cmd = sub.add_parser('evolve', help='Self-evolution: local learning, and (maintainers) repeated defects fixed behind gates')
     evolve_cmd.add_argument('--reset-learned', action='store_true', help='Forget the locally learned prompt endings')
@@ -392,6 +398,9 @@ def main(argv=None):
         elif args.command == 'detach':
             from .attach import detach
             result = detach(store, args.workspace, args.id)
+        elif args.command == 'move-session':
+            from .attach import move_session
+            result = move_session(store, args.session, args.since, args.also, args.apply)
         elif args.command == 'lessons':
             from .attach import lessons
             result = lessons(store, args.min)
