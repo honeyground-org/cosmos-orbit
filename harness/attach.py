@@ -1102,7 +1102,7 @@ def brief_text(store, task, event='prompt', for_digest=False):
     if event == 'session-start' and len(data.get('prompts') or []) > 1:
         lines.append('RECENT PROMPTS: ' + ' · '.join('"' + _one_line(p['text'], 100) + '"' for p in data['prompts'][-3:]))
     from .continuity import handoff_lines
-    continuity = handoff_lines(data, prefix, tid, closed=task['status'] in CLOSED)
+    continuity = handoff_lines(data, prefix, tid, closed=task['status'] in CLOSED, digest=for_digest)
     if for_digest:
         state = (data.get('handoff_state') or {})
         continuity = [line.split(':')[0] for line in continuity] + [str(state.get('session')) + str(state.get('state'))]
@@ -1342,8 +1342,9 @@ def _handle(store, event, payload, host):
                                          closed=task['status'] in CLOSED, during_turn=during_turn)
         if handed:
             return handed
+        task = continuity.carried_turn(store, task, session)
         brief = serve_brief(store, task, 'prompt', session)
-        continuity.mark_carried_served(store, task, session)
+        continuity.mark_carried_served(store, task, session, turn=True)
         return _context('UserPromptSubmit', brief)
     if event == 'stop':
         if task is None:

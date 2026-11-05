@@ -652,8 +652,9 @@ def release_adoption(store, task_id, session, root):
     return True
 
 
-def mark_carried_served(store, task, session):
-    """The session has received the carried request in its brief: no other session receives it again."""
+def mark_carried_served(store, task, session, turn=False):
+    """The session has received the carried request in its brief: no other session receives it again. `turn`: it
+    arrived with a prompt, so that prompt's turn is the one that does it (see carried_turn)."""
     carried = task['data'].get('carried_prompt') or {}
     if not carried.get('text') or not session or carried.get('served_to'):
         return
@@ -665,13 +666,41 @@ def mark_carried_served(store, task, session):
             row = current['data'].get('carried_prompt') or {}
             if row.get('at') == carried.get('at') and not row.get('served_to'):
                 row['served_to'] = session
+                if turn:
+                    row['turn_at'] = now()
                 store.save(current, current['status'], 'carried_prompt_served', {'session': session, 'layer': 'context'})
     except (RuntimeError, ValueError):
         pass
 
 
-def handoff_lines(data, prefix, tid, closed=False):
-    """Brief lines about context and continuation; the numbers stay out of the brief digest."""
+def carried_turn(store, task, session):
+    """A prompt from the session that received the carried request. Its first prompt (the carry line, or the user's
+    own) runs the turn that does the request; any later prompt means that turn is over, so later briefs no longer
+    say 'do it now' (2026-11-05: received at 11:01, done, and still 'do it now' in the 12:20 brief). Returns the
+    fresh task."""
+    carried = task['data'].get('carried_prompt') or {}
+    if not carried.get('text') or not session or carried.get('served_to') != session or carried.get('consumed_at'):
+        return task
+    try:
+        with store.lock('task:' + task['id']):
+            current = store.get(task['id'])
+            row = current['data'].get('carried_prompt') or {}
+            if row.get('at') != carried.get('at') or row.get('served_to') != session or row.get('consumed_at'):
+                return current
+            if row.get('turn_at'):
+                row['consumed_at'] = now()
+                store.save(current, current['status'], 'carried_prompt_consumed', {'session': session, 'layer': 'context'})
+            else:
+                row['turn_at'] = now()                   # this prompt's turn does it: its brief still carries it
+                store.save(current, current['status'], 'carried_prompt_turn', {'session': session, 'layer': 'context'})
+            return current
+    except (RuntimeError, ValueError):
+        return task
+
+
+def handoff_lines(data, prefix, tid, closed=False, digest=False):
+    """Brief lines about context and continuation; the numbers stay out of the brief digest. `digest`: lines for
+    the digest, where a carried request that was done still counts as shown (its removal alone sends no brief)."""
     lines = []
     live = data.get('context_live') or {}
     state = data.get('handoff_state') or {}
@@ -703,6 +732,8 @@ def handoff_lines(data, prefix, tid, closed=False):
                          '(Claude Code) or /new (Codex) and the fresh session takes this task over; otherwise the next '
                          'automatic compaction closes the handoff.')
     carried = data.get('carried_prompt') or {}
+    if carried.get('consumed_at') and not digest:
+        carried = {}                                     # the turn that did it is over (carried_turn)
     if carried.get('text') and not closed and current and current != carried.get('from_session') \
             and carried.get('served_to') in (None, current):
         lines.append('CARRIED OVER (the request the user made just before this fresh context; do it now): '

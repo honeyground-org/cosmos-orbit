@@ -201,6 +201,28 @@ def main():
         check('…and the carried request reached exactly that session', store.get(tid_f)['data']['carried_prompt'].get('served_to') == 'f2')
         later = continuity.handoff_lines(dict(store.get(tid_f)['data'], context_live={'session': 'f3'}), 'cosmos-orbit', tid_f)
         check('a later session does not receive the carried request again', not any(l.startswith('CARRIED') for l in later), later)
+        # 2026-11-05: the session that received the request at 11:01 (and did it) was told to do it 'now' again in
+        # its 12:20 brief. The request belongs to the turn the carry line starts, not to every brief after it.
+        pay_f2 = {'cwd': str(root_f), 'session_id': 'f2'}
+        mine = continuity.handoff_lines(store.get(tid_f)['data'], 'cosmos-orbit', tid_f)
+        check('during the turn the carry line started, the request is still in its brief (control)',
+              any(l.startswith('CARRIED') for l in mine), mine)
+        end_turn(store, pay_f2)
+        attach.handle(store, 'prompt', dict(pay_f2, prompt='이어서 진행해'), 'claude')  # the 12:20 go-ahead
+        done_f = store.get(tid_f)
+        mine = continuity.handoff_lines(done_f['data'], 'cosmos-orbit', tid_f)
+        check("the receiving session's next request no longer carries it (the 12:20 brief)",
+              not any(l.startswith('CARRIED') for l in mine), mine)
+        undone = json.loads(json.dumps(done_f))
+        undone['data']['carried_prompt'].pop('consumed_at', None)
+        check('…dropping the line alone does not change the digest, so it sends no brief by itself',
+              attach.brief_digest(store, done_f) == attach.brief_digest(store, undone)
+              and 'consumed_at' in done_f['data']['carried_prompt'], done_f['data']['carried_prompt'])
+        attach.handle(store, 'pre-compact', dict(pay_f2, trigger='auto'), 'claude')  # the whole brief goes again
+        resent = attach.handle(store, 'prompt', dict(pay_f2, prompt='이어서 진행해'), 'claude')
+        resent = (resent or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+        check('…the whole brief sent again after a compaction does not carry it either',
+              'GOAL:' in resent and 'CARRIED OVER' not in resent, resent[-400:])
         count = len(typed)
         root_g = make_repo(base, 'repo-codex')
         attach.set_switch(store, 'on', root_g)
@@ -275,6 +297,10 @@ def main():
         check('the old session runs another turn: its brief holds the request for it (HELD REQUEST)',
               'HELD REQUEST' in brief and 'one row per item' in brief, brief[-500:])
         check('…served to the old session once', store.get(tid_n)['data']['carried_prompt'].get('served_to') == 'n1')
+        end_turn(store, pay_n)
+        attach.handle(store, 'prompt', dict(pay_n, prompt='이어서 진행해'), 'claude')
+        check("…and that session's next request no longer holds it (the turn that did it is over)",
+              not any(l.startswith('HELD') for l in continuity.handoff_lines(store.get(tid_n)['data'], 'cosmos-orbit', tid_n)))
         end_turn(store, pay_n)
         count = len(typed)
         start = attach.handle(store, 'session-start', {'cwd': str(root_n), 'session_id': 'n2', 'source': 'clear'}, 'claude')
