@@ -405,7 +405,7 @@ def observe(store, task, payload, host, event, source=None):
         state = data.get('handoff_state') or {}
         if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
                 and (state.get('session') != live.get('session') or state.get('state') == 'compacted')
-                and task['status'] not in ('stalled', 'interrupted')):
+                and task['status'] not in ('stalled', 'interrupted', 'closed')):
             ready = ready_checkpoint(data, live, state)
             data['handoff_state'] = {'session': live.get('session'), 'state': 'checkpointed' if ready else 'recommended',
                                      'tokens': live['tokens'], 'limit': live['limit'], 'at': now()}
@@ -846,7 +846,7 @@ def resume_carried(store, task, session, host, terminal=None, spawn=None):
     data = task['data']
     state = data.get('handoff_state') or {}
     carried = data.get('carried_prompt') or {}
-    if host != 'claude' or handoff_mode(store) != 'auto' or task['status'] in ('verified', 'stalled', 'interrupted'):
+    if host != 'claude' or handoff_mode(store) != 'auto' or task['status'] in ('verified', 'stalled', 'interrupted', 'closed'):
         return None
     if state.get('state') != 'adopted' or state.get('adopted_by') != session or state.get('adopted_from') != 'auto_failed':
         return None

@@ -48,8 +48,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='cosmos-orbit', description='Keep a native CLI task on goal, recover interruptions and verify its conclusion')
     parser.add_argument('--home', help='Private task store')
     sub = parser.add_subparsers(dest='command')
-    for name in ('commands', 'doctor', 'list'):
+    for name in ('commands', 'doctor'):
         sub.add_parser(name)
+    list_cmd = sub.add_parser('list', help='Tasks, newest first; --closed: the closed tasks you can continue')
+    list_cmd.add_argument('--closed', action='store_true', help='Closed tasks: goal, when and why it closed, last checkpoint')
+    list_cmd.add_argument('--workspace', help='Only this folder (with --closed)')
+    continue_cmd = sub.add_parser('continue', help='Take a closed (or verified) task back: this session works on it again, '
+                                                    'or, from a plain shell, the next new session in its folder')
+    continue_cmd.add_argument('id')
+    continue_cmd.add_argument('--session', help='The session that takes it (default: the Claude Code or Codex session this runs in)')
     start = sub.add_parser('start', help='Start a native task in an isolated Git clone')
     start.add_argument('prompt', nargs='?')
     start.add_argument('--workspace', default='.')
@@ -492,7 +499,16 @@ def main(argv=None):
         elif args.command == 'messages':
             result = store.messages(args.id)
         elif args.command == 'list':
-            result = store.list()
+            if args.closed:
+                from .lifecycle import closed_tasks
+                result = closed_tasks(store, args.workspace)
+            else:
+                result = store.list()
+        elif args.command == 'continue':
+            from .attach import _pane
+            from .lifecycle import reopen
+            session = args.session or os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CODEX_THREAD_ID') or None
+            result = reopen(store, args.id, session, pane=(_pane() or {}).get('target'))
         elif args.command == 'pause':
             store.set_paused(args.id, True)
             result = {'id': args.id, 'pause_requested': True}

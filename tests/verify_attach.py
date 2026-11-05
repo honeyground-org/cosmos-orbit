@@ -499,8 +499,15 @@ def main():
     attach.detach(store, root)
     task2 = store.get(task2['id'])
     check('detach → stalled(detached), attachment cleared', task2['status'] == 'stalled' and task2['data']['reason_code'] == 'detached' and store.attached(str(root)) is None)
-    check('next long prompt starts a new task', attach.handle(store, 'prompt', dict(prompt, prompt='Now add a multiply function with tests'), 'claude')
+    check('next long prompt from another session starts a new task', attach.handle(
+        store, 'prompt', dict(prompt, session_id='s3', prompt='Now add a multiply function with tests'), 'claude')
           and attach.current_task(store, root)['id'] not in (tid, task2['id']))
+    # 2026-11-05 lifecycle: the session that did the verified work goes on in the same task (goals to revise).
+    attach.handle(store, 'prompt', dict(prompt, prompt='Now add a divide function with tests'), 'claude')
+    again = store.get(tid)
+    check("…while the verified task's own session reopens it (working, the request pending)",
+          again['status'] == 'working' and 'divide' in (again['data'].get('requirements_pending') or {}).get('text', '')
+          and attach.current_task(store, root)['id'] == tid, (again['status'], again['data'].get('requirements_pending')))
 
     print('⑥ hooks install / uninstall round trip (temporary host files)')
     os.environ['CLAUDE_CONFIG_DIR'] = str(base / 'claude')

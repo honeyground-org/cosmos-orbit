@@ -21,7 +21,8 @@ from . import failures
 # verified · needs_input · stalled · interrupted · paused. Old states stay readable through LABELS (legacy mapping).
 ACTIVE = {'planning', 'running', 'applying', 'verifying', 'evaluating', 'repairing', 'working', 'checking'}
 ATTENTION = {'needs_review', 'blocked', 'interrupted', 'needs_input', 'stale', 'unattended', 'stalled'}
-V3_STATES = ('received', 'working', 'checking', 'verifying', 'verified', 'needs_input', 'stalled', 'interrupted', 'paused')
+V3_STATES = ('received', 'working', 'checking', 'verifying', 'verified', 'needs_input', 'stalled', 'interrupted', 'paused',
+             'closed')
 V3_STAGE = {'received': 0, 'working': 1, 'checking': 2, 'verifying': 3, 'verified': 4}
 LABELS = {
     'en': {'received': 'Queued', 'ready': 'Ready', 'planning': 'Planning', 'running': 'Working',
