@@ -125,6 +125,10 @@ def main(argv=None):
     detach_cmd = sub.add_parser('detach', help='Close the current attached task without verification; the ledger stays')
     detach_cmd.add_argument('id', nargs='?')
     detach_cmd.add_argument('--workspace', default='.')
+    claim_cmd2 = sub.add_parser('handoff-claim', help="For Orbit's Claude Code mod: take this session's automatic handoff "
+                                                       '(it clears and submits; nothing is typed), or --hello once per session')
+    claim_cmd2.add_argument('--session', required=True)
+    claim_cmd2.add_argument('--hello', action='store_true', help='Say the mod is loaded in this session')
     move_cmd = sub.add_parser('move-session', help="Move a session's requests off a task it was bound to by mistake onto "
                                                     'its own new task (shows the plan; --apply does it)')
     move_cmd.add_argument('session')
@@ -398,6 +402,17 @@ def main(argv=None):
         elif args.command == 'detach':
             from .attach import detach
             result = detach(store, args.workspace, args.id)
+        elif args.command == 'handoff-claim':
+            from . import continuity, typist
+            if args.hello:
+                continuity.mod_hello(store, args.session)
+                result = {'hello': True, 'handoff_prefix': continuity.HANDOFF_PREFIX}
+            else:
+                task_id, why = continuity.claim_handoff(store, args.session, 'mod')
+                if not task_id:
+                    print(json.dumps({'claimed': False, 'reason': why}))
+                    return 1
+                result = {'claimed': True, 'task': task_id, 'carry_line': typist.CARRY_LINE}
         elif args.command == 'move-session':
             from .attach import move_session
             result = move_session(store, args.session, args.since, args.also, args.apply)

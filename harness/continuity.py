@@ -526,7 +526,8 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         return None
     from . import typist
     terminal = typist.detect() if terminal is None else terminal
-    if not terminal:
+    mod = host == 'claude' and mod_present(store, session)
+    if not terminal and not mod:
         return None
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
@@ -535,15 +536,66 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
             return None
         data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
-        state.update(state='auto', auto_at=now(), panel=terminal['target'])  # only the session in this pane takes it
-        store.save(task, task['status'], 'handoff_auto', {'terminal': terminal['kind'], 'layer': 'context'})
-    steps = typist.handoff_steps(host, typist.clear_presses(text), expect=text.split('\n')[0][:60])
+        state.update(state='auto', auto_at=now(), panel=(terminal or {}).get('target'))  # only this pane's session takes it
+        store.save(task, task['status'], 'handoff_auto', {'terminal': (terminal or {}).get('kind'), 'mod': mod,
+                                                          'layer': 'context'})
+    steps = typist.handoff_steps(host, typist.clear_presses(text), expect=text.split('\n')[0][:60],
+                                 mod_grace=MOD_GRACE_SECONDS if mod else 0)
     (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'])
     # Codex keeps its prompt hook's block (measured 0.166); its typist confirms the pane by the block on screen
     live = data.get('context_live') or {}
     return {'decision': 'block', 'reason': (
-        'Orbit: handing off to a fresh context (context %s tokens >= handoff point %s). Your request is carried over '
+        HANDOFF_PREFIX + ' (context %s tokens >= handoff point %s). Your request is carried over '
         'and runs there by itself; there is nothing to retype.' % (_k(live.get('tokens')), _k(state.get('limit'))))}
+
+
+HANDOFF_PREFIX = 'Orbit: handing off to a fresh context'  # the block reason starts so; the mod reads it
+MOD_GRACE_SECONDS = 3.0  # how long the typist waits for the Claude Code mod to take the handoff before it types
+MOD_KEY = 'mod:claude:'
+
+
+def mod_hello(store, session):
+    """The Claude Code mod is loaded in this session (it says so once per session id): an automatic handoff here
+    can run in the background, /clear and the carry line through the host's own API, nothing typed."""
+    if session:
+        store.preference(MOD_KEY + session, now())
+
+
+def mod_present(store, session):
+    return bool(session and store.preference(MOD_KEY + session))
+
+
+def claim_handoff(store, session, by):
+    """Exactly one of the mod and the typist performs an automatic handoff. Returns (task id, '') when `by` holds
+    it now (it took it, or held it already), else (None, why)."""
+    binding = store.session_task(session) if session else None
+    if not binding or not binding.get('task_id'):
+        return None, 'the session has no task'
+    with store.lock('task:' + binding['task_id'], timeout=2.0):
+        task = store.get(binding['task_id'])
+        state = task['data'].get('handoff_state') or {}
+        if state.get('state') != 'auto' or state.get('session') != session:
+            return None, 'no automatic handoff of this session is waiting'
+        if state.get('claimed_by'):
+            return (task['id'], '') if state['claimed_by'] == by else (None, 'taken by the ' + state['claimed_by'])
+        state.update(claimed_by=by, claimed_at=now())
+        store.save(task, task['status'], 'handoff_claimed', {'by': by, 'session': session, 'layer': 'context'})
+        return task['id'], ''
+
+
+def typist_claim(store, task_id):
+    """The typist's side of claim_handoff once its grace ran out: 'typist' when it may type, 'mod' when the mod
+    took it first, None when no automatic handoff waits any more."""
+    with store.lock('task:' + task_id, timeout=2.0):
+        task = store.get(task_id)
+        state = task['data'].get('handoff_state') or {}
+        if state.get('claimed_by'):
+            return state['claimed_by']
+        if state.get('state') != 'auto':
+            return None
+        state.update(claimed_by='typist', claimed_at=now())
+        store.save(task, task['status'], 'handoff_claimed', {'by': 'typist', 'layer': 'context'})
+        return 'typist'
 
 
 def auto_failed(store, task_id, reason):

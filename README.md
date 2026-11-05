@@ -327,6 +327,20 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      hands off. Claude Code and Codex, only in cmux or tmux; elsewhere Orbit tells you, as above.
      `cosmos-orbit context tell` goes back to telling.
 
+     **Background handoff in Claude Code (optional mod, measured 2026-11-05).** With Orbit's mod loaded, Claude
+     Code clears the session and submits the carry line itself, through its own API: nothing is typed into the
+     terminal, which shows only the `/clear`, the carry line and two short notices (handing off; a fresh session
+     took the task over), and it works in any terminal, not only cmux or tmux. Orbit still decides: its prompt
+     hook blocks the request and carries it; the mod acts only on that block and only after it took the handoff
+     (`cosmos-orbit handoff-claim`), so exactly one of the mod and the typist acts. The typist waits three
+     seconds for the mod, then types as before; without the mod there is no wait. The mod also empties the input,
+     where Claude Code puts a blocked request back (left there, one Enter would run it twice). Measured end to
+     end in tmux (Claude Code 2.1.318): the mod took the handoff 0.5 s after the block, the fresh session took the
+     task over 0.4 s later and ran the carried request; the input was empty. Enable it for every session by
+     adding the folder `install.sh` copies (`~/.local/share/local-harness-app/claude-mod`) to
+     `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of `~/.claude/settings.json`, or for one session with
+     `claude --plugin-dir <that folder>`.
+
      **Codex (codex-cli 0.166, measured in tmux 2026-11-05).** Codex keeps the prompt hook's block, and the
      blocked request does not come back into the input, so nothing is emptied. Orbit types `/new`, answers
      "Where should the new conversation run?" with Enter (the current worktree), and types the carry line only

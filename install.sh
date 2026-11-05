@@ -35,9 +35,13 @@ fi
 for LAUNCHER in cosmos-orbit harness; do
   ln -sfn "$INSTALL_DIR/venv/bin/$LAUNCHER" "$BIN_DIR/$LAUNCHER"
 done
+# The optional Claude Code mod for the background handoff: copied beside the app, enabled only by the user.
+rm -rf "$INSTALL_DIR/claude-mod"
+cp -R "$SOURCE_DIR/claude-mod" "$INSTALL_DIR/claude-mod"
 printf '\nInstalled Cosmos Orbit. Run: %s/cosmos-orbit\n' "$BIN_DIR"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) printf 'Add this directory to your PATH: %s\n' "$BIN_DIR" ;; esac
 printf 'Next: cosmos-orbit doctor\nNo worker, model call, or background service was started.\n'
+printf 'Optional, the background handoff in Claude Code: add %s to CLAUDE_CODE_PLUGIN_DIRS (README: Background handoff).\n' "$INSTALL_DIR/claude-mod"
 
 rm -rf "$WHEEL_DIR"
 trap - EXIT HUP INT TERM
