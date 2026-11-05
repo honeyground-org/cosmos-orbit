@@ -376,6 +376,22 @@ def main():
         check('…and is handed the task once the grace has passed',
               continuity.adopt_in_panel(store, k['id'], '%PANE-K4', grace=0) is True
               and (store.session_task('K4') or {}).get('task_id') == k['id'])
+
+        print("③-e after a failed auto handoff the user's own /clear in that pane takes it across folders (review counterexample)")
+        in_pane('%PANE-AF')
+        begin('AF1', 'startup', launch)
+        prompt(store, wt, 'AF1', 'Package the build and upload the artifact')
+        failed = attach.resolve_task(store, wt, 'AF1')
+        arm(failed, session='AF1', state='auto_failed', panel='%PANE-AF', at=now(), auto_at=now(), failed_at=now())
+        end('AF1', wt)                                    # the user types /clear: the old session ends first
+        in_pane('%PANE-AF-OTHER')
+        other_af, _ = begin('AF-other', 'clear', launch)
+        check('a /clear in another pane does not take it (control)', not other_af or other_af['id'] != failed['id'],
+              other_af and other_af['id'])
+        in_pane('%PANE-AF')
+        took_af, _ = begin('AF2', 'clear', launch)
+        check("the user's /clear in the pane Orbit had typed into takes it although it starts one folder up",
+              took_af and took_af['id'] == failed['id'], took_af and took_af['id'])
     finally:
         typist.detect = real_detect
 

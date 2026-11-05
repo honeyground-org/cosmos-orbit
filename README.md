@@ -174,6 +174,10 @@ What happens in an attached session:
    unavailable; they are not claimed to have resumed. Pause, input dependency, session replacement and
    Orbit off cancel supervision. Pending context handoffs take precedence; the supervisor waits for them.
    After two synchronous Stop blocks in one turn, the rate-limited observer takes over. Wake limits and one delivery per stopped turn prevent duplicate sends.
+   The observer is a background process and opens no terminal of its own, in cmux as in tmux. It leaves
+   when nothing is left to resume, or when the same state has lasted 15 minutes (60 while a review runs);
+   the next Stop starts one again if one is needed. Model calls Orbit makes itself (a review, an owned
+   executor) run with `ORBIT=off`, so they never show up as user sessions or tasks.
 7. `cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md` renders the ledger as Markdown. No
    handoff is written by hand. `cosmos-orbit lessons` lists corrections repeated across tasks, the
    candidates for a guard rule.

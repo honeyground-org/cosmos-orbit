@@ -14,6 +14,20 @@ from .context import claude_measurement, codex_measurement
 from .recovery import atomic_json, process_identity, failure
 
 
+def child_env(read_only=False):
+    """The environment of a model process Orbit starts: Orbit is off inside it.
+
+    A reviewer or an owned executor is Orbit's own call, not a user's session. With the hooks installed
+    globally, the CLI it runs would otherwise report to Orbit as a new user session: observed 2026-11-04,
+    two review calls became 'working' user tasks ("Review a separate executor ...") and one of them got a
+    supervisor that polled for 16 hours."""
+    env = dict(os.environ, ORBIT='off')
+    env.pop('COSMOS_ORBIT', None)
+    if read_only:
+        env['PYTHONDONTWRITEBYTECODE'] = '1'
+    return env
+
+
 def obj(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
@@ -156,8 +170,7 @@ class Provider:
             runner = [sys.executable, str(Path(__file__).with_name('native_runner.py')), str(receipt), *command]
             process = subprocess.Popen(runner, cwd=str(workspace or directory), stdin=stdin,
                                        stdout=stdout, stderr=stderr, text=True, encoding='utf-8',
-                                       start_new_session=True, pass_fds=lease_fds,
-                                       env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1') if read_only else None)
+                                       start_new_session=True, pass_fds=lease_fds, env=child_env(read_only))
             record['process'] = process_identity(process.pid)
             callback = getattr(self, 'on_call', None)
             if callback:

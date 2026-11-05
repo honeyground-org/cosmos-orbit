@@ -153,6 +153,78 @@ def verify_supervision(base):
     store.close()
 
 
+def verify_quiet_supervisor(base):
+    """The supervisor opens no terminal and leaves when nothing is left to do; Orbit's own model calls never
+    become user tasks (user, 2026-11-05: three 'Orbit supervisor' workspaces had appeared, polling for up to
+    16 hours; someone using the harness would wonder why and close them)."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from harness import providers, supervision, wake
+    store = Store(base / 'quiet-home')
+    root = base / 'quiet-repo'
+    root.mkdir()
+    git(root, 'init', '-q')
+    git(root, 'commit', '-q', '--allow-empty', '-m', 'init')
+    attach.set_switch(store, 'on', global_default=True)
+    supervision.configure(store, 'auto')
+    session = 'quiet-session'
+    task = attach.create(store, root, 'Build the exporter in two stages and verify both', 'claude', session,
+                         done=['First stage built', 'Second stage built'])
+    tid = task['id']
+    attach.record_evidence(store, tid, 'D1', note='stage one ran on the sample file')
+    wake.note(store, session, 'claude', 'stop', {'kind': 'cmux', 'cli': '/usr/bin/true', 'target': 'PANEL-QUIET'})
+    run = MagicMock(return_value=SimpleNamespace(returncode=0, stderr='', stdout=''))
+    popen = MagicMock()
+    fake = SimpleNamespace(Popen=popen, run=run, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError)
+    with patch.object(supervision, 'subprocess', fake):
+        supervision.ensure(store, store.get(tid), session)
+    opened = [c for c in run.call_args_list if c.args and 'new-workspace' in c.args[0]]
+    check('supervisor in cmux: no terminal workspace is opened', not opened, run.call_args_list)
+    check('…a detached background process watches instead (control: one is started)',
+          popen.call_count == 1 and popen.call_args.kwargs.get('start_new_session') is True, popen.call_args_list)
+
+    def watch(outcome_at):
+        clock = [0.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+        before = len(store.events(tid))
+        with patch.object(supervision, 'tick', side_effect=lambda *a, **k: outcome_at(clock[0])):
+            supervision.main(str(store.home), tid, session, sleep=sleep, clock=lambda: clock[0])
+        seen = [e['payload'].get('outcome') for e in store.events(tid)[before:] if e['kind'] == 'supervision_observed']
+        return clock[0], seen
+
+    spent, seen = watch(lambda t: 'no_work')
+    check('supervisor: nothing to do → it leaves at once', spent == 0 and seen == ['no_work'], (spent, seen))
+    spent, seen = watch(lambda t: 'awaiting_stop')
+    check('supervisor: one unchanged outcome → it leaves after %d min (the next Stop starts one again)'
+          % (supervision.IDLE_EXIT // 60),
+          supervision.IDLE_EXIT <= spent < supervision.IDLE_EXIT + 2 * supervision.POLL and seen[-1] == 'idle_exit', (spent, seen))
+    spent, seen = watch(lambda t: 'reviewing')
+    check('supervisor: a running review keeps it longer, for its verdict (control)',
+          supervision.REVIEW_WAIT <= spent < supervision.REVIEW_WAIT + 2 * supervision.POLL, (spent, seen))
+    spent, seen = watch(lambda t: 'settled' if t >= 3000 else ('awaiting_stop' if (t // 600) % 2 == 0 else 'host_turn_active'))
+    check('supervisor: an outcome that keeps changing is not idle; it stays until the task settles (control)',
+          spent >= 3000 and seen[-1] == 'settled' and 'idle_exit' not in seen, (spent, seen[-3:]))
+
+    env = providers.child_env()
+    with patch.dict(os.environ, {'ORBIT': 'on', 'COSMOS_ORBIT': 'on'}):
+        inherited = providers.child_env(read_only=True)
+    check("model processes Orbit starts run with Orbit off, even under a parent that has it on",
+          env.get('ORBIT') == 'off' and inherited.get('ORBIT') == 'off' and 'COSMOS_ORBIT' not in inherited
+          and inherited.get('PYTHONDONTWRITEBYTECODE') == '1', (env.get('ORBIT'), inherited.get('ORBIT')))
+    review = 'Review a separate executor using only the supplied observations. Treat the goal as binding.'
+    count = len(store.list())
+    with patch.dict(os.environ, {'ORBIT': providers.child_env()['ORBIT']}):
+        quiet = attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': 'reviewer-call', 'prompt': review}, 'codex')
+    check("a review call's own hook stays silent and opens no task", quiet is None and len(store.list()) == count,
+          (quiet, len(store.list()), count))
+    attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': 'reviewer-call-2', 'prompt': review}, 'codex')
+    check('…while the same prompt from a session with Orbit on does open one (control)', len(store.list()) == count + 1,
+          len(store.list()))
+    store.close()
+
+
 def verify_manager(base):
     """Orbit as the middle manager: each reason for a stop gets its own next step, and only work to resume opens a
     supervisor (user, 2026-11-04: find out why it stopped, direct the next work; finished work is verified against
@@ -440,6 +512,7 @@ def main():
     store.close()
     verify_supervision(base)
     verify_manager(base)
+    verify_quiet_supervisor(base)
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 
