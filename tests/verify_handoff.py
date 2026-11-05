@@ -240,6 +240,63 @@ def main():
         typist.detect, typist.spawn = real_detect, real_spawn
         continuity.set_handoff_mode(store, 'tell')
 
+    print('③-a a checkpoint written just before the point is the handoff\'s: the next request hands off (2026-11-05 12:20)')
+    # Observed: the session wrote a checkpoint at 12:18 (341k, point 350k); at 12:20 the user's go-ahead crossed the
+    # point (355k) and was only "recommended": no handoff, a checkpoint asked for again, and the user had to send
+    # another message.
+    typed = []
+    try:
+        typist.detect = lambda env=None: fake
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+
+        def near_point(name, checkpoint_at, compact_to=None):
+            """A session that wrote its checkpoint at `checkpoint_at` tokens, then (optionally) was compacted, then
+            crossed the 200k point with a go-ahead. Returns (task id, reply to the go-ahead)."""
+            root_ = make_repo(base, name)
+            attach.set_switch(store, 'on', root_)
+            path_ = base / (name + '.jsonl')
+            turn(path_, 50_000)
+            pay_ = {'cwd': str(root_), 'session_id': name, 'transcript_path': str(path_)}
+            attach.handle(store, 'session-start', dict(pay_, source='startup'), 'claude')
+            attach.handle(store, 'prompt', dict(pay_, prompt='Refactor app.py into a module with tests and keep the output identical'), 'claude')
+            tid_ = attach.current_task(store, root_)['id']
+            turn(path_, checkpoint_at)
+            attach.handle(store, 'prompt', dict(pay_, prompt='keep going with the remaining tests'), 'claude')
+            continuity.record_checkpoint(store, tid_, 'Write tests/test_mod.py', notes='mod.py extracted')
+            end_turn(store, pay_)
+            if compact_to:
+                turn(path_, compact_to)
+                attach.handle(store, 'prompt', dict(pay_, prompt='이어서 진행해'), 'claude')
+                end_turn(store, pay_)
+            turn(path_, 205_000)
+            return tid_, attach.handle(store, 'prompt', dict(pay_, prompt='이어서 진행해'), 'claude')
+
+        count = len(typed)
+        tid_r, out = near_point('repo-early-checkpoint', 190_000)
+        check('a checkpoint at 95% of the point: the go-ahead that crosses it hands off at once (the 12:20 defect)',
+              (out or {}).get('decision') == 'block' and len(typed) == count + 1
+              and store.get(tid_r)['data']['handoff_state'].get('state') == 'auto', (out, store.get(tid_r)['data']['handoff_state']))
+        count = len(typed)
+        tid_r, out = near_point('repo-old-checkpoint', 100_000)
+        check('control: a checkpoint at half the point is stale; a fresh one is asked for first',
+              (out or {}).get('decision') != 'block' and len(typed) == count
+              and store.get(tid_r)['data']['handoff_state'].get('state') == 'recommended', store.get(tid_r)['data']['handoff_state'])
+        count = len(typed)
+        tid_r, out = near_point('repo-checkpoint-before-compaction', 190_000, compact_to=40_000)
+        check('control: a checkpoint from before a compaction describes a context that is gone; a fresh one is asked for',
+              (out or {}).get('decision') != 'block' and len(typed) == count
+              and store.get(tid_r)['data']['handoff_state'].get('state') == 'recommended', store.get(tid_r)['data']['handoff_state'])
+        continuity.set_handoff_mode(store, 'tell')
+        count = len(typed)
+        tid_r, out = near_point('repo-early-checkpoint-tell', 190_000)
+        check('tell mode: nothing is typed, the handoff is ready (checkpointed) and the Stop hook tells the user (control)',
+              (out or {}).get('decision') != 'block' and len(typed) == count
+              and store.get(tid_r)['data']['handoff_state'].get('state') == 'checkpointed', store.get(tid_r)['data']['handoff_state'])
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+
     print('③-b a message sent while the session is working never starts the handoff (2026-11-05 10:56)')
     # Observed: a go-ahead started a turn; a request typed while that turn ran was blocked, /clear went into the host's
     # input queue, the typist gave up after 25 s, and the queued /clear ran 4 minutes later when the turn ended.
