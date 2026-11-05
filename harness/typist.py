@@ -76,16 +76,32 @@ def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0):
                ('adopted', adopt_wait), ('text', CARRY_LINE), ('key', 'enter')])
 
 
-def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic):
+def carry_steps(settle=2.0, wait=60.0):
+    """The carry line alone, for a fresh session that took the task over while no typist waited for it (the
+    automatic /clear had failed and the user cleared by hand): typed once its input line reads empty."""
+    return [('wait', settle), ('deliver', wait)]
+
+
+def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None):
     """Perform the steps; returns the argv list that ran. Stops at the first failure.
 
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
-    when the wait runs out, the typing stops, so the carry line never lands in the old session."""
+    when the wait runs out, the typing stops, so the carry line never lands in the old session. A 'deliver'
+    step types the carry line once the screen shows an empty input line (wake.deliver), never over the user's
+    own typing."""
     runner = runner or (lambda argv: subprocess.run(argv, capture_output=True, timeout=15).returncode)
     done = []
     for kind, value in steps:
         if kind == 'wait':
             sleep(value)
+            continue
+        if kind == 'deliver':
+            if deliver is None:
+                from .wake import deliver
+            outcome, typed = deliver(terminal, wait=value, line=CARRY_LINE)
+            done.extend(typed)
+            if outcome != 'woken':
+                raise RuntimeError('the carry line was not delivered (%s)' % outcome)
             continue
         if kind == 'adopted':
             deadline = clock() + value

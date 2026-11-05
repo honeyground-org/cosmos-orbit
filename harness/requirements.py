@@ -257,7 +257,9 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
     else:
         final, origins = texts, [origin] * len(texts)
     if len(final) > MAX_ITEMS:
-        raise ValueError('At most %d completion definitions; merge items that test the same behaviour' % MAX_ITEMS)
+        raise ValueError('At most %d completion definitions; this revision would make %d. Nothing was saved: the %d '
+                         'current items stand. Merge items that test the same behaviour and run it again'
+                         % (MAX_ITEMS, len(final), len(existing)))
     items = completion_items(final, commands, origin)
     for item, item_origin in zip([i for i in items if i['id'].startswith('D')], origins):
         item['origin'] = item_origin

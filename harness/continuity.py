@@ -455,18 +455,31 @@ def auto_checkpoint(store, task, trigger):
                              by='orbit', kind='auto')
 
 
-def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=None, spawn=None):
+def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=None, spawn=None, during_turn=False):
     """Auto mode: the user's next request after a checkpointed handoff starts the fresh context by itself.
 
     The request is carried in the ledger, the prompt is blocked here, and a detached typist types /clear and one
     fixed line; the fresh session takes the task over and finds the request in its brief. Only Claude Code (its
     prompt hook can block a prompt), only in cmux or tmux (something can type), only a request or a go-ahead: a
     question about the last answer needs that answer, so it is answered in place and the next request hands off.
+    Never during a turn: a prompt typed while the session works goes into that turn, and keys typed then wait in
+    the host's input queue (2026-11-05: the blocked request was lost to that turn and the queued /clear ran four
+    minutes later, after the typist had given up). The handoff waits for the first request after the turn ends.
     Returns the hook reply, or None to let the prompt through."""
     if closed or host != 'claude' or kind not in ('requirement', 'trivial') or handoff_mode(store) != 'auto':
         return None
     state = task['data'].get('handoff_state') or {}
     if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
+        return None
+    if during_turn:
+        try:
+            with store.lock('task:' + task['id']):
+                current = store.get(task['id'])
+                store.save(current, current['status'], 'handoff_deferred',
+                           {'reason': 'the prompt arrived during a turn; the next request after it hands off',
+                            'session': session, 'layer': 'context'})
+        except (RuntimeError, ValueError):
+            pass
         return None
     from . import typist
     terminal = typist.detect() if terminal is None else terminal
@@ -549,7 +562,7 @@ def adopt_in_panel(store, task_id, panel, grace=ADOPT_GRACE_SECONDS):
             bound = store.session_task(fresh)
             if bound and bound['task_id'] not in (NO_TASK, task_id):
                 return False
-            state.update(state='adopted', adopted_by=fresh)
+            state.update(state='adopted', adopted_by=fresh, adopted_from='auto')
             store.save(task, task['status'], 'handoff_adopted', {'session': fresh, 'by': 'typist', 'layer': 'context'})
             store.bind_session(fresh, task_id, (bound or {}).get('workspace') or task['workspace'])
             if state.get('session') and state['session'] != fresh:
@@ -559,10 +572,22 @@ def adopt_in_panel(store, task_id, panel, grace=ADOPT_GRACE_SECONDS):
         return False                                     # busy this instant: the typist asks again
 
 
+def held_back(data, session):
+    """True when the carried request belongs back to the session it came from: the automatic /clear failed and
+    that session ran another turn, so it does the request itself (2026-11-05: the old session did it, and the
+    fresh session four minutes later was still told to do it 'now')."""
+    state = data.get('handoff_state') or {}
+    carried = data.get('carried_prompt') or {}
+    return bool(session and session == carried.get('from_session') and state.get('state') == 'auto_failed'
+                and state.get('session') == session)
+
+
 def mark_carried_served(store, task, session):
-    """The fresh session has received the carried request in its brief: no later session receives it again."""
+    """The session has received the carried request in its brief: no other session receives it again."""
     carried = task['data'].get('carried_prompt') or {}
-    if not carried.get('text') or not session or session == carried.get('from_session') or carried.get('served_to'):
+    if not carried.get('text') or not session or carried.get('served_to'):
+        return
+    if session == carried.get('from_session') and not held_back(task['data'], session):
         return
     try:
         with store.lock('task:' + task['id']):
@@ -612,7 +637,41 @@ def handoff_lines(data, prefix, tid, closed=False):
             and carried.get('served_to') in (None, current):
         lines.append('CARRIED OVER (the request the user made just before this fresh context; do it now): '
                      + _one(carried['text'], 1200))
+    elif carried.get('text') and not closed and held_back(data, current) and carried.get('served_to') in (None, current):
+        lines.append('HELD REQUEST (Orbit held it at %s for a fresh context that did not start; the user did not '
+                     'retype it: do it here, now): ' % _local(carried.get('at')) + _one(carried['text'], 1200))
     return lines
+
+
+def resume_carried(store, task, session, host, terminal=None, spawn=None):
+    """A fresh session took the task over after the automatic /clear had failed (the user cleared by hand, or a
+    /clear queued in the host ran later). No typist waits for it any more, so it would sit at an empty input line
+    with the request in its brief (2026-11-05 11:01: ten minutes, until the user asked what happened). Type the
+    carry line once, when its input line is empty. Returns the spawned pid, or None."""
+    data = task['data']
+    state = data.get('handoff_state') or {}
+    carried = data.get('carried_prompt') or {}
+    if host != 'claude' or handoff_mode(store) != 'auto' or task['status'] in ('verified', 'stalled', 'interrupted'):
+        return None
+    if state.get('state') != 'adopted' or state.get('adopted_by') != session or state.get('adopted_from') != 'auto_failed':
+        return None
+    if not carried.get('text') or carried.get('served_to') not in (None, session) or carried.get('carry_typed_for'):
+        return None
+    from . import typist
+    terminal = typist.detect() if terminal is None else terminal
+    if not terminal:
+        return None
+    try:
+        with store.lock('task:' + task['id']):
+            current = store.get(task['id'])
+            row = current['data'].get('carried_prompt') or {}
+            if row.get('at') != carried.get('at') or row.get('carry_typed_for'):
+                return None
+            row['carry_typed_for'] = session              # once: a second SessionStart must not type it again
+            store.save(current, current['status'], 'carry_line_scheduled', {'session': session, 'layer': 'context'})
+    except (RuntimeError, ValueError):
+        return None
+    return (spawn or typist.spawn)(terminal, typist.carry_steps(), store.home / 'hooks.log', home=store.home, task=task['id'])
 
 
 def context_view(data):

@@ -40,20 +40,55 @@ def needs_work(task):
 
 
 def handoff_pending(task):
+    """The live session waits for a handoff: the guard must not send it back to work past the handoff point.
+    The same open states as continuity.OPEN_STATES: after a failed automatic /clear (auto_failed) the session
+    waits for the user's /clear exactly as after 'told'."""
+    from .continuity import OPEN_STATES
     data = task['data']
     state = data.get('handoff_state') or {}
     return (state.get('session') == (data.get('context_live') or {}).get('session')
-            and state.get('state') in ('recommended', 'asked', 'checkpointed', 'told', 'auto'))
+            and state.get('state') in OPEN_STATES)
 
 
 def begin_turn(store, task, session):
+    """A prompt reached the session. True when a turn was already running: the user typed it while the session
+    worked (the host delivers it into that turn), so nothing may treat it as a prompt at an idle input line."""
     if not session:
-        return
+        return False
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
         mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
-        mark.update(stop_count=0, stop_at=None)
-        store.save(task, task['status'], 'supervision_turn', {'session': session, 'layer': 'control'})
+        working = bool(mark.get('turn_open'))
+        mark.update(stop_count=0, stop_at=None, turn_open=True)
+        store.save(task, task['status'], 'supervision_turn', {'session': session, 'layer': 'control',
+                                                              **({'during_turn': True} if working else {})})
+    return working
+
+
+def reset_turn(store, task_id, session):
+    """A session (re)starts at its input line: a turn left open by a killed or interrupted process is over.
+    (An Escape interrupt sends no Stop either: the prompt after one counts as during a turn, so at most that one
+    prompt waits for the handoff; it is never lost.)"""
+    if not session:
+        return
+    with store.lock('task:' + task_id):
+        task = store.get(task_id)
+        mark = (task['data'].get('supervision') or {}).get(session)
+        if mark and mark.get('turn_open'):
+            mark['turn_open'] = False
+            store.save(task, task['status'], 'supervision_turn_reset', {'session': session, 'layer': 'control'})
+
+
+def continue_turn(store, task_id, session):
+    """The Stop hook sent the turn back: it keeps running, so a prompt typed now arrives during a turn."""
+    if not session:
+        return
+    with store.lock('task:' + task_id):
+        task = store.get(task_id)
+        mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
+        if not mark.get('turn_open'):
+            mark['turn_open'] = True
+            store.save(task, task['status'], 'supervision_turn_continued', {'session': session, 'layer': 'control'})
 
 
 def stop_block(store, task, message=''):
@@ -80,6 +115,7 @@ def record_stop(store, task, session):
         mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
         mark['stop_at'] = now()
         mark['stop_count'] = mark.get('stop_count', 0) + 1
+        mark['turn_open'] = False  # until the Stop hook's reply sends the turn back (continue_turn)
         store.save(task, task['status'], 'supervision_stop', {'session': session, 'layer': 'control'})
 
 

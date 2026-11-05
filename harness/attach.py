@@ -492,8 +492,9 @@ def resolve_task(store, root, session, source=None, transcript=None):
                     continue                             # taken by another new session, compacted or expired
                 if _live_owners(store, task['id'], session, state.get('session')):
                     continue                             # a new session already took the task after its owner ended
-                state.update(state='adopted', adopted_by=session)
-                store.save(task, task['status'], 'handoff_adopted', {'session': session, 'layer': 'context'})
+                state.update(state='adopted', adopted_by=session, adopted_from=state.get('state'))
+                store.save(task, task['status'], 'handoff_adopted', {'session': session, 'layer': 'context',
+                                                                     'from': state['adopted_from']})
                 store.bind_session(session, task['id'], root)
                 if state.get('session') and state['session'] != session:
                     store.end_session(state['session'])  # handed off; Codex reports no SessionEnd, so say it here
@@ -1239,8 +1240,14 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         task = watched(task, payload.get('source'))
-        brief = serve_brief(store, task, 'session-start', session)
+        from . import supervision
+        try:
+            supervision.reset_turn(store, task['id'], session)
+        except (RuntimeError, ValueError):
+            pass
+        brief = serve_brief(store, store.get(task['id']), 'session-start', session)
         continuity.mark_carried_served(store, task, session)
+        continuity.resume_carried(store, store.get(task['id']), session, host)  # no typist waits after a failed one
         return _context('SessionStart', brief)
     if event == 'pre-compact':
         if task is None or task['status'] in CLOSED:
@@ -1258,12 +1265,14 @@ def _handle(store, event, payload, host):
             hook_log(store, 'pre-compact checkpoint skipped: ' + str(error))
         return None
     if event == 'prompt':
+        during_turn = False
         if task:
             from . import supervision
             try:
-                supervision.begin_turn(store, task, session)
+                during_turn = supervision.begin_turn(store, task, session)
             except RuntimeError:
-                pass  # A busy reviewer must not prevent the user's prompt reaching the inbox.
+                during_turn = True  # unknown: never start a handoff on a guess. A busy reviewer must not prevent the
+                # user's prompt reaching the inbox.
             task = store.get(task['id'])
         text = (payload.get('prompt') or '').strip()
         from .requirements import classify
@@ -1304,7 +1313,7 @@ def _handle(store, event, payload, host):
                 hook_log(store, 'prompt not recorded (task busy) ' + task['id'])
         task = watched(task)
         handed = continuity.auto_handoff(store, task, session, text, classify(text, learned(store)), host,
-                                         closed=task['status'] in CLOSED)
+                                         closed=task['status'] in CLOSED, during_turn=during_turn)
         if handed:
             return handed
         brief = serve_brief(store, task, 'prompt', session)
@@ -1313,36 +1322,47 @@ def _handle(store, event, payload, host):
     if event == 'stop':
         if task is None:
             return None
-        task = watched(task)  # measure every stop, including the one after a block
-        from . import manager, supervision
-        said = str(payload.get('last_assistant_message') or '')
-        try:
-            supervision.record_stop(store, task, session)
-            manager.observe(store, store.get(task['id']), session, said)  # why it stopped, recorded as the task's state
-            supervision.ensure(store, store.get(task['id']), session)
-        except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
-            hook_log(store, 'supervisor unavailable: ' + repr(error)[:200])
-        task = store.get(task['id'])
-        if payload.get('stop_hook_active'):
-            continuation = supervision.stop_block(store, task, said)
-            if continuation:
-                return continuation
-            # Never block twice in a row; a message to the user does not continue the turn, so it may go now
-            # (this is the stop right after the checkpoint the executor was asked for).
-            return context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED,
-                                    message_only=True)
-        primary = stop_decision(store, task, payload)
-        if primary and primary.get('decision') == 'block':
-            return primary  # the context decision waits for the next stop
-        continuation = supervision.stop_block(store, store.get(task['id']), said)
+        reply = _stop_reply(store, watched(task), session, payload)  # measure every stop, including the one after a block
+        if (reply or {}).get('decision') == 'block':
+            from . import supervision
+            try:
+                supervision.continue_turn(store, task['id'], session)  # the turn goes on: prompts now arrive during it
+            except (RuntimeError, ValueError) as error:
+                hook_log(store, 'turn continuation not recorded: ' + repr(error)[:200])
+        return reply
+    return None
+
+
+def _stop_reply(store, task, session, payload):
+    """The Stop hook's reply for an attached task (None, a systemMessage, or a block that sends the turn back)."""
+    from . import manager, supervision
+    said = str(payload.get('last_assistant_message') or '')
+    try:
+        supervision.record_stop(store, task, session)
+        manager.observe(store, store.get(task['id']), session, said)  # why it stopped, recorded as the task's state
+        supervision.ensure(store, store.get(task['id']), session)
+    except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
+        hook_log(store, 'supervisor unavailable: ' + repr(error)[:200])
+    task = store.get(task['id'])
+    if payload.get('stop_hook_active'):
+        continuation = supervision.stop_block(store, task, said)
         if continuation:
             return continuation
-        settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
-        secondary = context_decision(store, store.get(task['id']), settle=settle)
-        if primary and secondary and 'systemMessage' in secondary:
-            return {'systemMessage': primary['systemMessage'] + '\n' + secondary['systemMessage']}
-        return primary or secondary
-    return None
+        # Never block twice in a row; a message to the user does not continue the turn, so it may go now
+        # (this is the stop right after the checkpoint the executor was asked for).
+        return context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED,
+                                message_only=True)
+    primary = stop_decision(store, task, payload)
+    if primary and primary.get('decision') == 'block':
+        return primary  # the context decision waits for the next stop
+    continuation = supervision.stop_block(store, store.get(task['id']), said)
+    if continuation:
+        return continuation
+    settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
+    secondary = context_decision(store, store.get(task['id']), settle=settle)
+    if primary and secondary and 'systemMessage' in secondary:
+        return {'systemMessage': primary['systemMessage'] + '\n' + secondary['systemMessage']}
+    return primary or secondary
 
 
 def _context(name, text):
