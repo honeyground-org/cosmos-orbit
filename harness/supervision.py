@@ -7,7 +7,6 @@ replacement cancel supervision. Unsupported surfaces are reported, never guessed
 """
 import json
 import os
-import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -176,33 +175,38 @@ def ensure(store, task, session):
     env = dict(os.environ)
     root = str(Path(__file__).resolve().parent.parent)
     env['PYTHONPATH'] = root + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
-    if terminal['kind'] == 'cmux':
-        # cmux's process-only socket policy rejects orphaned daemons. Use a real,
-        # unfocused cmux workspace, rather than relaxing authentication or spoofing it.
-        boot = ('import sys;sys.path.insert(0,' + repr(root) + ');'
-                'from harness.supervision import main;main(*sys.argv[1:],close_workspace=True)')
-        command = 'exec ' + ' '.join(shlex.quote(x) for x in
-                    [sys.executable, '-c', boot, str(store.home), task['id'], session])
-        result = subprocess.run([terminal['cli'], 'new-workspace', '--name', 'Orbit supervisor ' + task['id'][:6],
-                                 '--cwd', str(store.home), '--command', command, '--focus', 'false'],
-                                capture_output=True, text=True, timeout=15)
-        with store.db:
-            store._event(task['id'], 'supervision_launch', {'session': session,
-                         'transport': 'cmux_workspace', 'ok': result.returncode == 0,
-                         'error': result.stderr[:200] if result.returncode else '', 'layer': 'control'})
-        return
+    # A background process, in cmux as in tmux: no terminal of its own. It used to open an "Orbit supervisor"
+    # cmux workspace per task, on the belief that cmux refuses orphaned processes. Measured 2026-11-05 with
+    # the default socket mode: a detached process re-parented to launchd (ppid 1) read the pane 5 s and
+    # 70 s later (exit 0), as the detached typist and waker always have. The workspaces were the cost: 28
+    # opened for 9 tasks in two and a half hours, unexplained, the kind a user closes on sight.
     with (store.home / 'supervision.log').open('ab') as log:
-        subprocess.Popen([sys.executable, '-m', 'harness.supervision', str(store.home), task['id'], session],
-                         cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True)
+        process = subprocess.Popen([sys.executable, '-m', 'harness.supervision', str(store.home), task['id'], session],
+                                   cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                   start_new_session=True)
+    with store.db:
+        store._event(task['id'], 'supervision_launch', {'session': session, 'transport': 'detached',
+                     'terminal': terminal['kind'], 'layer': 'control',
+                     'pid': process.pid if isinstance(process.pid, int) else None})
 
 
-def main(home, task_id, session, close_workspace=False):
+IDLE_EXIT = 15 * 60     # seconds one unchanged outcome may last before the supervisor leaves
+REVIEW_WAIT = 60 * 60   # a running review may take longer (seen: 864 s); its verdict can need a resume
+REVIEW_OUTCOMES = {'reviewing', 'queued', 'checking', 'verifying', 'task_busy'}
+
+
+def main(home, task_id, session, close_workspace=False, sleep=time.sleep, clock=time.monotonic):
+    """Watch one session's task until there is nothing left to do for it.
+
+    Every Stop hook starts a supervisor again when one is needed, so leaving costs nothing: one stays only
+    while a stop it could continue may still come. Observed 2026-11-05: two supervisors had polled for
+    16 hours, one on 'no_work', one on 'awaiting_stop' for a Codex session idle since the day before
+    (Codex reports no SessionEnd)."""
     from .store import Store
     store = Store(home)
-    last = None
+    last, since = None, clock()
     terminal_outcomes = {'disabled', 'settled', 'input_required', 'session_ended', 'no_terminal',
-                         'unknown_session', 'replaced', 'notify_only', 'send_failed'}
+                         'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work'}
     try:
         with store.lock('supervisor:' + task_id + ':' + session):
             while True:
@@ -213,10 +217,15 @@ def main(home, task_id, session, close_workspace=False):
                 if outcome != last:
                     with store.db:
                         store._event(task_id, 'supervision_observed', {'session': session, 'outcome': outcome, 'layer': 'control'})
-                    last = outcome
+                    last, since = outcome, clock()
                 if outcome in terminal_outcomes:
                     return
-                time.sleep(POLL)
+                if clock() - since >= (REVIEW_WAIT if outcome in REVIEW_OUTCOMES else IDLE_EXIT):
+                    with store.db:
+                        store._event(task_id, 'supervision_observed', {'session': session, 'outcome': 'idle_exit',
+                                     'after': outcome, 'layer': 'control'})
+                    return                               # the next Stop starts a supervisor again if one is needed
+                sleep(POLL)
     except RuntimeError:
         return
     finally:

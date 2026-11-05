@@ -472,7 +472,8 @@ def resolve_task(store, root, session, source=None, transcript=None):
                     continue                             # its session still holds another pane: /clear there takes it
                 # The session's own record is gone once it ended (a /clear ends it before the fresh one starts), so
                 # the pane it was told in, kept in the handoff, still says where its /clear comes from.
-                mine = bool(here) and here in (pane, state.get('pane'))
+                # After a failed auto handoff the user is told to /clear in the pane Orbit typed into (`panel`).
+                mine = bool(here) and here in (pane, state.get('pane'), state.get('panel'))
             # The task's folder is where the shell was when it began: an agent that cd'd into a worktree leaves it
             # there, while the fresh session after /clear starts where the host was launched. Observed 2026-11-04
             # 17:40: Orbit typed /clear in the pane, the fresh session started one folder up, skipped its own
