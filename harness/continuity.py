@@ -223,6 +223,9 @@ def invitation_open(state, at=None):
 
 def close_on_compaction(data, session):
     """The host compacted the session itself: that was the handoff. Close it and measure again from here."""
+    live = data.get('context_live') or {}
+    if session and live.get('session') == session:
+        live['compacted_at'] = now()                     # checkpoints before it describe a context that is gone
     state = data.get('handoff_state') or {}
     if state.get('session') == session and state.get('state') in OPEN_STATES:
         state.update(state='compacted', compacted_at=now())
@@ -392,13 +395,38 @@ def observe(store, task, payload, host, event, source=None):
         if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
                 and (state.get('session') != live.get('session') or state.get('state') == 'compacted')
                 and task['status'] not in ('stalled', 'interrupted')):
-            data['handoff_state'] = {'session': live.get('session'), 'state': 'recommended', 'tokens': live['tokens'],
-                                     'limit': live['limit'], 'at': now()}
+            ready = ready_checkpoint(data, live, state)
+            data['handoff_state'] = {'session': live.get('session'), 'state': 'checkpointed' if ready else 'recommended',
+                                     'tokens': live['tokens'], 'limit': live['limit'], 'at': now()}
+            if ready:
+                data['handoff_state']['checkpoint_at'] = ready['at']
             kind, payload_out = 'handoff_recommended', {'tokens': live['tokens'], 'limit': live['limit'],
-                                                        'threshold_source': threshold_source}
+                                                        'threshold_source': threshold_source,
+                                                        'checkpoint_at': ready['at'] if ready else None}
         if kind:
             store.save(task, task['status'], kind, dict(payload_out, tokens=live.get('tokens'), session=live.get('session'), layer='context'))
     return task
+
+
+READY_FRACTION = 0.9  # a checkpoint written this close to the point describes the context the handoff leaves
+
+
+def ready_checkpoint(data, live, state):
+    """The checkpoint this session wrote just before the handoff point, or None. It counts as the handoff's own when
+    the executor wrote it in this session, after the session's last compaction, at READY_FRACTION of the point or
+    more: asking for another one costs the user a turn. Observed 2026-11-05: a checkpoint at 12:18 (341k, point
+    350k); the go-ahead at 12:20 crossed the point and was only 'recommended', so the user had to send again."""
+    session = live.get('session')
+    limit = live.get('limit') or 0
+    since = max(live.get('started') or '', live.get('compacted_at') or '',
+                (state.get('compacted_at') or '') if state.get('session') == session else '')
+    for row in reversed(data.get('checkpoints') or []):
+        if row.get('at', '') < since:
+            break
+        if (row.get('session') == session and row.get('kind') == 'executor' and isinstance(row.get('tokens'), int)
+                and limit and row['tokens'] >= READY_FRACTION * limit):
+            return row
+    return None
 
 
 def _checkpoint_since(data, stamp):
