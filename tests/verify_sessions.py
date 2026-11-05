@@ -441,6 +441,90 @@ def main():
     check('a new terminal minutes after the session was closed continues its task (control)',
           (attach.resolve_task(store, root_y, 'CR-B') or {}).get('id') == recent['id'])
 
+    print('③-g move-session: a session bound to the wrong task moves onto its own (the 2026-11-05 OFFSCRIPT binding)')
+    # The shape of the incident: the session worked on the harness task, then (after a /clear in the same pane) the
+    # next session's unrelated product requests were recorded as corrections of the harness task.
+    root_m = make_repo(base, 'repo-move')
+    attach.set_switch(store, 'on', root_m)
+    start(root_m, 'MV-A')
+    prompt(store, root_m, 'MV-A', 'Fix the handoff flow so that no session is ever lost')
+    harness_task = attach.resolve_task(store, root_m, 'MV-A')
+    attach.set_done(store, harness_task['id'], ['D1 a fresh session takes the handoff exactly once'])
+    prompt(store, root_m, 'MV-A', 'Also keep the flow exact for Codex sessions')
+    end_turn = lambda s: attach.handle(store, 'stop', {'cwd': str(root_m), 'session_id': s, 'stop_hook_active': True,
+                                                         'last_assistant_message': 'ok'}, 'claude')
+    end_turn('MV-A')
+    boundary = attach.now()
+    prompt(store, root_m, 'MV-B', 'Build the AI content page with social posts and thumbnails')
+    prompt(store, root_m, 'MV-B', 'Add a calendar view to the content page')
+    from harness import continuity as continuity_
+    continuity_.record_checkpoint(store, harness_task['id'], 'Wire the calendar view', notes='content page done', by='claude')
+    # Bind MV-B as the idle takeover did, and record its prompts on the harness task (what the defect produced).
+    store.bind_session('MV-B', harness_task['id'], root_m)
+    for text in ('Build the AI content page with social posts and thumbnails', 'Add a calendar view to the content page'):
+        attach.record_prompt(store, store.get(harness_task['id']), text, 'MV-B')
+    with store.lock('task:' + harness_task['id']):
+        t = store.get(harness_task['id'])
+        t['data']['checkpoints'][-1]['session'] = 'MV-B'  # written in MV-B's context
+        store.save(t, t['status'], 'test_setup', {})
+    before = store.get(harness_task['id'])
+    plan = attach.move_session(store, 'MV-B', since=boundary)
+    after_plan = store.get(harness_task['id'])
+    check('the plan names the requests to move and changes nothing',
+          plan['prompts'] == 2 and not plan['applied'] and after_plan['revision'] == before['revision']
+          and (store.session_task('MV-B') or {}).get('task_id') == harness_task['id'], plan)
+    moved = attach.move_session(store, 'MV-B', since=boundary, apply=True)
+    old_t, new_t = store.get(harness_task['id']), store.get(moved['to'])
+    check('applied: the session works on its own new task, whose request is its first one',
+          (store.session_task('MV-B') or {}).get('task_id') == new_t['id'] != old_t['id']
+          and new_t['prompt'].startswith('Build the AI content page'), (store.session_task('MV-B'), new_t['prompt'][:60]))
+    pending_m = old_t['data'].get('requirements_pending') or {}
+    check('…its requests and corrections left the old task; its pending change is its own request again, counted once',
+          all('content page' not in p['text'] for p in old_t['data']['prompts'])
+          and all('content page' not in f['text'] for f in old_t['data'].get('feedback') or [])
+          and 'Codex sessions' in pending_m.get('text', '') and pending_m.get('count') == 1,
+          ([p['text'][:30] for p in old_t['data']['prompts']], pending_m))
+    check("…the old task keeps its own requests from before the boundary (control) and a record of what moved",
+          any('Codex sessions' in f['text'] for f in old_t['data'].get('feedback') or [])
+          and len(old_t['data'].get('moved_prompts') or []) == 2 and 'prompts_moved_out' in [r['kind'] for r in store.events(old_t['id'])])
+    check('…the checkpoint written in that session moved with it',
+          [c['next'] for c in new_t['data'].get('checkpoints') or []] == ['Wire the calendar view']
+          and all(c['next'] != 'Wire the calendar view' for c in old_t['data'].get('checkpoints') or []))
+    check("…the session's next request lands on the new task",
+          prompt(store, root_m, 'MV-B', 'Show the calendar by week') is not None
+          and any('by week' in p['text'] for p in store.get(new_t['id'])['data']['prompts'])
+          and all('by week' not in p['text'] for p in store.get(old_t['id'])['data']['prompts']))
+    try:
+        attach.move_session(store, 'MV-A', since=attach.now())
+        refused = None
+    except ValueError as error:
+        refused = str(error)
+    check('nothing after the boundary: refused, nothing changes (control)', refused and 'Nothing to move' in refused, refused)
+    # The incident itself: every pending request came from the sessions that move (MV-C before its /clear, MV-D after).
+    root_n = make_repo(base, 'repo-move-all')
+    attach.set_switch(store, 'on', root_n)
+    start(root_n, 'MV-H')
+    prompt(store, root_n, 'MV-H', 'Fix the handoff flow so that no session is ever lost')
+    task_n = attach.resolve_task(store, root_n, 'MV-H')
+    attach.set_done(store, task_n['id'], ['D1 a fresh session takes the handoff exactly once'])
+    for sess, text in (('MV-C', 'Build the AI content page with social posts'), ('MV-D', 'Add a calendar view to the content page')):
+        store.bind_session(sess, task_n['id'], root_n)
+        attach.record_prompt(store, store.get(task_n['id']), text, sess)
+    attach.handle(store, 'session-end', {'cwd': str(root_n), 'session_id': 'MV-C'}, 'claude')
+    ended_c = store.session_task('MV-C')['ended']
+    moved_n = attach.move_session(store, 'MV-D', also=['MV-C'], apply=True)
+    old_n = store.get(task_n['id'])
+    check('every pending request moved: the old task waits on nothing (the OFFSCRIPT case)',
+          moved_n['prompts'] == 2 and not old_n['data'].get('requirements_pending'), old_n['data'].get('requirements_pending'))
+    row_c = store.session_task('MV-C')
+    check('…the session before the /clear (--also) now belongs to the new task and stays ended (a later --resume finds it)',
+          row_c['task_id'] == moved_n['to'] and row_c['ended'] == ended_c, row_c)
+    home_m = str(base / 'home')
+    result = subprocess.run([sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', home_m, 'move-session', 'MV-A'],
+                            capture_output=True, text=True)
+    check('the command line prints the plan and exits 0 (dry run)', result.returncode == 0 and '"applied": false' in result.stdout,
+          (result.returncode, result.stderr[-300:]))
+
     print('④ every installed hook event runs through the real command line (exit 0)')
     home = str(base / 'home')
     for host, events in attach.HOST_EVENTS.items():

@@ -639,6 +639,83 @@ def create(store, root, prompt, host, session=None, checks=(), done=None, max_tu
     return task
 
 
+def move_session(store, session, since=None, also=(), apply=False):
+    """Move a session's requests off a task it was bound to by mistake onto a task of its own.
+
+    Observed 2026-11-05: a session that had taken the harness task over at its start sat idle overnight; the next
+    morning its unrelated product requests were recorded as corrections of the harness task (fixed since, but the
+    ledger keeps what happened). This undoes such a binding: the session's prompts (and those of `also`, e.g. the
+    session before a /clear in the same pane) from `since` on, the corrections they made, and the checkpoints that
+    session wrote go to a new task, which the session is bound to. The old task keeps a record of what moved.
+    Without `apply` it only reports what it would move."""
+    binding = store.session_task(session)
+    if not binding or not binding['task_id']:
+        raise ValueError('Session %s is not bound to a task' % session)
+    old = store.get(binding['task_id'])
+    sessions = {session} | set(also or ())
+    since = since or ''
+    data = old['data']
+    moved = [p for p in data.get('prompts') or [] if p.get('session') in sessions and p.get('at', '') >= since]
+    first = next((p for p in moved if p.get('kind') in ('requirement', 'unsure')), None)
+    if first is None:
+        raise ValueError('Nothing to move: no request of %s on task %s%s' % (
+            ', '.join(sorted(sessions)), old['id'], ' since ' + since if since else ''))
+    texts = {p['text'] for p in moved}
+    feedback = [f for f in data.get('feedback') or [] if f.get('at', '') >= since and f.get('text', '')[:600] in texts]
+    checkpoints = [c for c in data.get('checkpoints') or [] if c.get('session') in sessions and c.get('at', '') >= since]
+    pending = data.get('requirements_pending') or {}
+    plan = {'from': old['id'], 'session': session, 'also': sorted(set(also or ())), 'since': since or None,
+            'request': first['text'][:200], 'prompts': len(moved), 'corrections': len(feedback),
+            'checkpoints': len(checkpoints),
+            'pending_dropped': bool(pending and pending.get('at', '') >= since and pending.get('text', '')[:600] in texts),  # moved: recount
+            'moved': [{'at': p['at'], 'session': p.get('session'), 'kind': p.get('kind'), 'text': p['text'][:120]} for p in moved],
+            'applied': False}
+    if not apply:
+        return plan
+    keys = {(p['at'], p.get('session')) for p in moved}
+    others = [p['text'][:600] for p in moved if p is not first]
+    request = next((f['text'] for f in feedback if f.get('text', '')[:600] == first['text']), first['text'])  # whole, not 600
+    new = create(store, old['workspace'], request, old['data'].get('host') or old['provider'], session, context=others[:8])
+    with store.db:
+        for other in sorted(sessions - {session}):        # a later --resume of those finds the new task; ended stays
+            store.db.execute('UPDATE session_tasks SET task_id=?, workspace=? WHERE session=? AND task_id=?',
+                             (new['id'], new['workspace'], other, old['id']))
+    with store.lock('task:' + new['id']):
+        fresh = store.get(new['id'])
+        fresh['data']['prompts'] = [dict(p) for p in moved]
+        fresh['data']['feedback'] = [dict(f) for f in feedback if f.get('text', '')[:600] != first['text'][:600]]
+        fresh['data']['checkpoints'] = [dict(c) for c in checkpoints]
+        fresh['data']['session_ids'] = sorted(sessions)
+        fresh['data']['moved_from'] = {'task': old['id'], 'at': now(), 'sessions': sorted(sessions), 'since': since or None}
+        store.save(fresh, fresh['status'], 'prompts_moved_in', {'from': old['id'], 'count': len(moved), 'layer': 'context'})
+    with store.lock('task:' + old['id']):
+        old = store.get(old['id'])
+        data = old['data']
+        data['moved_prompts'] = (data.get('moved_prompts') or []) + [
+            dict(p, moved_to=new['id']) for p in data.get('prompts') or [] if (p['at'], p.get('session')) in keys]
+        data['prompts'] = [p for p in data.get('prompts') or [] if (p['at'], p.get('session')) not in keys]
+        moved_feedback = {(f.get('at'), f.get('text')) for f in feedback}
+        data['feedback'] = [f for f in data.get('feedback') or [] if (f.get('at'), f.get('text')) not in moved_feedback]
+        moved_checkpoints = {(c.get('at'), c.get('session')) for c in checkpoints}
+        data['checkpoints'] = [c for c in data.get('checkpoints') or [] if (c.get('at'), c.get('session')) not in moved_checkpoints]
+        data['session_ids'] = [s for s in data.get('session_ids') or [] if s not in sessions]
+        if plan['pending_dropped']:
+            # The pending change counted every request since the last revision; the ones that stayed still count.
+            revised = ((data.get('done_history') or [{}])[-1].get('at') or (data.get('done_fixed') or {}).get('at') or '')
+            rest = [f for f in data['feedback'] if f.get('kind') in ('requirement', 'unsure') and f.get('at', '') > revised]
+            if rest:
+                data['requirements_pending'] = dict(data['requirements_pending'], at=rest[-1]['at'],
+                                                    text=rest[-1]['text'][:600], count=len(rest))
+            else:
+                data.pop('requirements_pending', None)
+        state = data.get('handoff_state') or {}
+        if state.get('state') == 'adopted' and state.get('adopted_by') in sessions:
+            state.update(state='released', released_at=now(), released_from=state['adopted_by'])
+        store.save(old, old['status'], 'prompts_moved_out', {'to': new['id'], 'count': len(moved), 'session': session,
+                                                             'since': since or None, 'layer': 'context'})
+    return dict(plan, to=new['id'], applied=True)
+
+
 def detach(store, root=None, task_id=None):
     if task_id:
         task = store.get(task_id)

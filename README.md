@@ -185,6 +185,9 @@ What happens in an attached session:
 `cosmos-orbit attach --workspace . --check '["python3","verify.py"]' --done '…' 'Your request'`
 creates the same ledger explicitly, with fixed checks the model cannot change. `cosmos-orbit brief`
 prints what the hooks inject. `cosmos-orbit detach` closes a task without verification.
+`cosmos-orbit move-session <session> [--since <ISO time>] [--also <session>]` moves a session's requests off a
+task it was bound to by mistake onto a new task of its own, with the corrections and checkpoints they made; the
+old task keeps a record of what moved. It prints the plan; `--apply` does it.
 
 ## When the request changes
 
