@@ -163,7 +163,7 @@ def main():
         brief = attach.brief_text(store, task)
         check('brief shows D2 ✗ and the fix', 'D2 ✗' in brief and 'remove the stale comment' in brief)
         stop = attach.handle(store, 'stop', {'cwd': str(root), 'stop_hook_active': False, 'last_assistant_message': 'claimed'}, 'claude')
-        check('stop after unmet verdict → silent (next brief carries it)', stop is None)
+        check('stop after unmet verdict → continue the unfinished task', stop and stop.get('decision') == 'block')
         FakeReviewer.verdict = {'items': [{'id': 'G0', 'status': 'met', 'evidence': ['goal addressed']},
                                           {'id': 'D1', 'status': 'met', 'evidence': ['verify.py exit 0']},
                                           {'id': 'D2', 'status': 'met', 'evidence': ['no subtraction in calc.py']},

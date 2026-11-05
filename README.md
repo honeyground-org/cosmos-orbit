@@ -147,9 +147,18 @@ What happens in an attached session:
    hook keeps the turn open until it is fixed; nobody is asked to intervene. A pass queues one
    read-only review in a fresh context (`--wait` runs it now). Unmet items come back in the next
    brief; `verified` closes the task.
-5. A turn that ends with completion wording but no claim is stopped once and asked to claim or to
-   list what remains. A claim without evidence is returned unmet.
-6. `cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md` renders the ledger as Markdown. No
+5. An unfinished task with completion definitions cannot end just because the executor gave a progress
+   report or called `claim --remaining`. The Stop hook asks it to continue, including after a previous
+   Stop block. An explicit pause or a recorded question for the user permits stopping. A claim without
+   evidence is returned unmet.
+6. A lightweight observer covers sessions that become idle anyway and reviews that return unmet after
+   the executor has stopped. In cmux/tmux, `cosmos-orbit supervision auto` submits one continuation only
+   when the bound session has an empty input line. It never clears text or interrupts a busy host.
+   `cosmos-orbit supervision tell` uses notification only. This setting is separate from `context auto|tell`;
+   until explicitly set it inherits that existing preference. Unsupported terminals are recorded as
+   unavailable; they are not claimed to have resumed. Pause, input dependency, session replacement and
+   Orbit off cancel supervision. Wake limits and one delivery per stopped turn prevent duplicate sends.
+7. `cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md` renders the ledger as Markdown. No
    handoff is written by hand. `cosmos-orbit lessons` lists corrections repeated across tasks, the
    candidates for a guard rule.
 
@@ -517,6 +526,12 @@ its history lists automatic handoffs and message wakes. Effects
 represent observed execution and transport; unknown context and remote progress remain unknown.
 The six-language view respects reduced motion. Use the same `--home PATH` (or `HARNESS_HOME`) for
 hooks, worker and observers. Observation does not start model work.
+
+The task detail's collaboration section shows recorded questions, replies, targets and delivery
+states from Orbit's task message store (the latest 30 messages). This is distinct from the
+host-managed mailbox used for messages between independent CLI sessions. Wake events show that
+Orbit attempted to wake a receiver; they do not expose that mailbox's complete conversation or
+prove that its message was read. A unified cross-session inbox is not currently provided by this view.
 
 The dashboard binds to `127.0.0.1` and validates its host, origin and per-launch token. It is a local
 single-user interface, not a public server. Do not expose it through a proxy.
