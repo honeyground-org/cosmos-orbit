@@ -395,6 +395,52 @@ def main():
     finally:
         typist.detect = real_detect
 
+    print("③-f a task whose session was closed long ago is not handed to the next day's new terminal (2026-11-05)")
+    # Replayed on 1bc4852: the session was closed (SessionEnd); 20 hours later a new terminal in that folder took its
+    # task, and its unrelated request was recorded as a correction of it. The invitation's 12-hour expiry did not
+    # help: a closed session's task reached the new terminal as "the folder's latest task, nobody on it".
+    import datetime
+
+    def closed_ago(session, hours):
+        stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)).isoformat()
+        with store.db:
+            store.db.execute('UPDATE session_tasks SET ended=? WHERE session=? AND ended IS NOT NULL', (stamp, session))
+
+    def start(root_, session, source='startup'):
+        attach.handle(store, 'session-start', {'cwd': str(root_), 'session_id': session, 'source': source}, 'claude')
+
+    root_x = make_repo(base, 'repo-closed-long-ago')
+    attach.set_switch(store, 'on', root_x)
+    start(root_x, 'CL-A')
+    prompt(store, root_x, 'CL-A', 'Refactor the report module and keep the output identical')
+    old = attach.resolve_task(store, root_x, 'CL-A')
+    attach.handle(store, 'session-end', {'cwd': str(root_x), 'session_id': 'CL-A'}, 'claude')
+    closed_ago('CL-A', 20)
+    start(root_x, 'CL-B')
+    prompt(store, root_x, 'CL-B', 'Build a login page with email and password fields')
+    new = attach.resolve_task(store, root_x, 'CL-B')
+    old = store.get(old['id'])
+    check('a new terminal 20 hours after the session was closed starts its own task',
+          new is not None and new['id'] != old['id'], (old['id'], new and new['id']))
+    check('…its request is not recorded in the closed task',
+          all('login page' not in (p.get('text') or '') for p in old['data'].get('prompts') or []), old['data'].get('prompts'))
+    check('…the closed task keeps its ledger (not closed, says why it was not continued)',
+          old['status'] not in attach.CLOSED and 'continuation_declined' in [r['kind'] for r in store.events(old['id'])],
+          (old['status'], [r['kind'] for r in store.events(old['id'])][-4:]))
+    start(root_x, 'CL-A', source='resume')
+    check('…the closed session itself resumed (claude --resume) still has its task (control)',
+          (attach.resolve_task(store, root_x, 'CL-A') or {}).get('id') == old['id'])
+    root_y = make_repo(base, 'repo-closed-just-now')
+    attach.set_switch(store, 'on', root_y)
+    start(root_y, 'CR-A')
+    prompt(store, root_y, 'CR-A', 'Refactor the export module and keep the output identical')
+    recent = attach.resolve_task(store, root_y, 'CR-A')
+    attach.handle(store, 'session-end', {'cwd': str(root_y), 'session_id': 'CR-A'}, 'claude')
+    closed_ago('CR-A', 0.1)
+    start(root_y, 'CR-B')
+    check('a new terminal minutes after the session was closed continues its task (control)',
+          (attach.resolve_task(store, root_y, 'CR-B') or {}).get('id') == recent['id'])
+
     print('④ every installed hook event runs through the real command line (exit 0)')
     home = str(base / 'home')
     for host, events in attach.HOST_EVENTS.items():
