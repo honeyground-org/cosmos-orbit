@@ -290,6 +290,39 @@ def main():
     check('codex: 205k from the rollout → handoff line', out and 'CONTEXT 205k' in out['hookSpecificOutput']['additionalContext']
           and task2['data']['context_live']['window'] == 272000, task2['data'].get('context_live'))
 
+    print('⑧-b the handoff point follows the model window when the host reports it (Codex 258,400 → 206,720)')
+    check('window cap: min(setting, 80% of the window)', continuity.window_cap(350_000, 258_400) == 206_720
+          and continuity.window_cap(150_000, 258_400) == 150_000 and continuity.window_cap(350_000, None) == 350_000
+          and continuity.window_cap(0, 258_400) == 0, [continuity.window_cap(350_000, 258_400)])
+    continuity.set_threshold(store, '350k', global_default=True)
+    root2b = make_repo(base, 'repo2b')
+    attach.set_switch(store, 'on', root2b)
+    rollb = base / 'codex-rollout-b.jsonl'
+    codex_turn(rollb, 40_000, window=258_400)
+    paycb = {'cwd': str(root2b), 'session_id': 'cb1', 'transcript_path': str(rollb)}
+    attach.handle(store, 'prompt', dict(paycb, prompt='Count words separated by any whitespace in words.py'), 'codex')
+    codex_turn(rollb, 190_000, window=258_400)
+    attach.handle(store, 'prompt', dict(paycb, prompt='continue with the tab and newline cases'), 'codex')
+    live = attach.current_task(store, root2b)['data']['context_live']
+    check('codex 190k of 258,400: below 80% → no handoff yet', not attach.current_task(store, root2b)['data'].get('handoff_state')
+          and live['limit'] == 206_720 and live['threshold_source'] == 'window', live)
+    codex_turn(rollb, 215_000, window=258_400)
+    out = attach.handle(store, 'prompt', dict(paycb, prompt='and the unicode whitespace cases'), 'codex')
+    state = attach.current_task(store, root2b)['data'].get('handoff_state') or {}
+    check('codex 215k ≥ 206,720 (under the 350k setting): the handoff is recommended (before: never, it compacted)',
+          state.get('state') == 'recommended' and out and 'CONTEXT 215k' in out['hookSpecificOutput']['additionalContext'], state)
+    root2c = make_repo(base, 'repo2c')
+    attach.set_switch(store, 'on', root2c)
+    t2c = base / 'claude-2c.jsonl'
+    claude_turn(t2c, 40_000)
+    pay2c = {'cwd': str(root2c), 'session_id': 'k1', 'transcript_path': str(t2c)}
+    attach.handle(store, 'prompt', dict(pay2c, prompt='Refactor the parser into modules with tests'), 'claude')
+    claude_turn(t2c, 215_000)
+    attach.handle(store, 'prompt', dict(pay2c, prompt='continue with the lexer'), 'claude')
+    live = attach.current_task(store, root2c)['data']['context_live']
+    check('claude (no window in its transcript): the 350k setting stands, 215k is no handoff (control)',
+          live['limit'] == 350_000 and not attach.current_task(store, root2c)['data'].get('handoff_state'), live)
+
     print('⑨ unattended loop: the next turn starts a fresh session from a slim ledger packet')
     from harness.development import create
     root3 = make_repo(base, 'repo3')

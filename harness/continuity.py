@@ -261,6 +261,20 @@ def min_growth():
         return MIN_GROWTH
 
 
+WINDOW_SHARE = 0.8  # of the model's window: hand off before the host compacts by itself near its window
+
+
+def window_cap(threshold, window):
+    """The handoff point for a session whose model window is known: min(setting, 80% of the window); 0 stays off.
+
+    Measured 2026-11-05: Codex reports a 258,400-token window, below the 350k default, so a Codex session was never
+    asked to hand off; it compacted by itself instead (five times in one session, no Codex handoff ever). Claude
+    Code transcripts carry no window, so their setting stands as it is."""
+    if not threshold or not isinstance(window, int) or window <= 0:
+        return threshold
+    return min(threshold, int(window * WINDOW_SHARE))
+
+
 def limit_for_session(threshold, start):
     """The point at which this session should hand off; 0 when handoff is off."""
     if not threshold:
@@ -371,8 +385,9 @@ def observe(store, task, payload, host, event, source=None):
             if log and log[-1].get('session') == live.get('session'):
                 log[-1]['peak'] = live['peak']
             kind = kind or ('context_measured' if moved else None)
-        live.update(threshold=threshold, threshold_source=threshold_source,
-                    limit=limit_for_session(threshold, live.get('start')))
+        capped = window_cap(threshold, live.get('window'))
+        live.update(threshold=capped, threshold_source='window' if capped != threshold else threshold_source,
+                    configured_threshold=threshold, limit=limit_for_session(capped, live.get('start')))
         state = data.get('handoff_state') or {}
         if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
                 and (state.get('session') != live.get('session') or state.get('state') == 'compacted')
@@ -711,7 +726,9 @@ def rollover_due(store, task, key):
     if threshold is None:
         source = (data.get('development') or {}).get('source', task['workspace'])
         threshold, _ = resolve_threshold(store, source)
-    tokens = (data.get('context_measurements') or {}).get(key, {}).get('tokens')
+    measurement = (data.get('context_measurements') or {}).get(key, {})
+    tokens = measurement.get('tokens')
+    threshold = window_cap(threshold, measurement.get('window'))
     if not threshold or not isinstance(tokens, int) or not data.get('sessions', {}).get(key):
         return False
     start = (data.get('context_start') or {}).get(key)
