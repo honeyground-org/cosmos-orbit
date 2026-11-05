@@ -378,6 +378,30 @@ def _owner_pane(store, session):
     return row['target'], newer is None
 
 
+CLOSED_TASK_TTL = 12 * 3600  # as long as an open handoff invitation lasts (continuity.INVITE_TTL_SECONDS)
+
+
+def _closed_long_ago(store, task):
+    """When every session of this open task was closed (SessionEnd) more than CLOSED_TASK_TTL ago, the time the
+    last one closed; otherwise None. A new terminal then starts its own task instead of continuing this one.
+
+    Observed 2026-11-05 (replayed on 1bc4852): the session was closed; 20 hours later a new terminal in the folder
+    took its task, and its unrelated request was recorded as a correction of it. A terminal opened minutes after
+    the close still continues (a host restart), and the closed session itself resumed keeps its task."""
+    if task['status'] in CLOSED:
+        return None
+    rows = store.task_sessions(task['id'])
+    if not rows or any(not r['ended'] for r in rows):
+        return None
+    from datetime import datetime, timezone
+    last = max(r['ended'] for r in rows)
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
+    except ValueError:
+        return None
+    return last if age > CLOSED_TASK_TTL else None
+
+
 def _live_owners(store, task_id, session, *also_ignore):
     return [r for r in store.task_sessions(task_id) if not r['ended'] and r['session'] != session and r['session'] not in also_ignore]
 
@@ -538,8 +562,15 @@ def resolve_task(store, root, session, source=None, transcript=None):
                     if creator and creator != session:
                         store.bind_session(creator, latest['id'], root)  # tasks from before session binding: the creator owns it
                 if not _live_owners(store, latest['id'], session):
-                    store.bind_session(session, latest['id'], root)
-                    return latest
+                    closed = _closed_long_ago(store, latest)
+                    if not closed:
+                        store.bind_session(session, latest['id'], root)
+                        return latest
+                    with store.db:
+                        store._event(latest['id'], 'continuation_declined', {
+                            'session': session, 'closed_at': closed, 'layer': 'context',
+                            'reason': 'its sessions were closed more than %d hours ago; a new terminal now starts its '
+                                      'own task' % (CLOSED_TASK_TTL // 3600)})
         except RuntimeError:
             busy = True
     if not busy:
