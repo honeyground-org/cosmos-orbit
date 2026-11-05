@@ -331,6 +331,14 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      (cmux receives ctrl+u only as the raw byte, one press per line); only the session in the same
      pane may take the handoff; and the carry line is typed only after that takeover, so it can never
      land in the old session.
+
+     **Never during a turn (2026-11-05).** A request typed while the session is still working goes
+     into that turn; the handoff waits for the first request after the turn ends. (Before, the
+     request was held, `/clear` waited in the host's input queue, and it ran four minutes later,
+     unannounced, when the turn ended.) If an automatic `/clear` fails anyway, the request is done
+     exactly once: by the old session if it runs another turn (its brief shows `HELD REQUEST`), or by
+     the fresh session after your `/clear`, into which Orbit then types the carry line itself once
+     its input line is empty.
 4. An open handoff that nobody took **expires after 12 hours** and closes on compaction, so it can
    never hand a task to an unrelated session opened later in the same folder. When several are open
    in one folder, **the pane decides**: a fresh session takes the handoff Orbit typed `/clear` for in

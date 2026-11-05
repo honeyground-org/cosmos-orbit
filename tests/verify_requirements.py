@@ -146,6 +146,20 @@ def main():
     t0 = attach.drain_inbox(store, t0)
     check('queued notification is consumed and ignored', not store.inbox(t0['id']) and not t0['data'].get('requirements_pending'))
 
+    print('①-c an addition past the item limit is refused out loud, and nothing is lost')
+    full = attach.create(store, make_repo(base, 'item-limit'), 'Build the report export with tests and docs', 'claude', 'limit')
+    attach.set_done(store, full['id'], ['D%d item number %d' % (i, i) for i in range(1, 12)])
+    try:
+        attach.set_done(store, full['id'], ['D12 twelfth thing', 'D13 thirteenth thing'], add=True)
+        refused = ''
+    except ValueError as error:
+        refused = str(error)
+    kept = [d['id'] for d in store.get(full['id'])['data']['done'] if d['id'].startswith('D')]
+    check('13 items: refused with the count and "nothing was saved"; the 11 stand',
+          'would make 13' in refused and 'Nothing was saved' in refused and len(kept) == 11, (refused, kept))
+    attach.set_done(store, full['id'], ['D12 twelfth thing'], add=True)
+    check('…12 items are accepted (control)', len([d for d in store.get(full['id'])['data']['done'] if d['id'].startswith('D')]) == 12)
+
     print('queued verification must yield to changed work')
     queued_root = make_repo(base, 'queued-review')
     queued = attach.create(store, queued_root, 'Implement and deploy the whole feature', 'codex', 'queued', done=['Feature deployed'])

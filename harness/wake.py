@@ -157,10 +157,11 @@ def _run(argv):
 
 
 def deliver(terminal, sender='', when_busy='wait', wait=WAIT, runner=None, sleep=time.sleep, clock=time.monotonic,
-            allowed=lambda: True):
+            allowed=lambda: True, line=WAKE_LINE):
     """Look at the screen until the line can be typed, then type it once. Returns (outcome, typed argv list).
 
-    `allowed()` is asked right before typing (the hourly bound and the gap between wakes)."""
+    `allowed()` is asked right before typing (the hourly bound and the gap between wakes). `line` is the wake line,
+    or the carry line a fresh session needs when no typist is waiting for it (continuity.resume_carried)."""
     from . import typist
     runner = runner or _run
     deadline = clock() + wait
@@ -176,13 +177,13 @@ def deliver(terminal, sender='', when_busy='wait', wait=WAIT, runner=None, sleep
                 runner(notify_command(terminal, 'A message%s is waiting (wake limit reached).' % who))
                 return 'throttled', []
             typed = []
-            for argv in (typist.command(terminal, text=WAKE_LINE), typist.command(terminal, key='enter')):
+            for argv in (typist.command(terminal, text=line), typist.command(terminal, key='enter')):
                 typed.append(argv)
                 if runner(argv)[0] != 0:
                     return 'typing_failed', typed
             sleep(1.5)
             code, after = runner(screen_command(terminal))
-            if code == 0 and WAKE_LINE[:40] in after and read_state(after) == 'typing':
+            if code == 0 and line[:40] in after and read_state(after) == 'typing':
                 return 'not_submitted', typed
             return 'woken', typed
         if state in ('typing', 'unknown', 'unreadable') and not notified:

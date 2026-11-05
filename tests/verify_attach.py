@@ -147,6 +147,18 @@ def verify_supervision(base):
           and supervision.tick(store, tid, 'resume-session', runner) == 'awaiting_handoff')
     decision = attach.context_decision(store, pending)
     check('supervisor: unfinished task still requests a context checkpoint', decision and decision.get('decision') == 'block')
+    # 2026-11-05 10:57: the automatic /clear failed (auto_failed), and the stop guard kept sending the session back
+    # to work past the handoff point instead of letting it wait for the user's /clear.
+    for state, waits in (('auto_failed', True), ('adopted', False)):
+        probe = store.get(tid)
+        probe['data']['handoff_state'] = {'session': 'resume-session', 'state': state, 'limit': 350000}
+        store.save(probe, probe['status'], 'test_handoff')
+        probe = store.get(tid)
+        check('supervisor: handoff state %s → %s' % (state, 'waits for the handoff' if waits else 'unfinished work continues (control)'),
+              supervision.handoff_pending(probe) is waits and (supervision.stop_block(store, probe) is None) is waits)
+    probe = store.get(tid)
+    probe['data']['handoff_state'] = {'session': 'resume-session', 'state': 'recommended', 'limit': 350000}
+    store.save(probe, probe['status'], 'test_handoff')
     attach.claim(store, tid, remaining=['source unavailable'], question='Which source should be used?')
     check('supervisor: real input requirement releases the stop guard',
           supervision.stop_block(store, store.get(tid)) is None)

@@ -73,6 +73,17 @@ def tell(store, root, base, session, tokens=210_000):
     return tid, pay, path, told
 
 
+def end_turn(store, pay):
+    """Stops until the Stop hook lets the turn end (it may send it back first). Returns how often it did."""
+    blocked = 0
+    while blocked < 6:
+        reply = attach.handle(store, 'stop', dict(pay, stop_hook_active=blocked > 0, last_assistant_message='Answered.'), 'claude')
+        if (reply or {}).get('decision') != 'block':
+            return blocked
+        blocked += 1
+    raise AssertionError('the Stop hook never let the turn end')
+
+
 def age(store, tid, seconds):
     """Move the handoff's times back, as if it was told `seconds` ago."""
     from datetime import datetime, timedelta, timezone
@@ -161,6 +172,7 @@ def main():
               told_f and 'starts a fresh context by itself' in told_f.get('systemMessage', ''), told_f)
         question = attach.handle(store, 'prompt', dict(pay_f, prompt='What did the last test print?'), 'claude')
         check('a question is answered in place, not handed off (control)', (question or {}).get('decision') != 'block' and not typed)
+        end_turn(store, pay_f)  # the answer ends the turn; the next request arrives at an idle input line
         request = 'Add CSV export for the report\nwith one row per item'
         out = attach.handle(store, 'prompt', dict(pay_f, prompt=request), 'claude')
         check('a request is blocked here and carried over', out and out.get('decision') == 'block' and 'carried over' in out['reason'], out)
@@ -205,6 +217,115 @@ def main():
     finally:
         typist.detect, typist.spawn = real_detect, real_spawn
         continuity.set_handoff_mode(store, 'tell')
+
+    print('③-b a message sent while the session is working never starts the handoff (2026-11-05 10:56)')
+    # Observed: a go-ahead started a turn; a request typed while that turn ran was blocked, /clear went into the host's
+    # input queue, the typist gave up after 25 s, and the queued /clear ran 4 minutes later when the turn ended.
+    typed = []
+    try:
+        typist.detect = lambda env=None: fake
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+        root_m = make_repo(base, 'repo-midturn')
+        attach.set_switch(store, 'on', root_m)
+        tid_m, pay_m, _, _ = tell(store, root_m, base, 'm1')
+        attach.handle(store, 'prompt', dict(pay_m, prompt='What did the last test print?'), 'claude')  # a turn starts
+        mid = attach.handle(store, 'prompt', dict(pay_m, prompt='Keep the flow exact so that no session is ever lost'), 'claude')
+        state = store.get(tid_m)['data']['handoff_state']
+        check('a request typed during a turn is not blocked and nothing is typed (the incident)',
+              (mid or {}).get('decision') != 'block' and not typed and state.get('state') in ('checkpointed', 'told'),
+              (mid, typed, state.get('state')))
+        check('…the ledger says why the handoff waited', 'handoff_deferred' in kinds(store, tid_m), kinds(store, tid_m)[-6:])
+        real_reply = attach._stop_reply
+        try:
+            attach._stop_reply = lambda *a: {'decision': 'block', 'reason': 'Orbit: a fixed check failed. Fix it now.'}
+            attach.handle(store, 'stop', dict(pay_m, stop_hook_active=False, last_assistant_message='Done.'), 'claude')
+        finally:
+            attach._stop_reply = real_reply
+        inside = attach.handle(store, 'prompt', dict(pay_m, prompt='Also add CSV export while you are at it'), 'claude')
+        check('a request typed after the Stop hook sent the turn back is still during the turn: not blocked',
+              (inside or {}).get('decision') != 'block' and not typed, inside)
+        end_turn(store, pay_m)
+        after = attach.handle(store, 'prompt', dict(pay_m, prompt='Add PDF export for the report'), 'claude')
+        check('after the turn ended, the next request hands off (control)',
+              (after or {}).get('decision') == 'block' and len(typed) == 1
+              and store.get(tid_m)['data']['handoff_state']['state'] == 'auto', (after, len(typed)))
+        attach.handle(store, 'prompt', dict(pay_m, prompt='What did the export write?'), 'claude')  # turn left open
+        attach.handle(store, 'session-start', dict(pay_m, source='resume'), 'claude')               # process restarted
+        check('a session that restarts (resume) is at its input line: a turn left open is closed',
+              not store.get(tid_m)['data']['supervision']['m1'].get('turn_open'))
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+
+    print('③-c after a failed automatic /clear: the request is done exactly once, by whichever session runs next')
+    typed = []
+    try:
+        typist.detect = lambda env=None: fake
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+        # (c) the old session runs another turn: the held request comes back to it, and not to a later fresh session
+        root_n = make_repo(base, 'repo-held')
+        attach.set_switch(store, 'on', root_n)
+        tid_n, pay_n, _, _ = tell(store, root_n, base, 'n1')
+        attach.handle(store, 'prompt', dict(pay_n, prompt='Add CSV export with one row per item'), 'claude')
+        continuity.auto_failed(store, tid_n, 'the fresh session did not take the task over within 25s')
+        nxt = attach.handle(store, 'prompt', dict(pay_n, prompt='What is left to do?'), 'claude')
+        brief = (nxt or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+        check('the old session runs another turn: its brief holds the request for it (HELD REQUEST)',
+              'HELD REQUEST' in brief and 'one row per item' in brief, brief[-500:])
+        check('…served to the old session once', store.get(tid_n)['data']['carried_prompt'].get('served_to') == 'n1')
+        end_turn(store, pay_n)
+        count = len(typed)
+        start = attach.handle(store, 'session-start', {'cwd': str(root_n), 'session_id': 'n2', 'source': 'clear'}, 'claude')
+        brief = start['hookSpecificOutput']['additionalContext'] if start else ''
+        check('…a fresh session after /clear takes the task but is not told to do it again (the 11:01 defect)',
+              (store.session_task('n2') or {}).get('task_id') == tid_n and 'CARRIED OVER' not in brief
+              and len(typed) == count, (brief[-300:], len(typed) - count))
+        # (b) the user clears by hand after the failure: the fresh session takes it and starts by itself
+        root_p = make_repo(base, 'repo-failed-clear')
+        attach.set_switch(store, 'on', root_p)
+        tid_p, pay_p, _, _ = tell(store, root_p, base, 'p1')
+        attach.handle(store, 'prompt', dict(pay_p, prompt='Add PDF export with page numbers'), 'claude')
+        continuity.auto_failed(store, tid_p, 'the fresh session did not take the task over within 25s')
+        count = len(typed)
+        start = attach.handle(store, 'session-start', {'cwd': str(root_p), 'session_id': 'p2', 'source': 'clear'}, 'claude')
+        brief = start['hookSpecificOutput']['additionalContext'] if start else ''
+        state = store.get(tid_p)['data']['handoff_state']
+        check('a /clear after the failure: the fresh session takes the task, its brief carries the request',
+              (store.session_task('p2') or {}).get('task_id') == tid_p and 'CARRIED OVER' in brief
+              and state.get('adopted_from') == 'auto_failed', (brief[-300:], state))
+        check('…and Orbit types the carry line once its input is empty (no typist was waiting: the 10-minute stall)',
+              len(typed) == count + 1 and typed[-1][1] == typist.carry_steps() and typed[-1][2] == tid_p,
+              typed[count:])
+        attach.handle(store, 'session-start', {'cwd': str(root_p), 'session_id': 'p2', 'source': 'resume'}, 'claude')
+        check('…once: another SessionStart of that session types nothing more', len(typed) == count + 1, len(typed) - count)
+        # control: an automatic handoff that worked leaves the carry line to its own typist
+        root_q = make_repo(base, 'repo-auto-ok')
+        attach.set_switch(store, 'on', root_q)
+        tid_q, pay_q, _, _ = tell(store, root_q, base, 'q1')
+        attach.handle(store, 'prompt', dict(pay_q, prompt='Add XLSX export with one sheet per month'), 'claude')
+        count = len(typed)
+        attach.handle(store, 'session-start', {'cwd': str(root_q), 'session_id': 'q2', 'source': 'clear'}, 'claude')
+        check('control: after a working automatic /clear nothing extra is typed (its typist types the carry line)',
+              (store.session_task('q2') or {}).get('task_id') == tid_q and len(typed) == count, len(typed) - count)
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+    tmux_t = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
+    seen = []
+    ran = typist.run(tmux_t, typist.carry_steps(), runner=lambda argv: 0, sleep=lambda s: None,
+                     deliver=lambda terminal, wait, line: seen.append(line) or ('woken', [['typed', line]]))
+    check('the carry step types the carry line through wake.deliver (empty input only)',
+          seen == [typist.CARRY_LINE] and ran == [['typed', typist.CARRY_LINE]], (seen, ran))
+    try:
+        typist.run(tmux_t, typist.carry_steps(), runner=lambda argv: 0, sleep=lambda s: None,
+                   deliver=lambda terminal, wait, line: ('expired_typing', []))
+        error = None
+    except RuntimeError as failure:
+        error = str(failure)
+    check('…the user kept typing until the wait ran out: nothing typed, the failure is reported (control)',
+          error and 'expired_typing' in error, error)
 
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
