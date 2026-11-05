@@ -23,7 +23,7 @@ os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 for name in ('ORBIT', 'COSMOS_ORBIT', 'ORBIT_HANDOFF_AT', 'ORBIT_HANDOFF_MIN_GROWTH', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID'):
     os.environ.pop(name, None)  # never type into the terminal running this check
 
-from harness import attach, continuity, requirements, typist  # noqa: E402
+from harness import attach, continuity, requirements, supervision, typist  # noqa: E402
 from harness.store import Store, now  # noqa: E402
 
 FAILED = []
@@ -228,7 +228,12 @@ def main():
         attach.set_switch(store, 'on', root_g)
         tid_g, pay_g, _, _ = tell(store, root_g, base, 'g1')
         codex = continuity.auto_handoff(store, store.get(tid_g), 'g1', 'Add PDF export', 'requirement', 'codex')
-        check('Codex: no block (its prompt hook is not relied on to block), nothing typed (control)', codex is None and len(typed) == count)
+        steps = typed[-1][1] if len(typed) > count else []
+        check('Codex: the request is blocked and carried, and the Codex order is typed (measured 0.166: it keeps the '
+              'block; no ctrl+u, /new, a fresh conversation, the carry line, the takeover)',
+              (codex or {}).get('decision') == 'block' and len(typed) == count + 1
+              and [k for k, _ in steps] == ['wait', 'codex_new', 'deliver', 'adopted']
+              and store.get(tid_g)['data']['handoff_state']['state'] == 'auto', (codex, steps))
         typist.detect = lambda env=None: None
         root_h = make_repo(base, 'repo-noterm')
         attach.set_switch(store, 'on', root_h)
@@ -333,6 +338,30 @@ def main():
         attach.handle(store, 'session-start', dict(pay_m, source='resume'), 'claude')               # process restarted
         check('a session that restarts (resume) is at its input line: a turn left open is closed',
               not store.get(tid_m)['data']['supervision']['m1'].get('turn_open'))
+        # e2e 2026-11-05: the Stop came while the independent review held the task ('Another harness process owns this
+        # task'); the turn stayed open, and the next request was taken for one typed during a turn.
+        root_l = make_repo(base, 'repo-review-lock')
+        attach.set_switch(store, 'on', root_l)
+        tid_l, pay_l, _, _ = tell(store, root_l, base, 'rl1')
+        attach.handle(store, 'prompt', dict(pay_l, prompt='What did the last test print?'), 'claude')   # a turn starts
+        with store.lock('task:' + tid_l):                                                               # the review holds it
+            attach.handle(store, 'stop', dict(pay_l, stop_hook_active=True, last_assistant_message='Answered.'), 'claude')
+        count = len(typed)
+        after_l = attach.handle(store, 'prompt', dict(pay_l, prompt='Add PDF export for the report'), 'claude')
+        check('a Stop while the review holds the task still ends the turn: the next request hands off',
+              (after_l or {}).get('decision') == 'block' and len(typed) == count + 1
+              and 'handoff_deferred' not in kinds(store, tid_l)[-5:], (after_l, kinds(store, tid_l)[-5:]))
+        root_rk = make_repo(base, 'repo-review-lock-continued')
+        attach.set_switch(store, 'on', root_rk)
+        tid_rk, pay_rk, _, _ = tell(store, root_rk, base, 'rk1')
+        attach.handle(store, 'prompt', dict(pay_rk, prompt='What did the last test print?'), 'claude')
+        with store.lock('task:' + tid_rk):
+            attach.handle(store, 'stop', dict(pay_rk, stop_hook_active=True, last_assistant_message='Answered.'), 'claude')
+        supervision.continue_turn(store, tid_rk, 'rk1')     # …but the turn was sent back after all: it goes on
+        count = len(typed)
+        inside_rk = attach.handle(store, 'prompt', dict(pay_rk, prompt='Add PDF export for the report'), 'claude')
+        check('control: a turn sent back after that Stop is still running: the request is not handed off',
+              (inside_rk or {}).get('decision') != 'block' and len(typed) == count, inside_rk)
     finally:
         typist.detect, typist.spawn = real_detect, real_spawn
         continuity.set_handoff_mode(store, 'tell')
@@ -456,6 +485,148 @@ def main():
           (store.session_task('worked-2') or {}).get('task_id') == tid_w
           and store.get(tid_w)['data']['prompts'][-1]['text'].startswith('Also add a CSV'), store.session_task('worked-2'))
 
+    print('③-f Codex: the order measured in codex-cli 0.166 (tmux, 2026-11-05)')
+    logo = '\n'.join('   ' + row for row in ('⣀⣤⣤⣤⣀⣀⣀⣀⣀⣀', '⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤', '⢀⣾⣿⣿⠿⠋⠉⠉⢉⣭⣿⣿⣿⣿', '⣀⣾⣿⣿⠃ ⣀⣴⣾⣿⣿⡿⠟⠋⣿⣿'))
+    footer = '\n\n  GPT-6-Astra low · /repo\n  ← for agents · ? for shortcuts\n'  # a blank row under the input (measured)
+    old_screen = ('  >_ OpenAI Codex (v0.166.0)\n› reply with the single word PONG\n• PONG\n  Worked for 3s\n'
+                  '■ Blocked by hook · Orbit: handing off\n› Ask Codex to do anything' + footer)
+    where = ('• PONG\n  Where should the new conversation run?\n'
+             '› 1. Use current Git worktree  Keep using the current working directory\n'
+             '  2. Create new Git worktree   Create a separate checkout of this repository\n  enter select · esc back\n')
+    fresh = logo + '\n› Ask Codex to do anything' + footer
+    typing = old_screen.replace('› Ask Codex to do anything', '› and also the chart')
+
+    def codex_run(screens, steps=(('codex_new', 40.0),), adopted=None, deliver=None, find=lambda t, e: None, argv=None):
+        """typist.run over a list of screens (the last one stays); returns (typed keys, error)."""
+        clock, queue = [0.0], [screens[0]] + list(screens)   # the pane check and the first look see the same screen
+        def screen(where):
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+        keys = []
+        def runner(command):
+            keys.append(command[-1])
+            if argv is not None:
+                argv.append(command)
+            return 0
+        try:
+            typist.run(tmux_t, list(steps), runner=runner,
+                       sleep=lambda s: clock.__setitem__(0, clock[0] + s), clock=lambda: clock[0], screen=screen,
+                       adopted=adopted, deliver=deliver, find=find)
+            return keys, None
+        except RuntimeError as failure:
+            return keys, str(failure)
+
+    keys, error = codex_run([old_screen, where, fresh])
+    check('git repository: /new, Enter, Enter on the "where" question (current worktree), then a fresh conversation',
+          keys == ['/new', 'Enter', 'Enter'] and error is None, (keys, error))
+    keys, error = codex_run([old_screen, fresh])
+    check('no question (not a Git repository): /new and Enter only', keys == ['/new', 'Enter'] and error is None, (keys, error))
+    keys, error = codex_run([old_screen, old_screen])
+    check('the screen never shows a fresh conversation: it stops, the carry line is not typed (control)',
+          keys == ['/new', 'Enter'] and error and 'not typed' in error, (keys, error))
+    keys, error = codex_run([typing])
+    check('the user is typing in the old session: nothing is typed at all (control)', keys == [] and error, (keys, error))
+    blocked_fresh = logo + '\n• Blocked by hook\n  └ Orbit: handing off\n› Ask Codex to do anything' + footer
+    keys, error = codex_run([blocked_fresh])
+    check('a screen that already looked fresh before /new (its first prompt was blocked) is not taken for the new one (control)',
+          keys == ['/new', 'Enter'] and error, (keys, error))
+    expect = 'reply with the single word PONG'
+    keys, error = codex_run([fresh], steps=(('codex_new', {'wait': 40.0, 'expect': expect}),))
+    check("the pane the hook named does not show the block, and no other does: nothing is typed (Codex's daemon "
+          "named a pane closed minutes before, 2026-11-05)", keys == [] and error and 'nothing was typed' in error, (keys, error))
+    real = [old_screen, old_screen, where, fresh]           # the pane Codex actually runs in
+    def by_pane(where_):
+        if where_['target'] != '%271':
+            return "can't find pane: %260"                   # the pane the daemon's environment named
+        return real.pop(0) if len(real) > 1 else real[0]
+    moved, clock_m = [], [0.0]
+    try:
+        typist.run(tmux_t, [('codex_new', {'wait': 40.0, 'expect': expect})], runner=lambda a: moved.append(a) or 0,
+                   sleep=lambda s_: clock_m.__setitem__(0, clock_m[0] + s_), clock=lambda: clock_m[0], screen=by_pane,
+                   find=lambda t, e: dict(t, target='%271'))
+        error = None
+    except RuntimeError as failure:
+        error = str(failure)
+    check('…when exactly one other pane shows it, the typing goes there (and only there)',
+          [m[-1] for m in moved] == ['/new', 'Enter', 'Enter'] and error is None
+          and all(m[m.index('-t') + 1] == '%271' for m in moved), (moved, error))
+    screens = {'%1': old_screen, '%2': fresh, '%3': old_screen.replace('PONG', 'PING')}
+    one = typist.find_pane(tmux_t, expect, lister=lambda: ['%1', '%2'], reader=screens.get)
+    two = typist.find_pane(tmux_t, 'reply with the single word P', lister=lambda: ['%1', '%3'], reader=screens.get)
+    check('find_pane: the one pane showing this block is found; two that match → none (control: never a guess)',
+          (one or {}).get('target') == '%1' and two is None, (one, two))
+    delivered = []
+    keys, error = codex_run([old_screen, where, fresh], steps=typist.handoff_steps('codex'), adopted=lambda: True,
+                            deliver=lambda terminal, wait, line: delivered.append(line) or ('woken', [['typed', line]]))
+    check('the whole Codex order: /new, the question, the carry line once the conversation is fresh, the takeover',
+          keys == ['/new', 'Enter', 'Enter'] and delivered == [typist.CARRY_LINE] and error is None, (keys, delivered, error))
+    keys, error = codex_run([old_screen, where, fresh], steps=typist.handoff_steps('codex'), adopted=lambda: False,
+                            deliver=lambda terminal, wait, line: ('woken', [['typed', line]]))
+    check('…no takeover after the carry line: reported as a failure (the user is then told)', error and 'take the task over' in error, error)
+
+    cx = {'kind': 'tmux', 'cli': 'tmux', 'target': '%CX'}
+    typed = []
+    try:
+        typist.detect = lambda env=None: cx
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+        root_x = make_repo(base, 'repo-codex-flow')
+        attach.set_switch(store, 'on', root_x)
+        old_pay = {'cwd': str(root_x), 'session_id': 'cx1'}
+        attach.handle(store, 'session-start', dict(old_pay, source='startup'), 'codex')
+        attach.handle(store, 'prompt', dict(old_pay, prompt='Refactor app.py into a module with tests and keep the output identical'), 'codex')
+        tid_x = attach.current_task(store, root_x)['id']
+        with store.lock('task:' + tid_x):
+            t = store.get(tid_x)
+            t['data']['handoff_state'] = {'session': 'cx1', 'state': 'checkpointed', 'tokens': 210000, 'limit': 200000, 'at': now()}
+            store.save(t, t['status'], 'test_setup', {})
+        told_x = None
+        for active in (False, True, True):                  # until the Stop hook lets the turn end, as a host does
+            told_x = attach.handle(store, 'stop', dict(old_pay, stop_hook_active=active,
+                                                       last_assistant_message='Moved the parser into mod.py.'), 'codex')
+            if (told_x or {}).get('decision') != 'block':
+                break
+        check('Codex in auto mode: the Stop hook says the next request hands off by itself',
+              'starts a fresh context by itself' in (told_x or {}).get('systemMessage', ''), told_x)
+        blocked = attach.handle(store, 'prompt', dict(old_pay, prompt='Add CSV export for the report'), 'codex')
+        check('…the next request is blocked and carried; the typist is started for this pane and knows the request',
+              (blocked or {}).get('decision') == 'block' and len(typed) == 1 and typed[0][0] == cx
+              and dict(typed[0][1]).get('codex_new', {}).get('expect') == 'Add CSV export for the report', (blocked, typed))
+        mark = (store.get(tid_x)['data'].get('supervision') or {}).get('cx1') or {}
+        check('a prompt Orbit blocked runs no turn, so no Stop comes: its turn is closed at once (e2e run 2, 2026-11-05)',
+              not mark.get('turn_open'), mark)
+        stray = attach.handle(store, 'prompt', dict(old_pay, prompt=typist.CARRY_LINE), 'codex')
+        check('a carry line that reached the session being handed off is blocked, not run there (the safety net)',
+              (stray or {}).get('decision') == 'block'
+              and all(p['text'] != typist.CARRY_LINE for p in store.get(tid_x)['data']['prompts']), stray)
+        # e2e run 1 → run 2: the typing failed, the handoff was made ready again, and the next request was taken for
+        # one typed during a turn (the blocked prompt's turn never closed): it ran in the old context.
+        continuity.auto_failed(store, tid_x, 'no fresh Codex conversation within 40s')
+        with store.lock('task:' + tid_x):
+            t = store.get(tid_x)
+            t['data']['handoff_state'] = dict(t['data']['handoff_state'], state='checkpointed')
+            store.save(t, t['status'], 'test_setup', {})
+        count = len(typed)
+        again = attach.handle(store, 'prompt', dict(old_pay, prompt='Add CSV export for the report'), 'codex')
+        check('…so the next request after a failed attempt hands off again, not deferred as "during a turn"',
+              (again or {}).get('decision') == 'block' and len(typed) == count + 1
+              and 'handoff_deferred' not in kinds(store, tid_x)[-6:], (again, kinds(store, tid_x)[-6:]))
+        typist.detect = lambda env=None: dict(cx, target='%OTHER')
+        attach.handle(store, 'session-start', {'cwd': str(root_x), 'session_id': 'cx-other', 'source': 'startup'}, 'codex')
+        check('a new Codex session in another pane does not take it (control)',
+              (store.session_task('cx-other') or {}).get('task_id') != tid_x)
+        typist.detect = lambda env=None: cx
+        start = attach.handle(store, 'session-start', {'cwd': str(root_x), 'session_id': 'cx2', 'source': 'startup'}, 'codex')
+        line = attach.handle(store, 'prompt', {'cwd': str(root_x), 'session_id': 'cx2', 'prompt': typist.CARRY_LINE}, 'codex')
+        brief = ((start or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+                 + (line or {}).get('hookSpecificOutput', {}).get('additionalContext', ''))
+        check("the fresh Codex session (its SessionStart comes with the carry line, source startup) takes it over, "
+              "and its brief carries the request",
+              (store.session_task('cx2') or {}).get('task_id') == tid_x and 'CARRIED OVER' in brief
+              and 'CSV export' in brief and (line or {}).get('decision') != 'block', (store.session_task('cx2'), brief[-300:]))
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}
@@ -467,7 +638,9 @@ def main():
           and typist.command(tmux, key='ctrl+u') == ['tmux', 'send-keys', '-t', '%3', 'C-u'])
     check('ctrl+u presses cover every line of the request (wrapped lines too)', typist.clear_presses('one line') == 3
           and typist.clear_presses('a\nb\nc') == 5 and typist.clear_presses('x' * 130) == 5)
-    check('Codex types /new', [v for k, v in typist.handoff_steps('codex') if k == 'text'][0] == '/new')
+    codex_steps = typist.handoff_steps('codex')
+    check('Codex types /new inside its own step (at an empty input, never after ctrl+u: its blocked prompt does not come back)',
+          [k for k, _ in codex_steps].count('codex_new') == 1 and ('key', 'ctrl+u') not in codex_steps, codex_steps)
     check('detect: nothing outside cmux or tmux (control)', typist.detect({}) is None)
     ran = []
     try:

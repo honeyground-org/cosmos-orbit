@@ -50,18 +50,38 @@ def handoff_pending(task):
             and state.get('state') in OPEN_STATES)
 
 
+def _ended_key(task_id, session):
+    return 'turn_ended:%s:%s' % (task_id, session)
+
+
+def _ended_outside(store, task_id, session, mark):
+    """True when this turn ended while the task lock was busy, so its end was recorded outside the task (below)."""
+    stamp = store.preference(_ended_key(task_id, session)) or ''
+    return bool(stamp) and stamp >= (mark.get('turn_at') or '')
+
+
+def _end_outside(store, task_id, session):
+    """The task lock is held (an independent review holds it for minutes), but the turn did end: say so where the
+    next prompt looks. Measured 2026-11-05 (Codex e2e): the Stop came during the review, 'Another harness process
+    owns this task', the turn stayed open, and the next request was taken for one typed during a turn."""
+    from .store import now
+    store.preference(_ended_key(task_id, session), now())
+
+
 def begin_turn(store, task, session):
     """A prompt reached the session. True when a turn was already running: the user typed it while the session
     worked (the host delivers it into that turn), so nothing may treat it as a prompt at an idle input line."""
     if not session:
         return False
+    from .store import now
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
         mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
-        working = bool(mark.get('turn_open'))
-        mark.update(stop_count=0, stop_at=None, turn_open=True)
+        working = bool(mark.get('turn_open')) and not _ended_outside(store, task['id'], session, mark)
+        mark.update(stop_count=0, stop_at=None, turn_open=True, turn_at=now())
         store.save(task, task['status'], 'supervision_turn', {'session': session, 'layer': 'control',
                                                               **({'during_turn': True} if working else {})})
+    store.preference(_ended_key(task['id'], session), '')
     return working
 
 
@@ -71,18 +91,22 @@ def reset_turn(store, task_id, session):
     prompt waits for the handoff; it is never lost.)"""
     if not session:
         return
-    with store.lock('task:' + task_id):
-        task = store.get(task_id)
-        mark = (task['data'].get('supervision') or {}).get(session)
-        if mark and mark.get('turn_open'):
-            mark['turn_open'] = False
-            store.save(task, task['status'], 'supervision_turn_reset', {'session': session, 'layer': 'control'})
+    try:
+        with store.lock('task:' + task_id):
+            task = store.get(task_id)
+            mark = (task['data'].get('supervision') or {}).get(session)
+            if mark and mark.get('turn_open'):
+                mark['turn_open'] = False
+                store.save(task, task['status'], 'supervision_turn_reset', {'session': session, 'layer': 'control'})
+    except RuntimeError:
+        _end_outside(store, task_id, session)
 
 
 def continue_turn(store, task_id, session):
     """The Stop hook sent the turn back: it keeps running, so a prompt typed now arrives during a turn."""
     if not session:
         return
+    store.preference(_ended_key(task_id, session), '')   # a Stop recorded outside the lock no longer ends it
     with store.lock('task:' + task_id):
         task = store.get(task_id)
         mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
@@ -110,13 +134,17 @@ def record_stop(store, task, session):
     if not session:
         return
     from .store import now
-    with store.lock('task:' + task['id']):
-        task = store.get(task['id'])
-        mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
-        mark['stop_at'] = now()
-        mark['stop_count'] = mark.get('stop_count', 0) + 1
-        mark['turn_open'] = False  # until the Stop hook's reply sends the turn back (continue_turn)
-        store.save(task, task['status'], 'supervision_stop', {'session': session, 'layer': 'control'})
+    try:
+        with store.lock('task:' + task['id']):
+            task = store.get(task['id'])
+            mark = task['data'].setdefault('supervision', {}).setdefault(session, {})
+            mark['stop_at'] = now()
+            mark['stop_count'] = mark.get('stop_count', 0) + 1
+            mark['turn_open'] = False  # until the Stop hook's reply sends the turn back (continue_turn)
+            store.save(task, task['status'], 'supervision_stop', {'session': session, 'layer': 'control'})
+    except RuntimeError:
+        _end_outside(store, task['id'], session)
+        raise
 
 
 def tick(store, task_id, session, runner=None):

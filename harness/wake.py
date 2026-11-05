@@ -48,6 +48,17 @@ WAIT = 1800.0            # seconds a waker keeps looking before it gives up (the
 MAX_PER_HOUR = 20        # typed wakes per terminal: two agents acknowledging each other cannot loop for ever
 MIN_GAP = 20.0           # seconds between two typed wakes in one terminal
 WHEN_BUSY = ('wait', 'skip')
+PASTE_GAP = 1.0          # seconds between typing a line and pressing Enter (Codex reads a faster Enter as pasted)
+# Codex after /new in a Git repository asks where the conversation runs; option 1 (the current worktree) is selected.
+CODEX_WHERE = 'Where should the new conversation run?'
+BRAILLE = re.compile('[\u2800-\u28ff]{8,}')
+
+
+def codex_fresh(screen):
+    """True when the screen is a Codex conversation with nothing in it yet: its logo above an empty input. The
+    logo is drawn only before the first message (measured 2026-11-05, 0.166), so the old conversation is gone."""
+    return (CODEX_WHERE not in (screen or '') and read_state(screen) == 'empty'
+            and sum(1 for line in (screen or '').splitlines() if BRAILLE.search(line)) >= 3)
 
 
 def _blank(text):
@@ -176,16 +187,22 @@ def deliver(terminal, sender='', when_busy='wait', wait=WAIT, runner=None, sleep
             if not allowed():
                 runner(notify_command(terminal, 'A message%s is waiting (wake limit reached).' % who))
                 return 'throttled', []
-            typed = []
-            for argv in (typist.command(terminal, text=line), typist.command(terminal, key='enter')):
-                typed.append(argv)
-                if runner(argv)[0] != 0:
+            typed = [typist.command(terminal, text=line)]
+            if runner(typed[0])[0] != 0:
+                return 'typing_failed', typed
+            for _ in range(2):
+                # Codex 0.166 takes text and an Enter that follows at once as a paste and keeps the line in its
+                # input (measured 2026-11-05); Enter after a pause submits it. One more Enter if it still sits there.
+                sleep(PASTE_GAP)
+                enter = typist.command(terminal, key='enter')
+                typed.append(enter)
+                if runner(enter)[0] != 0:
                     return 'typing_failed', typed
-            sleep(1.5)
-            code, after = runner(screen_command(terminal))
-            if code == 0 and line[:40] in after and read_state(after) == 'typing':
-                return 'not_submitted', typed
-            return 'woken', typed
+                sleep(1.5)
+                code, after = runner(screen_command(terminal))
+                if not (code == 0 and line[:40] in after and read_state(after) == 'typing'):
+                    return 'woken', typed
+            return 'not_submitted', typed
         if state in ('typing', 'unknown', 'unreadable') and not notified:
             text = ('A message%s is waiting; it is delivered when your input line is empty.' % who if state == 'typing'
                     else 'A message%s is waiting for this session.' % who)

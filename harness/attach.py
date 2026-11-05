@@ -1430,6 +1430,24 @@ def _handle(store, event, payload, host):
                     "user's instruction: fold what is relevant into the task and reply only if a reply is needed.")
             brief = serve_brief(store, watched(task), 'prompt', session) if task else ''
             return _context('UserPromptSubmit', note + ('\n' + brief if brief else ''))
+        def refused(reply):
+            """A prompt Orbit blocks runs no turn, so no Stop hook closes the turn it opened (measured 2026-11-05 in
+            Codex: the next request was then taken for one typed during a turn and its handoff deferred)."""
+            if task and not during_turn:
+                try:
+                    from .supervision import reset_turn
+                    reset_turn(store, task['id'], session)
+                except (RuntimeError, ValueError) as error:
+                    hook_log(store, 'blocked prompt turn not closed: ' + repr(error)[:200])
+            return reply
+
+        from .typist import CARRY_LINE
+        state = (task['data'].get('handoff_state') or {}) if task else {}
+        if text == CARRY_LINE and state.get('state') == 'auto' and state.get('session') == session:
+            # The carry line belongs to the fresh conversation; it reached the one being handed off (the /new or
+            # /clear did not take effect). Doing it here would run the request in the context it was moved out of.
+            return refused({'decision': 'block', 'reason': 'Orbit: the fresh context did not start, so the carried '
+                            'request was not run here. Type /clear (Claude Code) or /new (Codex); the fresh session takes it over.'})
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
         if task is None or task['status'] in CLOSED:
@@ -1449,7 +1467,7 @@ def _handle(store, event, payload, host):
         handed = continuity.auto_handoff(store, task, session, text, classify(text, learned(store)), host,
                                          closed=task['status'] in CLOSED, during_turn=during_turn)
         if handed:
-            return handed
+            return refused(handed)
         task = continuity.carried_turn(store, task, session)
         brief = serve_brief(store, task, 'prompt', session)
         continuity.mark_carried_served(store, task, session, turn=True)
@@ -1612,7 +1630,7 @@ def context_decision(store, task, settle=False, message_only=False):
         head = 'Orbit: context %s tokens ≥ handoff point %s for task %s. %s' % (
             _k(live.get('tokens')), _k(state.get('limit')), task['id'],
             'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''))
-        if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') == 'claude' and detect():
+        if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and detect():
             body = ('Your next request starts a fresh context by itself (auto handoff) and is carried over; a question is '
                     'answered here first. Back to asking: cosmos-orbit context tell')
         else:
