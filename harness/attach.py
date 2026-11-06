@@ -1381,6 +1381,13 @@ def _handle(store, event, payload, host):
             note(store, session, host, event, _pane())  # where this session can be woken (§wake)
         except Exception as error:  # noqa: BLE001 - never at the cost of the hook
             hook_log(store, 'terminal not recorded: ' + repr(error)[:200])
+    if session and payload.get('transcript_path') and event != 'session-end':
+        try:  # a review reads it to tell a claiming turn's own Stop from work done while it ran (verifier)
+            from .verifier import TRANSCRIPT_KEY
+            if store.preference(TRANSCRIPT_KEY + session) != str(payload['transcript_path']):
+                store.preference(TRANSCRIPT_KEY + session, str(payload['transcript_path']))
+        except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+            hook_log(store, 'transcript not recorded: ' + repr(error)[:200])
     if event in ('session-end', 'stop'):
         from .evolve import maybe_start
         maybe_start(store)  # one cheap check; a due self-evolution run starts in the background

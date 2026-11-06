@@ -42,7 +42,12 @@ CODEX_PLACEHOLDERS = ('Ask Codex to do anything', 'Ask a follow-up question')
 # Claude Code shows `Try "<example>"` in an empty input of a fresh session (2.1.318 builds it from eight examples,
 # some naming a file of the project); a user's text arrives after the same no-break space, so the shape decides.
 CLAUDE_PLACEHOLDER = re.compile(r'Try "[^"\n]{1,160}"')
-SCREEN_LINES = 14
+SCREEN_LINES = 14        # the bottom rows read_state looks at
+# cmux read-screen returns only the bottom --lines rows; tmux capture-pane returns the whole pane. A tall cmux pane
+# put Codex's logo above the bottom 14 rows, so a fresh conversation never looked fresh and the automatic handoff gave
+# up after /new (measured 2026-11-06 in a real cmux Codex pane, 47 rows: 14 rows → not fresh, all rows → fresh).
+# Reading the whole visible screen makes both terminals give the same picture.
+CMUX_READ_LINES = 500
 POLL = 3.0               # seconds between looks at the screen
 WAIT = 1800.0            # seconds a waker keeps looking before it gives up (the message stays in the channel)
 MAX_PER_HOUR = 20        # typed wakes per terminal: two agents acknowledging each other cannot loop for ever
@@ -149,7 +154,7 @@ def resolve(store, session=None, surface=None):
 
 def screen_command(terminal):
     if terminal['kind'] == 'cmux':
-        return [terminal['cli'], 'read-screen', '--surface', terminal['target'], '--lines', str(SCREEN_LINES)]
+        return [terminal['cli'], 'read-screen', '--surface', terminal['target'], '--lines', str(CMUX_READ_LINES)]
     return [terminal['cli'], 'capture-pane', '-p', '-t', terminal['target']]
 
 

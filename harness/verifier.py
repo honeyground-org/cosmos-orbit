@@ -1,5 +1,6 @@
 """One fresh-context review; the host derives the outcome from current evidence."""
 import copy
+import datetime
 import json
 
 from . import context, providers
@@ -76,18 +77,72 @@ class ChangedDuringReview(ValueError):
         self.why, self.verdict = why, verdict
 
 
+TRANSCRIPT_KEY = 'transcript:'          # + session: the transcript or rollout path its hooks last reported
+CODEX_TOOL_ITEMS = ('function_call', 'custom_tool_call', 'local_shell_call')
+
+
+def _stamp(text):
+    try:
+        moment = datetime.datetime.fromisoformat(str(text).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
+
+
+def tool_calls_since(path, since):
+    """How many tools the session called after `since`, from its own transcript (Claude Code) or rollout (Codex);
+    None when that cannot be told (no file, no timestamps, or the readable tail starts after `since`).
+
+    Only a tool can change a file. A turn's own Stop is no evidence of work: Codex runs `claim` as a tool in the
+    middle of its turn, the review starts at once, and the same turn ends with a Stop seconds later (measured
+    2026-11-06 in a real cmux Codex pane: the review started 01:04:21, the claiming turn's last tool call was issued
+    01:04:20, its Stop came 01:04:37, and the verdict was filed under the session's own changes while only another
+    process had written a file)."""
+    from .continuity import tail_lines
+    start = _stamp(since)
+    if not path or start is None:
+        return None
+    try:
+        lines = tail_lines(path)
+    except OSError:
+        return None
+    count, earliest = 0, None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        at = _stamp(event.get('timestamp')) if isinstance(event, dict) and event.get('timestamp') else None
+        if at is None:
+            continue
+        earliest = at if earliest is None else min(earliest, at)
+        if at <= start:
+            continue
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_ITEMS:
+            count += 1
+        elif event.get('type') == 'assistant':
+            content = (event.get('message') or {}).get('content')
+            if isinstance(content, list):
+                count += sum(1 for part in content if isinstance(part, dict) and part.get('type') == 'tool_use')
+    if earliest is None or earliest > start:
+        return None                                      # the tail does not reach back to the review's start
+    return count
+
+
 def executor_moved(store, task, since):
-    """Whether this task's own sessions did anything since `since`: a hook (a prompt or a Stop means a turn ran),
-    a turn end recorded outside the lock, or a message waiting in its inbox. A review holds the task lock, so these
-    are the records that still get written while it runs."""
+    """Whether this task's own sessions worked since `since` (the review's start). A review holds the task lock, so
+    the records that still get written while it runs are: a hook (a prompt or a Stop means a turn ran), a turn end
+    recorded outside the lock, a message waiting in its inbox. A hook alone is not work when the session's
+    transcript shows no tool call after `since`: the turn that claimed ends after the review began. Without a
+    readable transcript any hook counts, as before (the safe direction for a pass)."""
     if not since:
         return True                                      # unknown: assume it did
     sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
     for session in sessions:
         row = store.db.execute('SELECT at FROM terminals WHERE session=?', (session,)).fetchone()
-        if row and row['at'] > since:
-            return True
-        if (store.preference('turn_ended:%s:%s' % (task['id'], session)) or '') > since:
+        hooked = bool(row and row['at'] > since) or (store.preference('turn_ended:%s:%s' % (task['id'], session)) or '') > since
+        if hooked and tool_calls_since(store.preference(TRANSCRIPT_KEY + session), since) != 0:
             return True
     return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
 

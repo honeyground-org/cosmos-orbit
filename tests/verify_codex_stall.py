@@ -12,6 +12,7 @@ at its input line with nobody telling it (or the user) what the review had found
 ③ a decided outcome is shown in the waiting session's terminal; unfinished work gets a supervisor
 ④ the instruction a stopped session receives says where each item stands
 """
+import datetime
 import json
 import os
 from pathlib import Path
@@ -27,7 +28,7 @@ for name in ('ORBIT', 'COSMOS_ORBIT', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID', 'CMU
              'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
     os.environ.pop(name, None)               # never a real terminal: every terminal below is a fake one
 
-from harness import attach, manager, providers, supervision, wake  # noqa: E402
+from harness import attach, manager, providers, supervision, verifier, wake  # noqa: E402
 from harness.engine import Engine  # noqa: E402
 from harness.store import Store  # noqa: E402
 
@@ -158,6 +159,76 @@ def run(base, store, engine):
     tid = claimed(store, root, 'S-E', 'Build the YAML export and make it robust')
     task = review(engine, tid, verdict('met'))
     check('nothing moved: verified (control)', task['status'] == 'verified' and not last_of(task).get('changed_during_review'))
+
+    print("①-b the claiming turn ends while the review runs: that Stop is not work (real cmux Codex pane, 2026-11-06)")
+    def stamp(offset=0.0):
+        moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)
+        return moment.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+    def codex_item(kind, text=''):
+        if kind == 'end':
+            return {'timestamp': stamp(), 'type': 'event_msg', 'payload': {'type': 'task_complete'}}
+        return {'timestamp': stamp(), 'type': 'response_item',
+                'payload': {'type': 'custom_tool_call', 'name': 'exec', 'input': text}}
+
+    def claude_item(kind, text=''):
+        part = ({'type': 'tool_use', 'name': 'Bash', 'input': {'command': text}} if kind == 'tool'
+                else {'type': 'text', 'text': 'Claimed; the review is running.'})
+        return {'timestamp': stamp(), 'type': 'assistant', 'message': {'content': [part]}}
+
+    def append(path, *items):
+        with open(path, 'a', encoding='utf-8') as stream:
+            for item in items:
+                stream.write(json.dumps(item) + '\n')
+
+    def stop_hook(session, path):
+        """The session's real Stop hook, run while the review holds the task lock."""
+        with patch.object(attach, '_pane', return_value=TERMINAL), patch.object(supervision, 'ensure'):
+            attach.handle(store, 'stop', {'cwd': str(root), 'session_id': session, 'stop_hook_active': False,
+                                          'transcript_path': str(path), 'last_assistant_message': 'Claimed.'}, 'codex')
+
+    def claiming_turn(session, goal, item, during_items, own_edit=None):
+        """A turn that ran `claim` as its last tool, then (during the review) wrote `during_items` and stopped."""
+        path = base / ('%s.jsonl' % session)
+        append(path, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': session}},
+               item('tool', 'cosmos-orbit claim %s' % session))
+        tid_ = claimed(store, root, session, goal)
+        wake.note(store, session, 'codex', 'prompt', TERMINAL)  # the claiming turn's prompt, before the review
+        def during():
+            other('notes-%s.md' % session.lower())()
+            if own_edit:
+                own_edit()
+            append(path, *[item(kind, text) for kind, text in during_items])
+            stop_hook(session, path)
+        return review(engine, tid_, verdict('met'), during=during)
+
+    task = claiming_turn('S-G', 'Build the Avro export and make it robust', codex_item, [('end', '')])
+    check('Codex: the claiming turn stops during a passing review, no tool after it, another session wrote a file: '
+          'verified (was: filed under its own changes, superseded, "claim again")',
+          task['status'] == 'verified' and last_of(task).get('changed_during_review') == 'other_sessions',
+          (task['status'], task['data'].get('reason_code'), last_of(task).get('changed_during_review'), last_of(task).get('superseded')))
+    check('…the Stop hook remembered where the transcript is (written outside the lock)',
+          store.preference(verifier.TRANSCRIPT_KEY + 'S-G') == str(base / 'S-G.jsonl'))
+    task = claiming_turn('S-G2', 'Build the ORC export and make it robust', claude_item, [('text', '')])
+    check('Claude Code transcript, same turn: verified', task['status'] == 'verified'
+          and last_of(task).get('changed_during_review') == 'other_sessions', (task['status'], last_of(task)))
+
+    def own_patch():
+        (root / 'export.py').write_text('def export(rows):\n    return sorted(rows)\n')
+    task = claiming_turn('S-H', 'Build the Feather export and make it robust', codex_item,
+                         [('tool', 'apply_patch export.py'), ('end', '')], own_edit=own_patch)
+    check('…control: a tool called after the review began (the session edited after claiming): the pass is superseded',
+          task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
+          (task['status'], last_of(task).get('superseded')))
+    tid = claimed(store, root, 'S-I', 'Build the Arrow export and make it robust')
+    task = review(engine, tid, verdict('met'), during=lambda: (other('notes-i.md')(), stop_hook('S-I', base / 'gone.jsonl')))
+    check('…control: the transcript cannot be read: any hook counts as before (a pass is never kept on a guess)',
+          task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
+          (task['status'], last_of(task).get('superseded')))
+    late = base / 'late.jsonl'
+    append(late, {'timestamp': stamp(5), 'type': 'event_msg', 'payload': {'type': 'task_complete'}})
+    check('…a transcript tail that starts after the review began tells nothing (None), and no file tells nothing',
+          verifier.tool_calls_since(str(late), stamp()) is None and verifier.tool_calls_since(None, stamp()) is None)
 
     print('② a Stop that came while the review held the lock still ends the turn')
     tid = claimed(store, root, 'S-F', 'Build the Parquet export and make it robust')
