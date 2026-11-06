@@ -102,6 +102,9 @@ def tool_calls_since(path, since):
     start = _stamp(since)
     if not path or start is None:
         return None
+    # Transcripts stamp to the millisecond; a call in the review's first millisecond counts as after it (the safe
+    # side). The claiming call itself is issued before claim runs its checks, many milliseconds earlier.
+    start = start.replace(microsecond=start.microsecond // 1000 * 1000)
     try:
         lines = tail_lines(path)
     except OSError:
@@ -116,7 +119,7 @@ def tool_calls_since(path, since):
         if at is None:
             continue
         earliest = at if earliest is None else min(earliest, at)
-        if at <= start:
+        if at < start:
             continue
         payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
         if event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_ITEMS:

@@ -28,7 +28,7 @@ for name in ('ORBIT', 'COSMOS_ORBIT', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID', 'CMU
              'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
     os.environ.pop(name, None)               # never a real terminal: every terminal below is a fake one
 
-from harness import attach, manager, providers, supervision, verifier, wake  # noqa: E402
+from harness import attach, evolve, manager, providers, recovery, supervision, verifier, wake  # noqa: E402
 from harness.engine import Engine  # noqa: E402
 from harness.store import Store  # noqa: E402
 
@@ -105,10 +105,19 @@ def main():
     engine = Engine(store)
     original = providers.Provider
     providers.Provider = FakeReviewer
+    # A Stop hook while a review is pending starts a background worker; in a test store that worker ran the real
+    # provider (2026-11-06: two real `codex exec` reviews from this suite) and raced the in-process review for its
+    # lock. Nothing here may start a process: requests are counted instead.
+    started = []
     try:
-        run(base, store, engine)
+        with patch.object(recovery, 'ensure_worker', side_effect=lambda *a, **k: started.append('worker')), \
+                patch.object(evolve, 'maybe_start', side_effect=lambda *a, **k: started.append('evolve')):
+            run(base, store, engine)
     finally:
         providers.Provider = original
+    leaked = [d for d in (base / 'home' / 'runs').glob('*/*.invocation.json')]
+    check('no real model call and no background process from this suite (%d worker starts were stubbed)'
+          % started.count('worker'), not leaked, leaked)
     store.close()
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
@@ -314,6 +323,12 @@ def run(base, store, engine):
     told = supervision.tell(store, task, 'S-LOC3', cmux_runner({'S-MINE': codex_screen(tid)}, sent))
     check('…a verified outcome is shown in the pane that names the task when the named one is gone',
           told and len(sent) == 1 and sent[0][1] == 'notify' and sent[0][sent[0].index('--surface') + 1] == 'S-MINE', (told, sent))
+    tid, task = stopped_in_dead_pane('S-LOC4', 'Build the Protobuf export and make it robust', verdict('met'))
+    sent = []
+    told = supervision.tell(store, task, 'S-LOC4', cmux_runner({'S-MINE': codex_screen(tid) + '\n• Working (3s • esc to interrupt)\n'}, sent))
+    check('…also while that turn is still finishing (measured: the verdict came before the claiming turn ended); a '
+          'notification types nothing', told and len(sent) == 1 and sent[0][sent[0].index('--surface') + 1] == 'S-MINE',
+          (told, sent))
 
     tid = claimed(store, root, 'S-G', 'Build the Avro export and make it robust')
     wake.note(store, 'S-G', 'codex', 'prompt', TERMINAL)

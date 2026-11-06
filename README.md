@@ -178,6 +178,12 @@ What happens in an attached session:
    when nothing is left to resume, or when the same state has lasted 15 minutes (60 while a review runs);
    the next Stop starts one again if one is needed. Model calls Orbit makes itself (a review, an owned
    executor) run with `ORBIT=off`, so they never show up as user sessions or tasks.
+   When the pane a session's hooks named cannot be read (Codex can run hooks in its app-server daemon,
+   which names the pane the first Codex of that home started in), the observer uses the one pane whose
+   bottom rows name the task above an empty input line, and shows a decided outcome there; none or two,
+   nothing is typed. Measured 2026-11-06 in a real cmux Codex pane whose hooks named a surface that did
+   not exist: before, the session sat ten minutes with nothing typed; after, the continuation reached it
+   one second after the observer started, and the automatic handoff in that pane went through as well.
 7. `cosmos-orbit handoff TASK_ID --write docs/HANDOFF.md` renders the ledger as Markdown. No
    handoff is written by hand. `cosmos-orbit lessons` lists corrections repeated across tasks, the
    candidates for a guard rule.
