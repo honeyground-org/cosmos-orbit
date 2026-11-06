@@ -87,9 +87,10 @@ def names_task(screen, task_id, rows=20):
     return bool(task_id) and task_id in ' '.join(lines[-rows:])
 
 
-def locate(terminal, task_id, runner):
-    """The pane the session's hooks named cannot be read: the one other pane whose bottom rows name this task above an
-    empty input line, or None (none, or more than one: never a guess).
+def locate(terminal, task_id, runner, idle=True):
+    """The pane the session's hooks named cannot be read: the one other pane whose bottom rows name this task (above an
+    empty input line when `idle`: for typing; a notification types nothing), or None (none, or more than one: never a
+    guess).
 
     Codex can run hooks in its app-server daemon, whose environment names the pane the first Codex of that home started
     in (measured 2026-11-05 in tmux: a pane closed minutes before). Measured 2026-11-06 in a real cmux Codex pane whose
@@ -101,7 +102,7 @@ def locate(terminal, task_id, runner):
         if pane == terminal['target']:
             continue
         screen = typist.read_pane(terminal, pane, runner)
-        if names_task(screen, task_id) and wake.read_state(screen) == 'empty':
+        if names_task(screen, task_id) and (not idle or wake.read_state(screen) == 'empty'):
             found.append(dict(terminal, target=pane))
     return found[0] if len(found) == 1 else None
 
@@ -121,7 +122,7 @@ def tell(store, task, session, runner=None):
     run = runner or wake._run
     code, _ = run(wake.notify_command(terminal, outcome_text(task)))
     if code != 0:                                             # the named pane is gone: the screen names the task
-        found = locate(terminal, task['id'], run)
+        found = locate(terminal, task['id'], run, idle=False)  # measured: the verdict came while its turn still ran
         if found:
             code, _ = run(wake.notify_command(found, outcome_text(task)))
     store.preference(key, mark)
