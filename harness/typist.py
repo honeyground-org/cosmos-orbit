@@ -102,17 +102,41 @@ def shows_block(screen, expect):
     return BLOCKED in flat and (not expect or _signature(expect)[:32] in flat)
 
 
+def cmux_surfaces(tree):
+    """The terminal surfaces of a `cmux --json --id-format both tree --all` answer, every window and workspace."""
+    return [surface['id'] for window in (tree or {}).get('windows') or []
+            for workspace in window.get('workspaces') or [] for pane in workspace.get('panes') or []
+            for surface in pane.get('surfaces') or [] if surface.get('type') == 'terminal' and surface.get('id')]
+
+
+def _list_panes(terminal):
+    from .wake import _run
+    if terminal['kind'] == 'tmux':
+        return _run([terminal['cli'], 'list-panes', '-a', '-F', '#{pane_id}'])[1].split()
+    code, out = _run([terminal['cli'], '--json', '--id-format', 'both', 'tree', '--all'])
+    try:
+        return cmux_surfaces(json.loads(out)) if code == 0 else []
+    except ValueError:
+        return []
+
+
+def _read_pane(terminal, pane):
+    from .wake import _run, screen_command
+    code, out = _run(screen_command(dict(terminal, target=pane)))  # the whole visible screen, in both terminals
+    return out if code == 0 else ''
+
+
 def find_pane(terminal, expect, lister=None, reader=None):
-    """The one tmux pane whose screen shows this block, or None (none, or more than one).
+    """The one pane (tmux) or terminal surface (cmux) whose screen shows this block, or None (none, or more than one).
 
     Codex can run hooks in its app-server daemon, whose environment is the pane the first Codex of that home was
     started in (measured 2026-11-05: the hook said %260, a pane closed minutes before; Codex ran in %271). The
-    screen is the truth: it shows the request the hook just blocked."""
-    if terminal['kind'] != 'tmux':
+    screen is the truth: it shows the request the hook just blocked. cmux names its surfaces by UUID, the same id
+    send-panel and read-screen take (CMUX_PANEL_ID is the surface id)."""
+    if terminal['kind'] not in ('tmux', 'cmux'):
         return None
-    from .wake import _run
-    lister = lister or (lambda: _run([terminal['cli'], 'list-panes', '-a', '-F', '#{pane_id}'])[1].split())
-    reader = reader or (lambda pane: _run([terminal['cli'], 'capture-pane', '-p', '-t', pane])[1])
+    lister = lister or (lambda: _list_panes(terminal))
+    reader = reader or (lambda pane: _read_pane(terminal, pane))
     found = [pane for pane in lister() if shows_block(reader(pane), expect)]
     return dict(terminal, target=found[0]) if len(found) == 1 else None
 
@@ -145,8 +169,8 @@ def new_conversation(terminal, wait, press, screen, sleep=time.sleep, clock=time
             answered += 1
             sleep(1.0)
             continue
-        elif text != before and codex_fresh(text):
-            return terminal
+        elif text != before and codex_fresh(text) and BLOCKED not in _signature(text):
+            return terminal                               # a short old conversation shows its logo too, and the block
         if clock() >= deadline:
             raise RuntimeError('no fresh Codex conversation within %ds (%s); the carry line was not typed'
                                % (wait, 'the input never emptied' if before is None else 'after /new'))

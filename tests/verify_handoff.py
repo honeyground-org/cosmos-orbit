@@ -23,7 +23,7 @@ os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 for name in ('ORBIT', 'COSMOS_ORBIT', 'ORBIT_HANDOFF_AT', 'ORBIT_HANDOFF_MIN_GROWTH', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID'):
     os.environ.pop(name, None)  # never type into the terminal running this check
 
-from harness import attach, continuity, requirements, supervision, typist  # noqa: E402
+from harness import attach, continuity, requirements, supervision, typist, wake  # noqa: E402
 from harness.store import Store, now  # noqa: E402
 
 FAILED = []
@@ -554,6 +554,86 @@ def main():
     two = typist.find_pane(tmux_t, 'reply with the single word P', lister=lambda: ['%1', '%3'], reader=screens.get)
     check('find_pane: the one pane showing this block is found; two that match → none (control: never a guess)',
           (one or {}).get('target') == '%1' and two is None, (one, two))
+    # cmux (the user's terminal): the same correction, by the screens of every terminal surface (2026-11-06)
+    cmux_t = {'kind': 'cmux', 'cli': '/cmux', 'target': 'DAEMON-SURFACE'}
+    tree = {'windows': [{'workspaces': [
+        {'panes': [{'surfaces': [{'id': 'S-OLD', 'type': 'terminal'}, {'id': 'S-WEB', 'type': 'browser'}]}]},
+        {'panes': [{'surfaces': [{'id': 'S-CODEX', 'type': 'terminal'}]}, {'surfaces': [{'id': 'S-PING', 'type': 'terminal'}]}]}]}]}
+    surfaces = {'S-OLD': fresh, 'S-WEB': old_screen, 'S-CODEX': old_screen, 'S-PING': old_screen.replace('PONG', 'PING')}
+    calls, saved_run = [], wake._run
+    def fake_run(argv):
+        calls.append(argv)
+        if argv[1:] == ['--json', '--id-format', 'both', 'tree', '--all']:
+            return 0, json.dumps(tree)
+        if argv[1] == 'read-screen' and argv[3] in surfaces:
+            return 0, surfaces[argv[3]]
+        return 1, 'Error: not_found: Surface not found'
+    try:
+        wake._run = fake_run
+        found_c = typist.find_pane(cmux_t, expect)
+        both_c = typist.find_pane(cmux_t, 'reply with the single word P')
+    finally:
+        wake._run = saved_run
+    check('cmux: the one terminal surface showing this block is found across workspaces (was: never looked, so the '
+          'handoff fell back to telling)', (found_c or {}).get('target') == 'S-CODEX'
+          and (found_c or {}).get('kind') == 'cmux', found_c)
+    check('…two surfaces that match → none (control: never a guess); a browser surface is never read',
+          both_c is None and not any('S-WEB' in c for c in calls), (both_c, calls))
+    check('…each surface is read whole, as tmux capture-pane reads a pane (read-screen --surface ID --lines %d)'
+          % getattr(wake, 'CMUX_READ_LINES', 0),
+          ['/cmux', 'read-screen', '--surface', 'S-CODEX', '--lines', str(getattr(wake, 'CMUX_READ_LINES', 0))] in calls,
+          calls)
+    try:
+        wake._run = lambda argv: (1, 'Error: socket') if 'tree' in argv else (0, old_screen)
+        gone = typist.find_pane(cmux_t, expect)
+        wake._run = lambda argv: (0, 'not json') if 'tree' in argv else (0, old_screen)
+        garbled = typist.find_pane(cmux_t, expect)
+    finally:
+        wake._run = saved_run
+    check('…cmux unreachable or answering garbage: none, nothing to type into (control)', gone is None and garbled is None,
+          (gone, garbled))
+    moved_c, clock_c = [], [0.0]
+    real_c = [old_screen, old_screen, where, fresh]
+    def by_surface(where_):
+        if where_['target'] != 'S-CODEX':
+            return ''                                         # read-screen failed: the daemon's surface is gone
+        return real_c.pop(0) if len(real_c) > 1 else real_c[0]
+    try:
+        typist.run(cmux_t, [('codex_new', {'wait': 40.0, 'expect': expect})], runner=lambda a: moved_c.append(a) or 0,
+                   sleep=lambda s_: clock_c.__setitem__(0, clock_c[0] + s_), clock=lambda: clock_c[0], screen=by_surface,
+                   find=lambda t, e: typist.find_pane(t, e, lister=lambda: ['DAEMON-SURFACE', 'S-CODEX'],
+                                                     reader=lambda p: by_surface(dict(t, target=p))))
+        error = None
+    except RuntimeError as failure:
+        error = str(failure)
+    check('…and the Codex order then types only into that surface (send-panel/send-key-panel --panel S-CODEX)',
+          error is None and len(moved_c) == 3
+          and all(m[m.index('--panel') + 1] == 'S-CODEX' for m in moved_c), (moved_c, error))
+    # A tall cmux pane (measured 2026-11-06, 47 rows): the logo sits above the bottom 14 rows, and cmux read-screen
+    # returns only the bottom --lines rows. The typist gave up after /new although the screen was a fresh conversation.
+    gap = '\n'.join([' '] * 25)
+    tall_old = ('  >_ OpenAI Codex (v0.166.0)\n' + gap + '\n› Add subtract to calc.py\n'
+                '■ Blocked by hook · Orbit: handing off\n' + gap + '\n› Ask Codex to do anything' + footer)
+    tall_fresh = '  >_ OpenAI Codex (v0.166.0)\n' + logo + '\n' + gap + '\n› Ask Codex to do anything' + footer
+    tall = [tall_old, tall_old, where, tall_fresh]
+    def cmux_read(argv):
+        rows = (tall.pop(0) if len(tall) > 1 else tall[0]).split('\n')
+        return '\n'.join(rows[-int(argv[argv.index('--lines') + 1]):])
+    typed_t, clock_t = [], [0.0]
+    try:
+        typist.run(dict(cmux_t, target='S-TALL'), [('codex_new', {'wait': 40.0, 'expect': 'Add subtract to calc.py'})],
+                   runner=lambda a: typed_t.append(a) or 0, sleep=lambda s_: clock_t.__setitem__(0, clock_t[0] + s_),
+                   clock=lambda: clock_t[0], screen=lambda where_: cmux_read(wake.screen_command(where_)))
+        error = None
+    except RuntimeError as failure:
+        error = str(failure)
+    check('cmux: a tall pane whose logo is above the bottom 14 rows is seen as the fresh conversation (the real pane: '
+          '"no fresh Codex conversation within 40s" with the fresh conversation on screen)',
+          error is None and [t[-1] for t in typed_t] == ['/new', 'enter', 'enter'], (typed_t, error))
+    short_old = logo + '\n› Add subtract to calc.py\n■ Blocked by hook · Orbit: handing off\n› Ask Codex to do anything' + footer
+    keys, error = codex_run([short_old, short_old.replace('handing off', 'handing off ')])
+    check('…a short old conversation shows its logo too: while its block is on screen it is never the fresh one (control)',
+          keys == ['/new', 'Enter'] and error and 'not typed' in error, (keys, error))
     delivered = []
     keys, error = codex_run([old_screen, where, fresh], steps=typist.handoff_steps('codex'), adopted=lambda: True,
                             deliver=lambda terminal, wait, line: delivered.append(line) or ('woken', [['typed', line]]))

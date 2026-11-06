@@ -248,6 +248,12 @@ a habit:
    `DONE (rev N)`, and the dashboard lists the revisions.
 5. A change that arrives while the review runs is queued, not lost; a verified verdict then reopens
    the work as `requirements_changed` instead of closing it.
+6. Files that change while the review runs, in a folder other sessions share, do not throw the verdict
+   away: unless the task's own session called a tool after the review began (read from its own
+   transcript or rollout), the changes are someone else's and the verdict stands. The turn that claimed
+   ends with a Stop after the review began, and that Stop alone is not work (measured 2026-11-06 in a
+   real cmux Codex pane: before this, such a verdict was filed under the session's own changes, so a pass
+   would have been dropped with "claim again"). Without a readable transcript any hook counts.
 
 Unattended work follows the same rule: a correction marks the definitions stale, the executor's next
 response proposes the revised set, and Orbit adopts it as a new revision. A completion claim made
@@ -371,9 +377,17 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      are read as a paste, so Enter comes after a pause (and once more if the line is still in the input). Codex
      can run hooks in its app-server daemon, which reports the pane the first Codex of that home started in, so
      the pane is confirmed by its screen (the block of this request) before anything is typed; when it is not
-     the reported pane and exactly one other tmux pane shows it, that pane is used, otherwise nothing is typed
-     and you are told. Measured end to end: the request was blocked, `/new` and the question answered, the
-     fresh Codex session took the task over 7 seconds later and did the carried request.
+     the reported pane and exactly one other pane (tmux) or terminal surface (cmux, every window and workspace)
+     shows it, that one is used, otherwise nothing is typed and you are told. Measured end to end: the request
+     was blocked, `/new` and the question answered, the fresh Codex session took the task over 7 seconds later
+     and did the carried request.
+
+     **Codex in cmux (measured 2026-11-06 in a real cmux Codex pane).** cmux `read-screen` returns only the
+     bottom rows it is asked for, while tmux `capture-pane` returns the whole pane; in a tall pane Codex's logo
+     sat above the bottom 14 rows, so the fresh conversation never looked fresh and the handoff gave up after
+     `/new`. Orbit reads the whole visible screen in both terminals. Measured after that: the request was
+     blocked, `/new` and the question answered, and the fresh Codex session took the task over 6 seconds later
+     and ran the carried request, nothing typed by hand.
 
      **Measured on a real session (Claude Code 2.1, cmux, 2026-11-04): the request typed after the
      checkpoint was held, `/clear` typed, and the fresh session in the same pane took the task over 2
