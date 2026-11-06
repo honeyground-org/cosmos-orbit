@@ -22,6 +22,21 @@ from harness import attach, providers, requirements  # noqa: E402
 from harness.engine import Engine  # noqa: E402
 from harness.store import Store  # noqa: E402
 
+# Hooks run below start a background worker when a review is pending (and a self-evolution run when one is due). In a
+# test store that real worker took the task lock while the test's next hook ran, so a stop was not recorded (a
+# supervisor-launch check failed 1 in 24 parallel runs, 2026-11-06), every run left one worker behind for 90 s, and
+# in verify_codex_stall the same worker ran the real provider twice. Nothing in this suite starts a process.
+from types import SimpleNamespace as _Namespace  # noqa: E402
+from unittest.mock import patch as _no_process  # noqa: E402
+from harness import evolve as _evolve, recovery as _recovery, supervision as _supervision  # noqa: E402
+_no_process.object(_recovery, 'ensure_worker', return_value=None).start()
+_no_process.object(_evolve, 'maybe_start', return_value=None).start()
+# A supervisor launched for real polls the test store and starts the worker itself (traced 2026-11-06); a check that
+# counts launches patches this again with its own fake.
+_no_process.object(_supervision, 'subprocess', _Namespace(
+    Popen=lambda *a, **k: _Namespace(pid=None), run=__import__('subprocess').run,
+    DEVNULL=__import__('subprocess').DEVNULL, SubprocessError=__import__('subprocess').SubprocessError)).start()
+
 FAILED = []
 
 
