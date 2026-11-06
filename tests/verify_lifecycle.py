@@ -178,6 +178,31 @@ def main():
     check("a task waiting for Orbit's own review does not close (control: the wait is Orbit's, not the user's)",
           store.get(recent['id'])['status'] == 'working')
 
+    root_r = make_repo(base, 'repo-come-back')
+    attach.set_switch(store, 'on', root_r)
+    hook(store, root_r, 'session-start', 'R', source='startup')
+    hook(store, root_r, 'prompt', 'R', prompt='Port the scheduler to the new cron library and keep the old jobs')
+    rt = attach.resolve_task(store, root_r, 'R')
+    age(store, rt['id'], 17, ['R'])                      # the computer was off overnight (2026-11-06)
+    hook(store, root_r, 'prompt', 'R-other', prompt='이어서 진행해')
+    check('another session saying "이어서 진행해" does not reopen it (control)', store.get(rt['id'])['status'] == 'closed')
+    hook(store, root_r, 'prompt', 'R', prompt='이어서 진행해')
+    back_r = store.get(rt['id'])
+    check('the session that worked on it says "이어서 진행해" the next morning: the same task reopens (working, bound)',
+          back_r['status'] == 'working' and bound(store, 'R') == rt['id'], (back_r['status'], bound(store, 'R')))
+    root_u = make_repo(base, 'repo-come-back-new-work')
+    attach.set_switch(store, 'on', root_u)
+    hook(store, root_u, 'session-start', 'U', source='startup')
+    hook(store, root_u, 'prompt', 'U', prompt='Port the scheduler to the new cron library and keep the old jobs')
+    ut = attach.resolve_task(store, root_u, 'U')
+    age(store, ut['id'], 17, ['U'])
+    hook(store, root_u, 'prompt', 'U', prompt='새 랜딩 페이지 작업을 시작해서 진행해')
+    check('…a short new request that merely ends in "진행해" does not reopen it (control)',
+          store.get(ut['id'])['status'] == 'closed', store.get(ut['id'])['status'])
+    hook(store, root_u, 'prompt', 'U', prompt='Write the release notes for the mobile app version 3.2')
+    check('…while the same session asking for unrelated work starts a new task (control)',
+          store.get(ut['id'])['status'] == 'closed' and bound(store, 'U') not in (None, ut['id']), (store.get(ut['id'])['status'], bound(store, 'U')))
+
     print('③ a closed task comes back only when asked')
     listed = cli(base / 'home', 'list', '--closed', '--workspace', str(root_d))
     rows = json.loads(listed.stdout) if listed.returncode == 0 else []

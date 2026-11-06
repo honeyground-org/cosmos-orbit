@@ -603,7 +603,7 @@ def main(argv=None):
                                 pass
                         active = task['status'] in ('received', 'ready', 'running', 'working', 'checking', 'verifying', 'evaluating', 'paused')
                         if task['data'].get('mode') == 'attached':
-                            active = bool(task['data'].get('verification_pending')) and task['status'] not in ('verified', 'stalled', 'interrupted', 'needs_input')
+                            active = bool(task['data'].get('verification_pending')) and task['status'] not in ('verified', 'stalled', 'interrupted', 'needs_input', 'closed')
                             if not active:
                                 continue
                         if active or task['data'].get('recoverable') or store.inbox(item['id']) or store.routing(item['id']):
@@ -612,6 +612,9 @@ def main(argv=None):
                                 updated = engine.run(item['id'])
                                 if updated['revision'] != item['revision']:
                                     print(json.dumps(show(updated), ensure_ascii=False), flush=True)
+                                if task['data'].get('mode') == 'attached' and not updated['data'].get('verification_pending'):
+                                    from .supervision import deliver
+                                    deliver(store, updated)  # the review ended: its outcome reaches the waiting session
                             except RuntimeError as error:
                                 if 'owns this task' not in str(error):
                                     print(str(error), file=sys.stderr)
