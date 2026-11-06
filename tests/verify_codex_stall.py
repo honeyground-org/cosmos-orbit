@@ -329,6 +329,16 @@ def run(base, store, engine):
     check('…also while that turn is still finishing (measured: the verdict came before the claiming turn ended); a '
           'notification types nothing', told and len(sent) == 1 and sent[0][sent[0].index('--surface') + 1] == 'S-MINE',
           (told, sent))
+    tid, task = stopped_in_dead_pane('S-LOC5', 'Build the Thrift export and make it robust', verdict('met'))
+    sent, inner = [], []
+    plain = cmux_runner({'S-MINE': codex_screen(tid)}, sent)
+    def racing(argv):
+        if argv[1] == 'notify' and not inner:     # the other process tells the same outcome at this very moment
+            inner.append(supervision.tell(store, store.get(tid), 'S-LOC5', plain))
+        return plain(argv)
+    first = supervision.tell(store, task, 'S-LOC5', racing)
+    check('…two processes telling one outcome at the same moment show it once (measured: the worker and a supervisor '
+          'both did, one second apart)', first and inner == [False] and len(sent) == 1, (first, inner, sent))
 
     tid = claimed(store, root, 'S-G', 'Build the Avro export and make it robust')
     wake.note(store, 'S-G', 'codex', 'prompt', TERMINAL)
