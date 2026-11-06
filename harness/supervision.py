@@ -60,6 +60,65 @@ def _ended_outside(store, task_id, session, mark):
     return bool(stamp) and stamp >= (mark.get('turn_at') or '')
 
 
+def _stop_at(store, task_id, session, mark):
+    """When this session's turn last stopped: the stop recorded in the task, or a later one recorded outside it because
+    a review held the task lock. Measured 2026-11-05 01:50 (Codex): the Stop came during a review, only the outside
+    record was written, and the supervisor took the newer terminal event for a running turn and left after 15 minutes;
+    the session was never told the review's outcome."""
+    stamp = mark.get('stop_at') or ''
+    outside = store.preference(_ended_key(task_id, session)) or ''
+    if outside and outside >= (mark.get('turn_at') or '') and outside > stamp:
+        return outside
+    return stamp or None
+
+
+def outcome_text(task):
+    """What the user reads when a task's outcome is decided while its session sits at the input line."""
+    from .manager import _short
+    data = task['data']
+    if task['status'] == 'verified':
+        return 'Orbit: verified - task %s is complete: %s' % (task['id'], _short(data.get('goal') or task['prompt'], 120))
+    return 'Orbit: your decision is needed - task %s: %s' % (task['id'], _short(data.get('reason') or 'see the brief', 160))
+
+
+def tell(store, task, session, runner=None):
+    """Show a decided outcome (verified, or waiting for the user) in the session's terminal, once per outcome."""
+    from . import wake
+    if task['status'] not in ('verified', 'needs_input') or not session:
+        return False
+    key = 'told:%s:%s' % (task['id'], session)
+    mark = '%s:%d:%s' % (task['status'], len(task['data'].get('verdicts') or []), task['data'].get('reason_code') or '')
+    if store.preference(key) == mark:
+        return False
+    terminal, _ = wake.resolve(store, session=session)
+    if not terminal:
+        return False
+    code, _ = (runner or wake._run)(wake.notify_command(terminal, outcome_text(task)))
+    store.preference(key, mark)
+    with store.db:
+        store._event(task['id'], 'outcome_told', {'session': session, 'status': task['status'], 'shown': code == 0,
+                                                  'layer': 'control'})
+    return code == 0
+
+
+def deliver(store, task, runner=None, launch=None):
+    """A review ended: its outcome reaches every live session of the task, however long ago it stopped. A decided
+    outcome is shown; unfinished work gets a supervisor that types the continuation at the idle input line."""
+    task = store.get(task['id'])
+    if task['data'].get('verification_pending') or task['data'].get('mode') != 'attached':
+        return
+    for row in store.task_sessions(task['id']):
+        if row['ended']:
+            continue
+        try:
+            if task['status'] in ('verified', 'needs_input'):
+                tell(store, task, row['session'], runner)
+            else:
+                (launch or ensure)(store, task, row['session'])
+        except Exception:  # noqa: BLE001 - delivery never fails the review that produced the outcome
+            pass
+
+
 def _end_outside(store, task_id, session):
     """The task lock is held (an independent review holds it for minutes), but the turn did end: say so where the
     next prompt looks. Measured 2026-11-05 (Codex e2e): the Stop came during the review, 'Another harness process
@@ -158,6 +217,8 @@ def tick(store, task_id, session, runner=None):
     if attach.resolve(store, task['workspace'])[0] != 'on':
         return 'disabled'
     if store.paused(task_id) or task['status'] not in ('working', 'checking', 'verifying'):
+        if not store.paused(task_id):
+            tell(store, task, session, runner)           # the review it waited for decided: say so where it waits
         return 'settled'
     from .manager import diagnose
     if diagnose(task)['reason'] == 'waiting_for_user':
@@ -183,10 +244,13 @@ def tick(store, task_id, session, runner=None):
     if handoff_pending(task):
         return 'awaiting_handoff'
     mark = task['data'].get('supervision', {}).get(session, {})
-    if not mark.get('stop_at') or mark.get('sent_for') == mark['stop_at']:
+    stop_at = _stop_at(store, task_id, session, mark)
+    if not stop_at or mark.get('sent_for') == stop_at:
         return 'awaiting_stop'
+    if mark.get('turn_open') and stop_at == mark.get('stop_at'):
+        return 'host_turn_active'                        # the Stop hook sent the turn back: it is still running
     phase = store.db.execute('SELECT state,at FROM terminals WHERE session=?', (session,)).fetchone()
-    if not phase or phase['state'] != 'idle' or phase['at'] > mark['stop_at']:
+    if not phase or phase['state'] != 'idle' or phase['at'] > stop_at:
         return 'host_turn_active'
     code, screen = runner(wake.screen_command(terminal))
     state = wake.read_state(screen) if code == 0 else 'unreadable'
@@ -201,19 +265,19 @@ def tick(store, task_id, session, runner=None):
     # Re-read the binding, goal and input immediately before sending. Never clear input.
     with store.lock('task:' + task_id):
         latest = store.get(task_id)
-        current = latest['data'].get('supervision', {}).get(session, {})
-        if not needs_work(latest) or current.get('stop_at') != mark['stop_at'] or current.get('sent_for') == mark['stop_at']:
+        current = latest['data'].setdefault('supervision', {}).setdefault(session, {})
+        if not needs_work(latest) or _stop_at(store, task_id, session, current) != stop_at or current.get('sent_for') == stop_at:
             return 'changed'
         if wake.resolve(store, session=session)[0] != terminal:
             return 'replaced'
         phase = store.db.execute('SELECT state,at FROM terminals WHERE session=?', (session,)).fetchone()
-        if not phase or phase['state'] != 'idle' or phase['at'] > mark['stop_at']:
+        if not phase or phase['state'] != 'idle' or phase['at'] > stop_at:
             return 'host_turn_active'
         code, screen = runner(wake.screen_command(terminal))
         if code or wake.read_state(screen) != 'empty':
             return 'input_changed'
         # Persist before sending: a crash after Enter cannot submit the same continuation twice.
-        current['sent_for'] = mark['stop_at']
+        current.update(stop_at=stop_at, sent_for=stop_at, turn_open=False)
         store.save(latest, latest['status'], 'continuation_attempted', {'session': session, 'layer': 'control'})
         for argv in (typist.command(terminal, text=RESUME_LINE), typist.command(terminal, key='enter')):
             if runner(argv)[0]:

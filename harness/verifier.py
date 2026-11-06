@@ -68,6 +68,30 @@ def assess(answer, done):
     return result, outcome
 
 
+class ChangedDuringReview(ValueError):
+    """The review finished, but what it reviewed moved under it. `verdict` keeps what the reviewer found."""
+
+    def __init__(self, why, verdict=None):
+        super().__init__('Task or evidence changed during verification (%s); rerun fixed checks' % why)
+        self.why, self.verdict = why, verdict
+
+
+def executor_moved(store, task, since):
+    """Whether this task's own sessions did anything since `since`: a hook (a prompt or a Stop means a turn ran),
+    a turn end recorded outside the lock, or a message waiting in its inbox. A review holds the task lock, so these
+    are the records that still get written while it runs."""
+    if not since:
+        return True                                      # unknown: assume it did
+    sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
+    for session in sessions:
+        row = store.db.execute('SELECT at FROM terminals WHERE session=?', (session,)).fetchone()
+        if row and row['at'] > since:
+            return True
+        if (store.preference('turn_ended:%s:%s' % (task['id'], session)) or '') > since:
+            return True
+    return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
+
+
 def evaluate(engine, task, lease_fds=()):
     """Review finished work once. Callers own task/workspace locks and continuation."""
     from .development import evidence_current, fingerprint
@@ -131,6 +155,8 @@ def evaluate(engine, task, lease_fds=()):
                 recovery.record_metadata(store, task, dict(error.metadata, interrupted=True, usage_complete=False), 'verifying', recovered=True)
             if error.retry_at or saved.get('status') == 'returned':
                 raise
+    from .store import now
+    started = None if reused else now()
     if not reused:
         task['data']['verification_binding'] = {'tree': tree, 'binding': binding}
         task['data'].pop('active_call', None)
@@ -148,11 +174,15 @@ def evaluate(engine, task, lease_fds=()):
                        'feedback': task['data'].get('feedback', []),
                        'done': task['data'].get('done', []),
                        'done_fixed': task['data'].get('done_fixed')}
-    if current_binding != binding or fingerprint(task['workspace']) != tree or not fixed_checks(task):
-        raise ValueError('Task or evidence changed during verification; rerun fixed checks')
+    moved_tree = fingerprint(task['workspace']) != tree
+    why = 'request' if current_binding != binding else 'checks' if not fixed_checks(task) else 'files' if moved_tree else None
+    if why and task['data'].get('mode') != 'attached':
+        raise ValueError('Task or evidence changed during verification; rerun fixed checks')  # a private clone
     try:
         result, outcome = assess(answer, done)
     except ValueError as error:
+        if why:
+            raise ChangedDuringReview(why) from error
         task['data']['reason_code'] = 'verifier_rejected'
         store.save(task, 'verifying', 'verifier_rejected',
                    {'answer': answer, 'reason': str(error), 'layer': 'control'})
@@ -178,8 +208,23 @@ def evaluate(engine, task, lease_fds=()):
         task['data']['reason_code'] = 'verification_unavailable'
     verdict = dict(result, tree=tree, turn=task['data'].get('turns', 0),
                    outcome=outcome, done_fixed=binding['done_fixed'], observations=trace)
-    task['data'].setdefault('verdicts', []).append(verdict)
+    # An attached session shares its folder with other sessions. Observed 2026-11-05: 18 finished reviews were thrown
+    # away as "changed during verification" with no new request — another session had edited a file in the shared
+    # folder — and the executor, told to claim again, did so up to 57 times without a verdict. Files that moved while
+    # this task's own sessions did nothing are someone else's: the verdict stands. When its own session worked during
+    # the review, a pass does not cover what it changed, but unmet findings still hold.
+    if why == 'files' and executor_moved(store, task, started) and outcome == 'verified':
+        why = 'own_files'
+    elif why == 'files':
+        verdict['changed_during_review'] = 'own_session' if executor_moved(store, task, started) else 'other_sessions'
+        why = None
     task['data'].pop('active_call', None)
+    if why:
+        verdict['superseded'] = why                      # kept in the ledger: what the reviewer found still counts
+        task['data'].setdefault('verdicts', []).append(verdict)
+        store.save(task, 'verifying', 'verdict_superseded', dict(verdict, layer='control'))
+        raise ChangedDuringReview(why, verdict)
+    task['data'].setdefault('verdicts', []).append(verdict)
     store.save(task, 'verifying', 'verdict', dict(verdict, layer='control'))
     return verdict
 

@@ -116,6 +116,22 @@ def worked_on(task, session):
                               or any(p.get('session') == session for p in data.get('prompts') or []))
 
 
+CONTINUE = re.compile(r'(이어서|이어가|계속|마저|진행해|continue|carry on|keep going|resume|go on)', re.I)
+
+
+def continues_closed(task, session, text):
+    """The session that worked on a task closed for inactivity asks to go on ("이어서 진행해"): that is not a guess.
+    Observed 2026-11-06 09:34: the computer was off overnight, the first hook closed twelve tasks, among them the ones
+    the user's open terminals were working on; a terminal coming back with "이어서 진행해" would otherwise have had to
+    run `continue` itself. Another session, an unrelated request, or a task that was verified: no."""
+    from .requirements import classify
+    closed = task['data'].get('closed') or {}
+    text = (text or '').strip()
+    # Only a go-ahead ("이어서 진행해", "좋아 진행해"): "새 랜딩 페이지 작업 진행해" asks for new work.
+    return (task['status'] == 'closed' and closed.get('reason') == 'idle' and worked_on(task, session)
+            and len(text) <= 60 and bool(CONTINUE.search(text)) and classify(text) == 'trivial')
+
+
 def reopen_verified(store, task_id, session, text):
     """The session that did the work goes on after verification: the task is working again and its goals change.
     Returns the fresh task, or None when it is not (or no longer) a verified task this session worked on."""

@@ -1043,10 +1043,29 @@ def run_verification(engine, task_id, checks_only=False):
                 data.update(verification_pending=False)
                 data['development']['phase'] = 'ready'
                 data.pop('checks_done_for', None)
+                why = getattr(error, 'why', None)
+                found = getattr(error, 'verdict', None) or {}
+                sent = [row['id'] + ': ' + row['status'] + ' ' + '; '.join(row['evidence'])
+                        for row in found.get('items') or [] if row['status'] != 'met'] + (found.get('missing') or []) + (found.get('fix') or [])
+                if why == 'own_files' and not data.get('requirements_pending'):
+                    # The review passed on the claimed state, but this task's session kept changing files during it.
+                    if data.get('executor_result'):
+                        data['executor_result']['finished'] = False
+                    data.update(reason='The review passed on the state you claimed, but this task\'s session changed files '
+                                       'during it; claim again so the current state is reviewed.', reason_code='changed_during_review')
+                    store.save(task, 'working', 'resumed', {'because': 'changed_during_review', 'turn': data.get('turns', 0)})
+                    return task
                 if data.get('requirements_pending') or 'changed during verification' in str(error):
                     # The binding moved under the review (a new requirement or correction): back to work, not a question.
-                    data.update(reason='The request changed during the review; revise the goals and claim again.', reason_code='requirements_changed')
-                    store.save(task, 'working', 'resumed', {'because': 'requirements_changed', 'turn': data.get('turns', 0)})
+                    # What the reviewer found unmet still holds; it is delivered with the change, never dropped.
+                    data.update(reason='The request changed during the review; revise the goals and claim again.'
+                                       + (' The review also found: ' + ' · '.join(sent) if sent else ''), reason_code='requirements_changed')
+                    if sent:
+                        data['resumes'].append({'turn': data.get('turns', 0), 'because': 'requirements_changed', 'sent': sent})
+                        data['objective_progress'] = {'remaining': sent, 'next_action': 'Revise the goals for the changed '
+                                                      'request and address what the review found, then claim again.', 'source': 'runtime'}
+                    store.save(task, 'working', 'resumed', {'because': 'requirements_changed', 'why': why, 'sent': sent,
+                                                            'turn': data.get('turns', 0)})
                     return task
                 stop_for_input(store, task, str(error), data.get('reason_code') or 'verifier_rejected')
                 return task
@@ -1467,6 +1486,14 @@ def _handle(store, event, payload, host):
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
         suggested, reopened = None, False
+        from .lifecycle import continues_closed
+        if task is not None and continues_closed(task, session, text):
+            from .lifecycle import reopen
+            try:
+                reopen(store, task['id'], session)             # the same conversation goes on; recorded below
+                task = store.get(task['id'])
+            except (RuntimeError, ValueError) as error:
+                hook_log(store, 'closed task not reopened: ' + repr(error)[:200])
         if task is not None and task['status'] == 'verified':
             kind = classify(text, learned(store))
             if len(text) >= MIN_TASK_PROMPT and kind in ('requirement', 'unsure'):
@@ -1507,12 +1534,19 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         reply = _stop_reply(store, watched(task), session, payload)  # measure every stop, including the one after a block
+        from . import supervision
         if (reply or {}).get('decision') == 'block':
-            from . import supervision
             try:
                 supervision.continue_turn(store, task['id'], session)  # the turn goes on: prompts now arrive during it
             except (RuntimeError, ValueError) as error:
                 hook_log(store, 'turn continuation not recorded: ' + repr(error)[:200])
+        # Only now: a supervisor started before the turn was sent back read it as stopped and typed the continuation
+        # into the turn the block had just continued (measured 2026-11-05 07:17:45 in a real Codex pane: two
+        # instructions for one stop).
+        try:
+            supervision.ensure(store, store.get(task['id']), session)
+        except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
+            hook_log(store, 'supervisor unavailable: ' + repr(error)[:200])
         return reply
     return None
 
@@ -1521,12 +1555,15 @@ def _stop_reply(store, task, session, payload):
     """The Stop hook's reply for an attached task (None, a systemMessage, or a block that sends the turn back)."""
     from . import manager, supervision
     said = str(payload.get('last_assistant_message') or '')
-    try:
-        supervision.record_stop(store, task, session)
-        manager.observe(store, store.get(task['id']), session, said)  # why it stopped, recorded as the task's state
-        supervision.ensure(store, store.get(task['id']), session)
-    except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
-        hook_log(store, 'supervisor unavailable: ' + repr(error)[:200])
+    # Each step on its own: a review holds the task lock for minutes, and when the Stop's record failed on it the
+    # supervisor was never started either (2026-11-05 01:50, Codex: the session then waited, told nothing).
+    # The supervisor starts after the reply is decided (_handle): see there.
+    for name, step in (('stop not recorded', lambda: supervision.record_stop(store, task, session)),
+                       ('stop not diagnosed', lambda: manager.observe(store, store.get(task['id']), session, said))):
+        try:
+            step()
+        except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
+            hook_log(store, name + ': ' + repr(error)[:200])
     task = store.get(task['id'])
     if payload.get('stop_hook_active'):
         continuation = supervision.stop_block(store, task, said)

@@ -69,6 +69,9 @@ def diagnose(task, paused=False, message='', handoff=False):
     if data.get('requirements_pending'):
         return _row('requirements_changed', 'Revise the result goals for the changed request (done --add, or --keep), then continue.',
                     [_short(data['requirements_pending'].get('text'), 200)])
+    if data.get('reason_code') == 'changed_during_review':
+        return _row('finished_unclaimed', 'The review passed on the state you claimed, but your session changed files during '
+                    'it: finish what you were changing, record evidence, then claim again so the current state is reviewed.')
     if data.get('reason_code') == 'checks_failed':
         return _row('checks_failed', 'Fix the failing fixed check, then claim again.', [_short(data.get('reason'), 300)])
     d_items = [d for d in data.get('done') or [] if d['id'].startswith('D')]
@@ -120,7 +123,11 @@ def instruction(store, task, found):
     """The text a session receives when the manager sends it back to work."""
     from .attach import orbit_command
     prefix, tid = orbit_command(store), task['id']
-    lines = ['Orbit (manager): you stopped — %s.' % found['label'], 'NEXT: ' + found['next']]
+    lines = ['Orbit (manager): you stopped — %s.' % found['label']]
+    progress = progress_line(task)
+    if progress:
+        lines.append(progress)
+    lines.append('NEXT: ' + found['next'])
     if found['items']:
         lines.append('ITEMS: ' + ' · '.join(found['items']))
     if found['reason'] == 'undefined':
@@ -133,6 +140,24 @@ def instruction(store, task, found):
     lines.append('A progress report is not a reason to stop. If a real dependency needs the user, record it: '
                  '%s claim %s --question "specific missing input".' % (prefix, tid))
     return '\n'.join(lines)[:2400]
+
+
+def progress_line(task):
+    """Where the work stands against the goal, item by item: ✓ the review found it met (or evidence is recorded and
+    no review judged it yet), ✗ the latest review found it unmet, · nothing recorded yet."""
+    data = task['data']
+    items = [d for d in data.get('done') or [] if d['id'].startswith('D')]
+    if not items:
+        return None
+    evidence = data.get('done_evidence') or {}
+    last = (data.get('verdicts') or [{}])[-1]
+    judged = {row['id']: row.get('status') for row in last.get('items') or []} if last.get('done_fixed') == data.get('done_fixed') else {}
+    marks = []
+    for item in items:
+        status = judged.get(item['id'])
+        marks.append(item['id'] + (' ✓' if status == 'met' else ' ✗' if status in ('unmet', 'unclear') else
+                                   ' ✓' if evidence.get(item['id']) else ' ·'))
+    return 'PROGRESS (✓ met or evidenced · ✗ review found unmet · · nothing yet): ' + ' '.join(marks)
 
 
 def brief_line(task):

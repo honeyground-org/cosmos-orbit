@@ -203,8 +203,10 @@ old task keeps a record of what moved. It prints the plan; `--apply` does it.
   with their goal, when and why they closed, and their last checkpoint. `cosmos-orbit continue TASK_ID` takes one
   back: run inside Claude Code or Codex, that session works on it from its next prompt (`--session` names another),
   and a task the session had just started for the same request closes and its requests move over. Run from a plain
-  shell, the next new session in the task's folder takes it. Orbit never links a new request to a closed task by
-  itself. When a new request looks like one (shared words with its goal or last checkpoints, closed within 7 days, or
+  shell, the next new session in the task's folder takes it. The one exception: the session that worked on a task
+  closed for inactivity comes back with a go-ahead ("이어서 진행해", "continue") — the same conversation going on, so
+  the task reopens by itself (a night with the computer off closes every open task). Orbit never links a new request
+  to a closed task by itself. When a new request looks like one (shared words with its goal or last checkpoints, closed within 7 days, or
   the same session), the brief names it in one line, as a suggestion.
 
 ## When the request changes
