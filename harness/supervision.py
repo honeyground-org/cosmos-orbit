@@ -81,6 +81,31 @@ def outcome_text(task):
     return 'Orbit: your decision is needed - task %s: %s' % (task['id'], _short(data.get('reason') or 'see the brief', 160))
 
 
+def names_task(screen, task_id, rows=20):
+    """True when the bottom rows of a screen name this task: Orbit's messages at a Stop do ("Task <id>; inspect …")."""
+    lines = [line for line in (screen or '').splitlines() if line.strip()]
+    return bool(task_id) and task_id in ' '.join(lines[-rows:])
+
+
+def locate(terminal, task_id, runner):
+    """The pane the session's hooks named cannot be read: the one other pane whose bottom rows name this task above an
+    empty input line, or None (none, or more than one: never a guess).
+
+    Codex can run hooks in its app-server daemon, whose environment names the pane the first Codex of that home started
+    in (measured 2026-11-05 in tmux: a pane closed minutes before). Measured 2026-11-06 in a real cmux Codex pane whose
+    hooks named a surface that did not exist: the review came back unmet, the supervisor read 'unreadable' and the
+    session sat at its input line with nothing typed - the stall this module exists to end. The screen is the truth."""
+    from . import typist, wake
+    found = []
+    for pane in typist.list_panes(terminal, runner):
+        if pane == terminal['target']:
+            continue
+        screen = typist.read_pane(terminal, pane, runner)
+        if names_task(screen, task_id) and wake.read_state(screen) == 'empty':
+            found.append(dict(terminal, target=pane))
+    return found[0] if len(found) == 1 else None
+
+
 def tell(store, task, session, runner=None):
     """Show a decided outcome (verified, or waiting for the user) in the session's terminal, once per outcome."""
     from . import wake
@@ -93,7 +118,12 @@ def tell(store, task, session, runner=None):
     terminal, _ = wake.resolve(store, session=session)
     if not terminal:
         return False
-    code, _ = (runner or wake._run)(wake.notify_command(terminal, outcome_text(task)))
+    run = runner or wake._run
+    code, _ = run(wake.notify_command(terminal, outcome_text(task)))
+    if code != 0:                                             # the named pane is gone: the screen names the task
+        found = locate(terminal, task['id'], run)
+        if found:
+            code, _ = run(wake.notify_command(found, outcome_text(task)))
     store.preference(key, mark)
     with store.db:
         store._event(task['id'], 'outcome_told', {'session': session, 'status': task['status'], 'shown': code == 0,
@@ -252,7 +282,13 @@ def tick(store, task_id, session, runner=None):
     phase = store.db.execute('SELECT state,at FROM terminals WHERE session=?', (session,)).fetchone()
     if not phase or phase['state'] != 'idle' or phase['at'] > stop_at:
         return 'host_turn_active'
+    recorded = terminal
     code, screen = runner(wake.screen_command(terminal))
+    if code != 0:
+        found = locate(terminal, task_id, runner)        # the pane its hooks named is gone (see locate)
+        if found:
+            terminal = found
+            code, screen = runner(wake.screen_command(terminal))
     state = wake.read_state(screen) if code == 0 else 'unreadable'
     if state != 'empty':
         return state
@@ -268,7 +304,7 @@ def tick(store, task_id, session, runner=None):
         current = latest['data'].setdefault('supervision', {}).setdefault(session, {})
         if not needs_work(latest) or _stop_at(store, task_id, session, current) != stop_at or current.get('sent_for') == stop_at:
             return 'changed'
-        if wake.resolve(store, session=session)[0] != terminal:
+        if wake.resolve(store, session=session)[0] != recorded:
             return 'replaced'
         phase = store.db.execute('SELECT state,at FROM terminals WHERE session=?', (session,)).fetchone()
         if not phase or phase['state'] != 'idle' or phase['at'] > stop_at:
@@ -278,7 +314,9 @@ def tick(store, task_id, session, runner=None):
             return 'input_changed'
         # Persist before sending: a crash after Enter cannot submit the same continuation twice.
         current.update(stop_at=stop_at, sent_for=stop_at, turn_open=False)
-        store.save(latest, latest['status'], 'continuation_attempted', {'session': session, 'layer': 'control'})
+        store.save(latest, latest['status'], 'continuation_attempted',
+                   dict({'session': session, 'layer': 'control'},
+                        **({'located': terminal['target'], 'named': recorded['target']} if terminal != recorded else {})))
         for argv in (typist.command(terminal, text=RESUME_LINE), typist.command(terminal, key='enter')):
             if runner(argv)[0]:
                 return 'send_failed'

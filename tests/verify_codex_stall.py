@@ -202,26 +202,26 @@ def run(base, store, engine):
             stop_hook(session, path)
         return review(engine, tid_, verdict('met'), during=during)
 
-    task = claiming_turn('S-G', 'Build the Avro export and make it robust', codex_item, [('end', '')])
+    task = claiming_turn('S-CL1', 'Build the Avro export and make it robust', codex_item, [('end', '')])
     check('Codex: the claiming turn stops during a passing review, no tool after it, another session wrote a file: '
           'verified (was: filed under its own changes, superseded, "claim again")',
           task['status'] == 'verified' and last_of(task).get('changed_during_review') == 'other_sessions',
           (task['status'], task['data'].get('reason_code'), last_of(task).get('changed_during_review'), last_of(task).get('superseded')))
     check('…the Stop hook remembered where the transcript is (written outside the lock)',
-          store.preference(verifier.TRANSCRIPT_KEY + 'S-G') == str(base / 'S-G.jsonl'))
-    task = claiming_turn('S-G2', 'Build the ORC export and make it robust', claude_item, [('text', '')])
+          store.preference(verifier.TRANSCRIPT_KEY + 'S-CL1') == str(base / 'S-CL1.jsonl'))
+    task = claiming_turn('S-CL2', 'Build the ORC export and make it robust', claude_item, [('text', '')])
     check('Claude Code transcript, same turn: verified', task['status'] == 'verified'
           and last_of(task).get('changed_during_review') == 'other_sessions', (task['status'], last_of(task)))
 
     def own_patch():
         (root / 'export.py').write_text('def export(rows):\n    return sorted(rows)\n')
-    task = claiming_turn('S-H', 'Build the Feather export and make it robust', codex_item,
+    task = claiming_turn('S-CL3', 'Build the Feather export and make it robust', codex_item,
                          [('tool', 'apply_patch export.py'), ('end', '')], own_edit=own_patch)
     check('…control: a tool called after the review began (the session edited after claiming): the pass is superseded',
           task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
           (task['status'], last_of(task).get('superseded')))
-    tid = claimed(store, root, 'S-I', 'Build the Arrow export and make it robust')
-    task = review(engine, tid, verdict('met'), during=lambda: (other('notes-i.md')(), stop_hook('S-I', base / 'gone.jsonl')))
+    tid = claimed(store, root, 'S-CL4', 'Build the Arrow export and make it robust')
+    task = review(engine, tid, verdict('met'), during=lambda: (other('notes-cl4.md')(), stop_hook('S-CL4', base / 'gone.jsonl')))
     check('…control: the transcript cannot be read: any hook counts as before (a pass is never kept on a guess)',
           task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
           (task['status'], last_of(task).get('superseded')))
@@ -256,6 +256,64 @@ def run(base, store, engine):
     with patch.object(wake, 'allowed', return_value=(True, 0)):
         again = supervision.tick(store, tid, 'S-F', runner)
     check('…once (control: the same stop is not typed into twice)', again == 'awaiting_stop' and not calls, (again, calls))
+
+    # The hooks named a cmux surface that does not exist (Codex's daemon; measured 2026-11-06 in a real cmux pane:
+    # the review came back unmet, the supervisor read 'unreadable', the session sat with nothing typed).
+    dead = {'kind': 'cmux', 'cli': '/cmux', 'target': 'DEAD-SURFACE'}
+
+    def stopped_in_dead_pane(session, goal, answer):
+        tid_ = claimed(store, root, session, goal)
+        wake.note(store, session, 'codex', 'prompt', dead)
+        supervision.begin_turn(store, store.get(tid_), session)
+        with patch.object(attach, '_pane', return_value=dead), patch.object(supervision, 'ensure'):
+            with store.lock('task:' + tid_):
+                attach.handle(store, 'stop', {'cwd': str(root), 'session_id': session, 'stop_hook_active': False,
+                                              'last_assistant_message': 'Claimed.'}, 'codex')
+        return tid_, review(engine, tid_, answer)
+
+    def codex_screen(tid_, typed=''):
+        return ('• Done; the claim is submitted.\n↳ Hook · Orbit: Independent review is running. Task %s; inspect\n'
+                '`cosmos-orbit status %s`.\n  Worked for 41s • 10:34 AM\n\n› %s\n\n  GPT-6-Astra low · /repo\n'
+                '  ? for shortcuts\n' % (tid_, tid_, typed or 'Ask Codex to do anything'))
+
+    def cmux_runner(screens, sent):
+        tree = {'windows': [{'workspaces': [{'panes': [{'surfaces': [{'id': pane, 'type': 'terminal'}]} for pane in screens]}]}]}
+        def run(argv):
+            if argv[1:] == ['--json', '--id-format', 'both', 'tree', '--all']:
+                return 0, json.dumps(tree)
+            if argv[1] == 'read-screen':
+                return (0, screens[argv[3]]) if argv[3] in screens else (1, 'Error: not_found: Surface not found')
+            if argv[1] in ('send-panel', 'send-key-panel', 'notify'):
+                if argv[1] == 'notify' and argv[argv.index('--surface') + 1] not in screens:
+                    return 1, 'Error: not_found'
+                sent.append(argv)
+                return 0, 'OK'
+            return 1, ''
+        return run
+
+    tid, _ = stopped_in_dead_pane('S-LOC', 'Build the HDF5 export and make it robust', verdict('unmet'))
+    sent = []
+    screens = {'S-OTHER': EMPTY_CODEX, 'S-MINE': codex_screen(tid), 'S-WORKING': codex_screen('0' * 12) + '\nesc to interrupt\n'}
+    with patch.object(wake, 'allowed', return_value=(True, 0)):
+        outcome = supervision.tick(store, tid, 'S-LOC', cmux_runner(screens, sent))
+    check('the pane its hooks named does not exist: the one pane whose screen names the task, input empty, gets the '
+          'continuation (was: "unreadable", the session sat idle)',
+          outcome == 'continued' and sent and all(a[a.index('--panel') + 1] == 'S-MINE' for a in sent)
+          and any(supervision.RESUME_LINE in ' '.join(a) for a in sent), (outcome, sent))
+    tid, _ = stopped_in_dead_pane('S-LOC2', 'Build the NetCDF export and make it robust', verdict('unmet'))
+    sent = []
+    with patch.object(wake, 'allowed', return_value=(True, 0)):
+        two = supervision.tick(store, tid, 'S-LOC2', cmux_runner({'S-A': codex_screen(tid), 'S-B': codex_screen(tid)}, sent))
+    check('…two panes name the task: nothing is typed (control: never a guess)', two == 'unreadable' and not sent, (two, sent))
+    with patch.object(wake, 'allowed', return_value=(True, 0)):
+        typing = supervision.tick(store, tid, 'S-LOC2', cmux_runner({'S-A': codex_screen(tid, 'my own words')}, sent))
+    check('…the one pane naming it holds the user\'s typing: nothing is typed (control)', typing == 'unreadable' and not sent,
+          (typing, sent))
+    tid, task = stopped_in_dead_pane('S-LOC3', 'Build the Pickle export and make it robust', verdict('met'))
+    sent = []
+    told = supervision.tell(store, task, 'S-LOC3', cmux_runner({'S-MINE': codex_screen(tid)}, sent))
+    check('…a verified outcome is shown in the pane that names the task when the named one is gone',
+          told and len(sent) == 1 and sent[0][1] == 'notify' and sent[0][sent[0].index('--surface') + 1] == 'S-MINE', (told, sent))
 
     tid = claimed(store, root, 'S-G', 'Build the Avro export and make it robust')
     wake.note(store, 'S-G', 'codex', 'prompt', TERMINAL)

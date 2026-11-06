@@ -109,20 +109,26 @@ def cmux_surfaces(tree):
             for surface in pane.get('surfaces') or [] if surface.get('type') == 'terminal' and surface.get('id')]
 
 
-def _list_panes(terminal):
-    from .wake import _run
+def list_panes(terminal, run=None):
+    """Every pane (tmux) or terminal surface (cmux: every window and workspace) the multiplexer knows."""
+    if run is None:
+        from .wake import _run as run
     if terminal['kind'] == 'tmux':
-        return _run([terminal['cli'], 'list-panes', '-a', '-F', '#{pane_id}'])[1].split()
-    code, out = _run([terminal['cli'], '--json', '--id-format', 'both', 'tree', '--all'])
+        code, out = run([terminal['cli'], 'list-panes', '-a', '-F', '#{pane_id}'])
+        return out.split() if code == 0 else []
+    code, out = run([terminal['cli'], '--json', '--id-format', 'both', 'tree', '--all'])
     try:
         return cmux_surfaces(json.loads(out)) if code == 0 else []
     except ValueError:
         return []
 
 
-def _read_pane(terminal, pane):
-    from .wake import _run, screen_command
-    code, out = _run(screen_command(dict(terminal, target=pane)))  # the whole visible screen, in both terminals
+def read_pane(terminal, pane, run=None):
+    """The whole visible screen of `pane`, in both terminals; '' when it cannot be read."""
+    from .wake import screen_command
+    if run is None:
+        from .wake import _run as run
+    code, out = run(screen_command(dict(terminal, target=pane)))
     return out if code == 0 else ''
 
 
@@ -135,8 +141,8 @@ def find_pane(terminal, expect, lister=None, reader=None):
     send-panel and read-screen take (CMUX_PANEL_ID is the surface id)."""
     if terminal['kind'] not in ('tmux', 'cmux'):
         return None
-    lister = lister or (lambda: _list_panes(terminal))
-    reader = reader or (lambda pane: _read_pane(terminal, pane))
+    lister = lister or (lambda: list_panes(terminal))
+    reader = reader or (lambda pane: read_pane(terminal, pane))
     found = [pane for pane in lister() if shows_block(reader(pane), expect)]
     return dict(terminal, target=found[0]) if len(found) == 1 else None
 
