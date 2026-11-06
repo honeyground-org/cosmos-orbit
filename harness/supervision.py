@@ -119,13 +119,20 @@ def tell(store, task, session, runner=None):
     terminal, _ = wake.resolve(store, session=session)
     if not terminal:
         return False
+    # Claimed in one statement before anything is shown: the worker's delivery and a supervisor tell at the same
+    # moment (measured 2026-11-06: one verdict, two notices one second apart, while the pane was being looked for).
+    with store.db:
+        claimed = store.db.execute('INSERT INTO preferences(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE '
+                                   'SET value=excluded.value WHERE preferences.value IS NOT excluded.value',
+                                   (key, mark)).rowcount
+    if not claimed:
+        return False
     run = runner or wake._run
     code, _ = run(wake.notify_command(terminal, outcome_text(task)))
     if code != 0:                                             # the named pane is gone: the screen names the task
         found = locate(terminal, task['id'], run, idle=False)  # measured: the verdict came while its turn still ran
         if found:
             code, _ = run(wake.notify_command(found, outcome_text(task)))
-    store.preference(key, mark)
     with store.db:
         store._event(task['id'], 'outcome_told', {'session': session, 'status': task['status'], 'shown': code == 0,
                                                   'layer': 'control'})
