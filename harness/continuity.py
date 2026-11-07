@@ -596,6 +596,20 @@ def claim_handoff(store, session, by):
         return task['id'], ''
 
 
+def taken_over(store, task_id):
+    """The session that took this task's handoff over, or None while none did. The mod submits the carry line only
+    once one did: a carry line in a session that holds no task arrives with no request behind it (2026-11-07 16:57)."""
+    try:
+        task = store.get(task_id)
+    except ValueError:
+        return None
+    state = task['data'].get('handoff_state') or {}
+    fresh = state.get('adopted_by')
+    if state.get('state') == 'adopted' and fresh and fresh != state.get('session'):
+        return fresh
+    return None
+
+
 def typist_claim(store, task_id):
     """The typist's side of claim_handoff once its grace ran out: 'typist' when it may type, 'mod' when the mod
     took it first, None when no automatic handoff waits any more."""

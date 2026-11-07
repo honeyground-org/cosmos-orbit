@@ -1363,13 +1363,64 @@ def handle(store, event, payload, host):
         return None
 
 
+def hook_root(store, cwd, session, event, prompt=None):
+    """The checkout a hook works for, or None (Orbit stays silent).
+
+    Inside a repository its own switch decides. Outside any repository Orbit used to stay silent, which broke every
+    automatic handoff of a session whose host was launched in a folder holding many repositories (observed
+    2026-11-06 17:03, 20:01, 23:45 and 11-07 16:57): the agent had cd'd into a repository and its task lived
+    there, but the fresh session after /clear starts where the host was launched, so its hooks never ran, nothing
+    took the task over, and the carry line arrived with no request behind it. Two things still lead to a task
+    there: the session is bound to one (its shell moved), or a handoff waits in this very pane for a session
+    that starts now. The task's own repository must be on."""
+    root, is_git = project_root(cwd)
+    if is_git:
+        return root if resolve(store, root)[0] == 'on' else None
+    for workspace in _carried_workspaces(store, session, event, prompt):
+        found, git = project_root(workspace)
+        if git and resolve(store, found)[0] == 'on':
+            return found
+    return None
+
+
+def _carried_workspaces(store, session, event, prompt=None):
+    """Workspaces of the tasks a hook outside any repository may still serve, the most fitting first."""
+    if not session:
+        return []
+    row = store.session_task(session)
+    if row:
+        if not row['task_id'] or row['task_id'] == NO_TASK:
+            return []                                    # seen before without a task: it stays without one
+        try:
+            task = store.get(row['task_id'])
+        except ValueError:
+            return []
+        return [task['workspace']] if task['data'].get('mode') == 'attached' and task['status'] not in CLOSED else []
+    from .typist import CARRY_LINE
+    if event != 'session-start' and not (event == 'prompt' and (prompt or '').strip() == CARRY_LINE):
+        return []                                        # only a session that starts now (Codex: with the carry line)
+    here = (_pane() or {}).get('target')
+    if not here:
+        return []
+    from .continuity import invitation_open
+    waiting = []
+    for item in store.list():
+        if item['status'] in CLOSED:
+            continue
+        task = store.get(item['id'])
+        state = task['data'].get('handoff_state') or {}
+        if task['data'].get('mode') == 'attached' and invitation_open(state) \
+                and here in (state.get('panel'), state.get('pane')):
+            waiting.append((state.get('auto_at') or state.get('at') or task['updated'], task['workspace']))
+    return [workspace for _, workspace in sorted(waiting, reverse=True)]
+
+
 def _handle(store, event, payload, host):
     cwd = payload.get('cwd') or os.getcwd()
-    root, is_git = project_root(cwd)
-    value, _ = resolve(store, root)
-    if value != 'on' or not is_git:
-        return None
     session = payload.get('session_id')
+    root = hook_root(store, cwd, session, event, payload.get('prompt'))
+    if root is None:
+        return None
     try:
         from .lifecycle import sweep
         sweep(store, session)  # before this hook counts as activity: a task untouched for 12 h closes first

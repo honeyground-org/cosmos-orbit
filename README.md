@@ -366,7 +366,12 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      hook blocks the request and carries it; the mod acts only on that block and only after it took the handoff
      (`cosmos-orbit handoff-claim`), so exactly one of the mod and the typist acts. The typist waits three
      seconds for the mod, then types as before; without the mod there is no wait. The mod also empties the input,
-     where Claude Code puts a blocked request back (left there, one Enter would run it twice). Measured end to
+     where Claude Code puts a blocked request back (left there, one Enter would run it twice). After the clear it
+     submits the carry line only once a fresh session took the task over (`handoff-claim --taken-over TASK`,
+     polled up to 20 s); otherwise it submits nothing and says so, and the request stays carried. A fresh session
+     that starts outside any repository (the host was launched in a folder holding many, and the agent had cd'd
+     into one) still takes over the handoff waiting in its own pane, and a bound session keeps its task while its
+     shell is outside a repository (2026-11-07: four handoffs had failed this way). Measured end to
      end in tmux (Claude Code 2.1.318): the mod took the handoff 0.5 s after the block, the fresh session took the
      task over 0.4 s later and ran the carried request; the input was empty. Enable it for every session by
      adding the folder `install.sh` copies (`~/.local/share/local-harness-app/claude-mod`) to

@@ -805,6 +805,67 @@ def main():
         typist.detect, typist.spawn = real_detect, real_spawn
         continuity.set_handoff_mode(store, 'tell')
 
+    print('③-h the fresh session starts outside any repository (the host was launched one folder up)')
+    # Observed 2026-11-06 17:03 / 20:01 / 23:45 and 11-07 16:57: the agent had cd'd into a repository, the mod
+    # cleared, the fresh session started in the non-repository folder the host was launched in, its hooks stayed
+    # silent, nothing took the task over, and the carry line arrived with no request behind it.
+    typed = []
+    try:
+        typist.spawn = lambda terminal, steps, log, home=None, task=None: typed.append((terminal, steps, task))
+        continuity.set_handoff_mode(store, 'auto')
+        typist.detect = lambda env=None: fake
+        launch = base / 'launch-folder'                 # many repositories, itself none
+        launch.mkdir()
+        root_u = make_repo(launch, 'repo-up')
+        attach.set_switch(store, 'on', root_u)
+        tid_u, pay_u, _, _ = tell(store, root_u, base, 'up1')
+        end_turn(store, pay_u)
+        continuity.mod_hello(store, 'up1')
+        out = attach.handle(store, 'prompt', dict(pay_u, prompt='Add CSV export for the report'), 'claude')
+        took_u, _ = continuity.claim_handoff(store, 'up1', 'mod')
+        check('setup: blocked, carried, and the mod holds the handoff',
+              (out or {}).get('decision') == 'block' and took_u == tid_u, out)
+        check('…no session took it over yet: the mod must not submit the carry line', continuity.taken_over(store, tid_u) is None)
+        typist.detect = lambda env=None: dict(fake, target='PANEL-OTHER')
+        other = attach.handle(store, 'session-start', {'cwd': str(launch), 'session_id': 'up-other', 'source': 'clear'}, 'claude')
+        check('control: a fresh session in another pane of the same launch folder stays silent and takes nothing',
+              other is None and store.session_task('up-other') is None, (other, store.session_task('up-other')))
+        typist.detect = lambda env=None: fake
+        start = attach.handle(store, 'session-start', {'cwd': str(launch), 'session_id': 'up2', 'source': 'clear'}, 'claude')
+        brief = (start or {}).get('hookSpecificOutput', {}).get('additionalContext', '')
+        check('the fresh session in the pane Orbit cleared takes the task although it started outside any repository, '
+              'and its brief carries the request',
+              (store.session_task('up2') or {}).get('task_id') == tid_u and 'CARRIED OVER' in brief and 'CSV export' in brief,
+              (store.session_task('up2'), brief[-300:]))
+        check('…and the mod now sees the takeover (it submits the carry line only now)',
+              continuity.taken_over(store, tid_u) == 'up2')
+        before = len(kinds(store, tid_u))
+        line = attach.handle(store, 'prompt', {'cwd': str(launch), 'session_id': 'up2', 'prompt': typist.CARRY_LINE}, 'claude')
+        seen = kinds(store, tid_u)[before:]
+        check('…the carry line from that folder reaches the task: its turn is the one that does the request',
+              (line or {}).get('decision') != 'block' and 'carried_prompt_turn' in seen, (line, seen))
+        end_turn(store, {'cwd': str(launch), 'session_id': 'up2'})
+        before = len(kinds(store, tid_u))
+        attach.handle(store, 'prompt', {'cwd': str(launch), 'session_id': 'up2', 'prompt': 'and add a header row'}, 'claude')
+        seen = kinds(store, tid_u)[before:]
+        check('a bound session keeps its task while its shell is outside any repository (its request is recorded)',
+              any(k in seen for k in ('requirement_added', 'prompt_recorded')), seen)
+        stray = attach.handle(store, 'prompt', {'cwd': str(launch), 'session_id': 'up-stray', 'prompt': 'what time is it?'}, 'claude')
+        check('control: an unbound session outside any repository stays silent (no task is created there)',
+              stray is None and store.session_task('up-stray') is None, stray)
+        attach.set_switch(store, 'off', root_u)
+        off = attach.handle(store, 'prompt', {'cwd': str(launch), 'session_id': 'up2', 'prompt': 'one more thing'}, 'claude')
+        check("control: the task's repository switched off: silent outside it too", off is None, off)
+        attach.set_switch(store, 'on', root_u)
+        cli_u = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home), 'handoff-claim', '--session', '-']
+        yes = subprocess.run(cli_u + ['--taken-over', tid_u], capture_output=True, text=True)
+        no = subprocess.run(cli_u + ['--taken-over', tid_b], capture_output=True, text=True)
+        check('the command line: --taken-over exits 0 with the fresh session, 1 while none took it',
+              yes.returncode == 0 and '"up2"' in yes.stdout and no.returncode == 1, (yes.stdout, no.stdout, yes.stderr[-200:]))
+    finally:
+        typist.detect, typist.spawn = real_detect, real_spawn
+        continuity.set_handoff_mode(store, 'tell')
+
     print('④ the terminal commands')
     cmux = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
     tmux = {'kind': 'tmux', 'cli': 'tmux', 'target': '%3'}

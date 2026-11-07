@@ -136,6 +136,7 @@ def main(argv=None):
                                                        '(it clears and submits; nothing is typed), or --hello once per session')
     claim_cmd2.add_argument('--session', required=True)
     claim_cmd2.add_argument('--hello', action='store_true', help='Say the mod is loaded in this session')
+    claim_cmd2.add_argument('--taken-over', metavar='TASK', help='Whether a fresh session took TASK over (exit 0) or not yet (exit 1)')
     move_cmd = sub.add_parser('move-session', help="Move a session's requests off a task it was bound to by mistake onto "
                                                     'its own new task (shows the plan; --apply does it)')
     move_cmd.add_argument('session')
@@ -412,6 +413,10 @@ def main(argv=None):
             result = detach(store, args.workspace, args.id)
         elif args.command == 'handoff-claim':
             from . import continuity, typist
+            if args.taken_over:
+                fresh = continuity.taken_over(store, args.taken_over)
+                print(json.dumps({'taken_over': bool(fresh), 'session': fresh}))
+                return 0 if fresh else 1
             if args.hello:
                 continuity.mod_hello(store, args.session)
                 result = {'hello': True, 'handoff_prefix': continuity.HANDOFF_PREFIX,

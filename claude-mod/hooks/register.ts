@@ -23,18 +23,42 @@ async function orbit($: EngineInterface, args: string[]): Promise<OrbitReply> {
   }
 }
 
-async function handOff($: EngineInterface, carryLine: string): Promise<void> {
+const TAKEOVER_WAIT_MS = 20_000 // Orbit's typist gives up at 25 s and tells the user; the mod decides before it
+const TAKEOVER_POLL_MS = 500
+
+// The fresh session's SessionStart hook takes the task over; only then does the carry line mean anything. Submitted
+// before (observed 2026-11-07 16:57: the fresh session started outside any repository and its hooks stayed silent),
+// it reached a session holding no task, which then had no request to continue.
+async function takenOver($: EngineInterface, task: string): Promise<boolean> {
+  for (let waited = 0; waited < TAKEOVER_WAIT_MS; waited += TAKEOVER_POLL_MS) {
+    if ((await orbit($, ['handoff-claim', '--session', '-', '--taken-over', task])).ok) return true
+    await $.clock.sleep(TAKEOVER_POLL_MS)
+  }
+  return false
+}
+
+async function handOff($: EngineInterface, task: string, carryLine: string): Promise<void> {
   $.ui.toast('Orbit: handing off to a fresh session')
   try {
     // Claude Code puts a prompt a hook blocked back into the input (measured 2.1.318): left there, one Enter would
     // run the carried request a second time. The request is in Orbit's ledger; the input is emptied.
     await $.prompt.fill({ text: '', mode: 'replace' })
     await $.command.run({ command: 'clear', args: '' })
-    await $.prompt.submit({ text: carryLine })
-    $.ui.toast('Orbit: a fresh session took the task over')
   } catch (error) {
     // Orbit's watcher sees no takeover and tells the user to type /clear; the request stays carried.
     $.ui.toast('Orbit: the handoff did not start (' + String(error).slice(0, 80) + '); type /clear')
+    return
+  }
+  if (!(await takenOver($, task))) {
+    // Nothing is submitted: the request stays in Orbit's ledger (`cosmos-orbit brief <task>` shows it).
+    $.ui.toast('Orbit: the fresh session did not take the task over; the request stays carried (cosmos-orbit brief ' + task + ')')
+    return
+  }
+  try {
+    await $.prompt.submit({ text: carryLine })
+    $.ui.toast('Orbit: a fresh session took the task over')
+  } catch (error) {
+    $.ui.toast('Orbit: the carried request was not submitted (' + String(error).slice(0, 80) + ')')
   }
 }
 
@@ -54,11 +78,12 @@ export const register: Register = on => {
     // prompt: …" (measured 2.1.318), so the reason is looked for inside the drop, not at its start.
     if (typeof result.drop !== 'string' || !result.drop.includes(prefix) || !session) return result
     const claim = await orbit($, ['handoff-claim', '--session', session])
-    if (!claim.ok || typeof claim.out.carry_line !== 'string') return result // the typist has it, or nothing waits
+    if (!claim.ok || typeof claim.out.carry_line !== 'string' || typeof claim.out.task !== 'string') return result // the typist has it, or nothing waits
     const carryLine = claim.out.carry_line
+    const task = claim.out.task
     // Not here: a command run inside a hook the turn waits on is refused. Once this hook returned, the session is
     // idle (the request was blocked) and the clear runs.
-    $.clock.after(200, () => void handOff($, carryLine))
+    $.clock.after(200, () => void handOff($, task, carryLine))
     return result
   })
 }
