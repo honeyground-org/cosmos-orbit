@@ -985,7 +985,7 @@ def blind_items(task):
     return found
 
 
-def claim(store, task_id, summary='', remaining=(), question='', settle=None):
+def claim(store, task_id, summary='', remaining=(), question='', settle=None, concepts=()):
     """The executor's completion claim. Checks run now; the independent review is queued (or run with wait).
 
     settle: {'add': [texts]} or {'keep': 'why'} — the list revision a changed request needs, made under the same
@@ -1008,6 +1008,9 @@ def claim(store, task_id, summary='', remaining=(), question='', settle=None):
             _revise(store, task, added, add=bool(added), keep=not added, because=why or None)
             task = store.get(task_id)
             data = task['data']
+        from . import followup
+        followup.record(data, list(concepts or ()), 'question' if question.strip() else 'completion',
+                        about=question.strip() or summary)
         remaining = [r.strip() for r in remaining if r and r.strip()]
         pending = data.get('requirements_pending')
         if pending and not remaining and not question.strip():
@@ -1325,7 +1328,7 @@ def brief_text(store, task, event='prompt', for_digest=False):
         tail.append('CLOSED (%s). Attach a new request: %s attach "…"' % (data.get('reason_code') or 'stalled', prefix))
     else:
         tail.append('RECORD evidence per D item (C items are Orbit\'s fixed checks): %s evidence %s D1 --note "…" [--command \'["python3","-m","pytest"]\'] [--file path]' % (prefix, tid))
-        tail.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] · '
+        tail.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] [--concept \'term | plain words | where | impact\'] · '
                     'a D item you defined is wrong: %s done %s \'D1 …\' (G0, the original goal, always binds)' % (prefix, tid, prefix, tid))
         tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
     if for_digest:
@@ -1657,6 +1660,13 @@ def _handle(store, event, payload, host):
                     hook_log(store, 'blocked prompt turn not closed: ' + repr(error)[:200])
             return reply
 
+        if task is not None:
+            from . import followup
+            answer = followup.intercept(store, task, text)
+            if answer:
+                # Asking for background is not the user's answer or a new requirement: the hook answers and the prompt
+                # runs no turn, so the task, its question and its review stay exactly as they were.
+                return refused({'decision': 'block', 'reason': answer})
         from .typist import CARRY_LINE
         state = (task['data'].get('handoff_state') or {}) if task else {}
         if text == CARRY_LINE and state.get('state') == 'auto' and state.get('session') == session:
@@ -1715,6 +1725,17 @@ def _handle(store, event, payload, host):
         if task is None:
             return None
         reply = _stop_reply(store, watched(task), session, payload)  # measure every stop, including the one after a block
+        if (reply or {}).get('decision') != 'block':
+            try:
+                from . import followup
+                current = store.get(task['id'])
+                line = followup.stop_line(store, current)
+                if line:
+                    followup.mark_announced(store, current)
+                    shown = (reply or {}).get('systemMessage')
+                    reply = dict(reply or {}, systemMessage=(shown + '\n' if shown else '') + line)
+            except Exception as error:  # noqa: BLE001 - background is optional; the stop's own reply must survive
+                hook_log(store, 'follow-up line skipped: ' + repr(error)[:200])
         from . import supervision
         if (reply or {}).get('decision') == 'block':
             try:
