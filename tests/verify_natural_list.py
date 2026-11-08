@@ -133,6 +133,46 @@ def run(base, store):
         set_aside = str(error)
     check('control: a verdict set aside (superseded) vouches for nothing', 'At most 12' in set_aside, set_aside[:120])
 
+    print('N2b items backed by a passing command Orbit ran leave the 12 places (no review needed yet)')
+    # 2026-11-08: every claim in a session ended in a question, so no review ran; eight items already backed by
+    # passing commands kept two new requests out of the list.
+    root = make_repo(base, 'repo-n2b')
+    tid = attach.create(store, root, 'Ship the report', 'claude', checks=['["python3","verify.py"]'])['id']
+    attach.set_done(store, tid, ['item %d works' % n for n in range(1, 13)])
+
+    def add(text):
+        try:
+            attach.set_done(store, tid, [text], add=True)
+            return ''
+        except ValueError as error:
+            return str(error)
+    for n in range(1, 9):
+        attach.record_evidence(store, tid, 'D%d' % n, note='by hand')
+    check('control: notes alone free no place (the reviewer cannot check them)', 'At most 12' in add('item 13 works'))
+    for n in range(1, 8):
+        attach.record_evidence(store, tid, 'D%d' % n, command='["true"]')
+    (root / 'report.txt').write_text('ok\n')
+    attach.record_evidence(store, tid, 'D8', file='report.txt')
+    refused = add('item 13 works')
+    check('7 passing commands + 1 file → a 13th item is added', refused == '', refused[:200])
+    check('…and a 14th', add('item 14 works') == '')
+    ids = [d['id'] for d in store.get(tid)['data']['done'] if d['id'].startswith('D')]
+    check('…proven items stay open for the review', 'D1' in ids and len(ids) == 14, ids)
+    for n in range(1, 7):                   # 6 failing + D9..D14 unproven = 12; a 13th to prove is refused
+        attach.record_evidence(store, tid, 'D%d' % n, command='["false"]')
+    over = add('item 15 works')
+    check('control: an item whose latest command failed counts again', 'At most 12' in over and 'D1 open' in over
+          and 'D7 proven' in over, over[:300])
+    for n in range(1, 15):
+        attach.record_evidence(store, tid, 'D%d' % n, command='["true"]')
+    for n in range(15, 25):
+        check_text = add('item %d works' % n)
+        if check_text:
+            break
+    check('24 open items in all, every one proven, are accepted', not check_text, check_text[:200])
+    total = add('item 25 works')
+    check('control: a 25th is refused even when every item is proven (24 in all)', 'and 24 open in all' in total, total[:200])
+
     print('N3 confirm or extend the list in the claim itself')
     root = make_repo(base, 'repo-n3')
     tid = attach.create(store, root, 'Build the export', 'claude', checks=['["python3","verify.py"]'])['id']
