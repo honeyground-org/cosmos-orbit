@@ -920,7 +920,23 @@ def _revise(store, task, texts, origin='executor', add=False, keep=False, comman
     return row
 
 
-def record_evidence(store, task_id, item_id, note=None, command=None, file=None, by=None):
+REVIEW_HINT = ('the reviewer runs sandboxed (no network, Docker, services or this ledger) and cannot check a note: '
+               'record a command Orbit runs itself — its output reaches the reviewer')
+
+
+def evidence_hints(entry):
+    """What to tell the executor right after recording, on stdout where it reads (2026-11-08: a stderr-only warning
+    was filtered away; four items came back unclear, one command had run in the wrong folder and exited 2)."""
+    hints = []
+    if entry.get('kind') == 'note':
+        hints.append('note only — ' + REVIEW_HINT + ": --command '[\"…\"]' [--cwd DIR]")
+    if entry.get('kind') == 'command' and entry.get('exit_code') not in (0, None):
+        hints.append('the command exited %s in %s — evidence of a failure, not of the item; fix it or pass --cwd DIR '
+                     'if it belongs to another folder' % (entry.get('exit_code'), entry.get('cwd') or 'the workspace'))
+    return hints
+
+
+def record_evidence(store, task_id, item_id, note=None, command=None, file=None, by=None, cwd=None):
     with store.lock('task:' + task_id):
         task = store.get(task_id)
         data = task['data']
@@ -933,21 +949,29 @@ def record_evidence(store, task_id, item_id, note=None, command=None, file=None,
             raise ValueError('Fixed checks are run by Orbit; record evidence for D items or G0')
         entry = {'at': now(), 'kind': 'note', 'note': (note or '')[:2000], 'by': by or data.get('host')}
         root = Path(task['workspace']).resolve()
+        run_in = root
+        if cwd:
+            run_in = Path(cwd).expanduser().resolve()
+            if not run_in.is_dir():
+                raise ValueError('--cwd must be an existing folder: ' + str(cwd))
         if command:
             argv = parse_checks([command])[0]
             started = time.monotonic()
             try:
-                result = subprocess.run(argv, cwd=str(root), stdin=subprocess.DEVNULL, capture_output=True)
+                result = subprocess.run(argv, cwd=str(run_in), stdin=subprocess.DEVNULL, capture_output=True)
                 output = (result.stdout + result.stderr).decode('utf-8', 'replace')
                 code = result.returncode
             except OSError as error:
                 output, code = str(error), 127
             entry.update(kind='command', argv=argv, exit_code=code, output_tail=output[-4000:], runner='orbit',
                          output_truncated=len(output) > 4000, seconds=round(time.monotonic() - started, 3))
+            if run_in != root:
+                entry['cwd'] = str(run_in)
         if file:
             target = (root / file).resolve()
             if not target.is_relative_to(root) or not target.is_file():
-                raise ValueError('Evidence file must be a regular file inside the workspace: ' + file)
+                raise ValueError('Evidence file must be a regular file inside the workspace: %s — for a file kept '
+                                 'elsewhere, let Orbit read it: --command \'["cat", "%s"]\'' % (file, file))
             digest = hashlib.sha256()
             size = 0
             with target.open('rb') as stream:
@@ -1327,7 +1351,8 @@ def brief_text(store, task, event='prompt', for_digest=False):
     elif task['status'] == 'stalled':
         tail.append('CLOSED (%s). Attach a new request: %s attach "…"' % (data.get('reason_code') or 'stalled', prefix))
     else:
-        tail.append('RECORD evidence per D item (C items are Orbit\'s fixed checks): %s evidence %s D1 --note "…" [--command \'["python3","-m","pytest"]\'] [--file path]' % (prefix, tid))
+        tail.append('RECORD evidence per D item (C items are Orbit\'s fixed checks): %s evidence %s D1 --command \'["python3","-m","pytest"]\' [--cwd DIR] [--file path] [--note "…"] · '
+                    'the reviewer is sandboxed and cannot check a note alone: prefer a command Orbit runs' % (prefix, tid))
         tail.append('CLAIM when done (checks run, one independent review follows): %s claim %s --summary "…" [--remaining "…"] [--concept \'term | plain words | where | impact\'] · '
                     'a D item you defined is wrong: %s done %s \'D1 …\' (G0, the original goal, always binds)' % (prefix, tid, prefix, tid))
         tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
