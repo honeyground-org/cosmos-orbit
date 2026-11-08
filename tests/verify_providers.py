@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 
+for _marker in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):  # these runs stand for sessions a person opened,
+    os.environ.pop(_marker, None)                                    # not ones an agent delegated (attach.delegated)
 from harness import providers  # noqa: E402
 
 FAILED = []

@@ -270,6 +270,15 @@ a habit:
      is closed (G0 and the fixed checks remain), and `handoff --write` lists the closed items.
    - Evidence commands (`evidence --command`) run by Orbit on the host reach the reviewer as host
      observations (argv, exit code, time, output); notes and file fingerprints stay claims.
+   - The limit of 12 counts items still to prove: one the latest review found met stays open (and is
+     reviewed again) but no longer takes a place. A refusal lists each item and how to supersede one.
+   - The list is settled in the claim itself: `claim <task> --summary '…' --keep 'why the items still
+     cover it'` or `--add 'D…'` (repeatable). The claim also names items only a note backs, since the
+     reviewer cannot see this machine; record a command Orbit runs for them.
+   - A `codex exec` run that a Claude Code session launched (Codex writes `source: exec` in its own
+     transcript, and the run carries the Claude session's marks) is that session's sub-task and gets no
+     task of its own; `ORBIT=on` still attaches it. A Codex pane a person opens is never affected; a
+     `codex exec` a person runs by hand from such a shell looks the same and is logged in hooks.log.
 4. Every revision is kept with its number, time, origin, reason and what it added; the brief shows
    `DONE (rev N)`, and the dashboard lists the revisions.
 5. A change that arrives while the review runs is queued, not lost; a verified verdict then reopens
