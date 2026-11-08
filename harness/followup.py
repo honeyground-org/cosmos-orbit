@@ -54,8 +54,20 @@ def parse_concept(raw):
     if len(parts) > 4:
         raise ValueError('A concept has at most four parts separated by |')
     parts += [''] * (4 - len(parts))
-    return {'name': _one_line(parts[0], 60), 'plain': _one_line(parts[1], FIELD_LIMIT), 'here': _one_line(parts[2], FIELD_LIMIT),
-            'impact': _one_line(parts[3], FIELD_LIMIT)}
+    return {'name': _one_line(parts[0], 60), 'plain': _sentence(parts[1]), 'here': _one_line(parts[2], 2000),
+            'source': _one_line(parts[2], 2000), 'impact': _sentence(parts[3])}
+
+
+_END = re.compile(r'(?<=[.!?。])\s|(?<=다\.)')
+
+
+def _sentence(text):
+    """The first sentence, on one line: a card is at most three sentences, one per field."""
+    text = _one_line(text, 2000)
+    cut = _END.search(text)
+    if cut and cut.end() < len(text):
+        text = text[:cut.start() or cut.end()].rstrip() + ' …'
+    return _one_line(text, FIELD_LIMIT)
 
 
 def _one_line(text, limit):
@@ -216,13 +228,16 @@ def card(task, n):
     lines = ['%s %s' % (_circled(c['n']), c['name']),
              ('뜻: ' if ko else 'What: ') + c['plain']]
     if c.get('here'):
-        lines.append(('이번 작업: ' if ko else 'In this work: ') + _short_paths(c['here']))
+        lines.append(('이번 작업: ' if ko else 'In this work: ') + _sentence(_short_paths(c['here'])))
     if c.get('impact'):
         lines.append(('영향: ' if ko else 'What it changes: ') + c['impact'])
     lines.append('')
-    has_source = c.get('here') and _short_paths(c['here']) != c['here']
+    full = c.get('source') or c.get('here') or ''
+    has_source = bool(full) and _sentence(_short_paths(c.get('here') or '')) != full
     lines.append((('이건 알아 %d · 닫기' + (' · 팔로업 %d 근거' if has_source else '')) % ((c['n'],) * (2 if has_source else 1))) if ko
                  else (('known %d · close' + (' · followup %d source' if has_source else '')) % ((c['n'],) * (2 if has_source else 1))))
+    if c.get('key') != (task['data'].get('followup') or {}).get('latest') and c.get('about'):
+        lines.append(('(앞선 멈춤: %s)' if ko else '(an earlier stop: %s)') % c['about'])
     lines.append(_still_waiting(task, ko))
     return '\n'.join(l for l in lines if l is not None)
 
@@ -320,5 +335,5 @@ def source(task, n):
         return ('%d번 카드가 없습니다.' % n) if ko else ('There is no card %d.' % n)
     c = found[-1]
     return '\n'.join([('%s %s — 근거' if ko else '%s %s — source') % (_circled(c['n']), c['name']),
-                      c.get('here') or ('(없음)' if ko else '(none)'),
+                      c.get('source') or c.get('here') or ('(없음)' if ko else '(none)'),
                       ('이 멈춤: ' if ko else 'This stop: ') + (c.get('about') or ''), _still_waiting(task, ko)])

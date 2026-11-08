@@ -6,6 +6,7 @@ pending question, nor the completion items, nor the review state, and start no w
 """
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -191,6 +192,23 @@ def run(base, store):
           and '/Users/sean' not in shown, shown)
     whole = prompt(store, pay, '팔로업 %d 근거' % store.get(tid)['data']['followup']['cards'][-1]['n']).get('reason', '')
     check('…"팔로업 N 근거" shows the whole path', '/Users/sean/Development/projects/cosmos-orbit/harness/followup.py:120' in whole, whole)
+    deep = '/Users/sean/Development/projects/' + 'very-long-folder-name/' * 8 + 'target_file.py:207'
+    kept = followup.parse_concept('긴 근거 | 뜻 한 문장. 그리고 덧붙임. 또 덧붙임. | %s | 영향 하나.' % deep)
+    check('the source keeps the whole reference (over 160 characters)', kept['source'].endswith('target_file.py:207')
+          and len(kept['source']) > 160, len(kept['source']))
+    check('each card field is one sentence', kept['plain'] == '뜻 한 문장. …' and kept['impact'] == '영향 하나.', kept)
+    attach.claim(store, tid, '선택', question='다른 질문?', concepts=[kept])
+    n_kept = store.get(tid)['data']['followup']['cards'][-1]['n']
+    whole = prompt(store, pay, '팔로업 %d 근거' % n_kept).get('reason', '')
+    check('…and "근거" shows it whole', deep in whole, whole[:200])
+    sentences = prompt(store, pay, '팔로업 %d' % n_kept).get('reason', '').split('\n')[1:4]
+    check('the card body has at most three sentences: one per line, the long path shortened',
+          len(sentences) <= 3 and not any(re.search(r'[.!?]\s+\S', l.replace(' …', '')) for l in sentences)
+          and '…/target_file.py:207' in sentences[1], sentences)
+    earlier = prompt(store, pay, '팔로업 %d' % (n_kept - 1)).get('reason', '')
+    check('an earlier stop\'s card says which stop it belongs to', '(앞선 멈춤: 어느 쪽?)' in earlier, earlier)
+    current = prompt(store, pay, '팔로업 %d' % n_kept).get('reason', '')
+    check('control: the current stop\'s card does not', '앞선 멈춤' not in current, current)
     mode_reply = prompt(store, pay, '팔로업 항상').get('reason', '')
     check('the "this task only" hint is a command that really sets this task only', '--here --task ' + tid in mode_reply, mode_reply)
     followup.set_mode(store, 'auto')
