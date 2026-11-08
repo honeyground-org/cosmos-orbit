@@ -136,8 +136,17 @@ def main(argv=None):
     claim_cmd.add_argument('--wait', action='store_true', help='Run the independent review now instead of in the background worker')
     claim_cmd.add_argument('--keep', metavar='WHY', help='The request changed but the items still cover it: say why; the list is '
                                                           'confirmed and the claim made in one step')
+    claim_cmd.add_argument('--concept', action='append', default=[], metavar="'NAME | PLAIN | WHERE | IMPACT'",
+                           help='Background the user may need at this stop (up to 5): shown as one line; a card on request')
     claim_cmd.add_argument('--add', action='append', default=[], metavar='TEXT',
                            help='Add a result goal the changed request needs, then claim (repeatable)')
+    follow_cmd = sub.add_parser('followup', help='Background cards of a stop: list, show one, hide/restore a concept, set the mode')
+    follow_cmd.add_argument('n', nargs='?', type=int, help='Show card N')
+    follow_cmd.add_argument('--task', help='Task ID (default: the task attached to this checkout)')
+    follow_cmd.add_argument('--mode', choices=('off', 'auto', 'always'), help='off · auto (default) · always')
+    follow_cmd.add_argument('--here', action='store_true', help='With --mode: this task only')
+    follow_cmd.add_argument('--known', type=int, metavar='N', help='Hide the basics of card N\'s concept (auto mode)')
+    follow_cmd.add_argument('--restore', metavar='N_OR_NAME', help='Show a hidden concept again')
     brief_cmd = sub.add_parser('brief', help='Print the brief the hooks inject (current checkout or a task ID)')
     brief_cmd.add_argument('id', nargs='?')
     detach_cmd = sub.add_parser('detach', help='Close the current attached task without verification; the ledger stays')
@@ -407,7 +416,9 @@ def main(argv=None):
             from .attach import claim, run_verification
             from .recovery import ensure_worker
             settle = {'add': args.add, 'keep': args.keep} if (args.keep is not None or args.add) else None
-            task = claim(store, args.id, args.summary, args.remaining, args.question, settle=settle)
+            from .followup import parse_concept
+            concepts = [parse_concept(raw) for raw in args.concept]
+            task = claim(store, args.id, args.summary, args.remaining, args.question, settle=settle, concepts=concepts)
             from .attach import blind_items
             blind = blind_items(task)
             if blind:
@@ -420,6 +431,25 @@ def main(argv=None):
                     ensure_worker(store, idle_exit=90)
                     print('Fixed checks passed; the independent review runs in the background worker.', file=sys.stderr)
             result = show(task)
+        elif args.command == 'followup':
+            from . import followup
+            from .attach import current_task, project_root
+            task = store.get(args.task) if args.task else current_task(store, project_root()[0])
+            if args.mode:
+                if args.here and task is None:
+                    raise ValueError('No attached task in this checkout; give --task')
+                result = followup.set_mode(store, args.mode, task if args.here else None)
+            elif task is None:
+                raise ValueError('No attached task in this checkout; give --task')
+            elif args.known:
+                print(followup.hide(store, task, args.known))
+                return 0
+            elif args.restore is not None:
+                print(followup.restore(store, task, args.restore))
+                return 0
+            else:
+                print(followup.card(task, args.n) if args.n else followup.listing(store, task))
+                return 0
         elif args.command == 'brief':
             from .attach import brief_text, current_task, project_root
             task = store.get(args.id) if args.id else current_task(store, project_root()[0])
