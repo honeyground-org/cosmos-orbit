@@ -144,6 +144,12 @@ What happens in an attached session:
    cosmos-orbit claim TASK_ID --summary 'add fixed' [--remaining '…'] [--wait]
    ```
 
+   Prefer a command Orbit runs over a note: the reviewer is sandboxed (no network, Docker, services
+   or this ledger) and cannot check a note, so note-only items come back `unclear`. Orbit says so on
+   stdout when a note is recorded and when a claim leans on one. `--cwd DIR` runs the command in
+   another folder (a second repository); a command that exits non-zero is named as a failure; a file
+   outside the workspace is read with `--command '["cat", "PATH"]'`.
+
 4. `claim` runs the fixed checks immediately. A failure is returned to the executor, and the Stop
    hook keeps the turn open until it is fixed; nobody is asked to intervene. A pass queues one
    read-only review in a fresh context (`--wait` runs it now). Unmet items come back in the next

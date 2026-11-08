@@ -197,6 +197,35 @@ def run(base, store):
           and 'evidence ' + tid + ' D2 --command' in noted.stderr, noted.stderr[-300:])
     check('control: D1, backed by a command Orbit ran, is not named', 'D1' not in noted.stderr.split('Only a note backs')[-1].split(':')[0])
     check('…and the claim is not blocked by it', noted.returncode == 0, noted.stderr[-200:])
+    check('the warning is in the claim\'s stdout JSON too (a stderr-only line was filtered away on 2026-11-08)',
+          'Only a note backs D2' in (json.loads(noted.stdout).get('warning') or ''), noted.stdout[:200])
+
+    print('N5 evidence the reviewer can check: hints on stdout, --cwd, a failing command named')
+    root = Path(store.get(tid)['workspace'])
+    note_only = subprocess.run(cli + ['evidence', tid, 'D2', '--note', 'checked by hand'], capture_output=True, text=True)
+    check('a note-only record says on stdout that the sandboxed reviewer cannot check it',
+          'sandboxed' in ' '.join(json.loads(note_only.stdout).get('warning') or []), note_only.stdout[-300:])
+    other = base / 'other-repo'
+    other.mkdir(exist_ok=True)
+    (other / 'marker.txt').write_text('here\n')
+    elsewhere = subprocess.run(cli + ['evidence', tid, 'D2', '--command', '["cat","marker.txt"]', '--cwd', str(other)],
+                               capture_output=True, text=True)
+    row = json.loads(elsewhere.stdout)['recorded']
+    check('--cwd runs the command in another folder and records where', row['exit_code'] == 0
+          and 'here' in row['output_tail'] and row['cwd'] == str(other.resolve()) and 'warning' not in json.loads(elsewhere.stdout),
+          elsewhere.stdout[-300:])
+    wrong = subprocess.run(cli + ['evidence', tid, 'D2', '--command', '["cat","marker.txt"]'], capture_output=True, text=True)
+    out = json.loads(wrong.stdout)
+    check('control: without --cwd it runs in the workspace, fails, and the failure is named',
+          out['recorded']['exit_code'] != 0 and 'cwd' not in out['recorded']
+          and any('exited' in w for w in out.get('warning') or []), wrong.stdout[-300:])
+    outside = subprocess.run(cli + ['evidence', tid, 'D2', '--file', str(other / 'marker.txt')], capture_output=True, text=True)
+    check('a file outside the workspace is refused with the command that reads it instead',
+          outside.returncode != 0 and '"cat"' in outside.stderr, outside.stderr[-300:])
+    missing = subprocess.run(cli + ['evidence', tid, 'D2', '--command', '["true"]', '--cwd', str(base / 'nowhere')],
+                             capture_output=True, text=True)
+    check('--cwd that does not exist is refused', missing.returncode != 0 and '--cwd' in missing.stderr, missing.stderr[-200:])
+    check('the brief prefers a command and says why', 'cannot check a note alone' in attach.brief_text(store, store.get(tid)))
 
 
 if __name__ == '__main__':

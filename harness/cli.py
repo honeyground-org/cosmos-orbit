@@ -128,6 +128,7 @@ def main(argv=None):
     evidence_cmd.add_argument('--note')
     evidence_cmd.add_argument('--command', dest='argv_json', metavar='ARGV_JSON')
     evidence_cmd.add_argument('--file')
+    evidence_cmd.add_argument('--cwd', help='run --command in this folder (default: the task workspace)')
     claim_cmd = sub.add_parser('claim', help='Claim completion (fixed checks run now; one independent review follows) or report remaining work')
     claim_cmd.add_argument('id')
     claim_cmd.add_argument('--summary', default='')
@@ -411,9 +412,12 @@ def main(argv=None):
             result['done_rev'] = task['data'].get('done_rev')
             result['revision'] = (task['data'].get('done_history') or [None])[-1]
         elif args.command == 'evidence':
-            from .attach import record_evidence
-            entry = record_evidence(store, args.id, args.item, args.note, args.argv_json, args.file)
+            from .attach import record_evidence, evidence_hints
+            entry = record_evidence(store, args.id, args.item, args.note, args.argv_json, args.file, cwd=args.cwd)
             result = {'id': args.id, 'item': args.item, 'recorded': entry}
+            hints = evidence_hints(entry)
+            if hints:
+                result['warning'] = hints
         elif args.command == 'claim':
             from .attach import claim, run_verification
             from .recovery import ensure_worker
@@ -421,18 +425,21 @@ def main(argv=None):
             from .followup import parse_concept
             concepts = [parse_concept(raw) for raw in args.concept]
             task = claim(store, args.id, args.summary, args.remaining, args.question, settle=settle, concepts=concepts)
-            from .attach import blind_items
+            from .attach import blind_items, REVIEW_HINT
             blind = blind_items(task)
+            blind_warning = None
             if blind:
-                print('Only a note backs %s: the reviewer cannot see this machine, so it will likely answer unclear. '
-                      'Record what Orbit can run itself: cosmos-orbit evidence %s %s --command \'["…"]\'' 
-                      % (', '.join(blind), args.id, blind[0]), file=sys.stderr)
+                blind_warning = ('Only a note backs %s: %s: cosmos-orbit evidence %s %s --command \'["…"]\' [--cwd DIR]'
+                                 % (', '.join(blind), REVIEW_HINT, args.id, blind[0]))
+                print(blind_warning, file=sys.stderr)
             if task['data'].get('verification_pending'):
                 task = run_verification(engine, args.id, checks_only=not args.wait)
                 if task['data'].get('verification_pending') and not args.wait:
                     ensure_worker(store, idle_exit=90)
                     print('Fixed checks passed; the independent review runs in the background worker.', file=sys.stderr)
             result = show(task)
+            if blind_warning:
+                result['warning'] = blind_warning  # on stdout too: a stderr-only line was filtered away (2026-11-08)
         elif args.command == 'followup':
             from . import followup
             from .attach import current_task, project_root
