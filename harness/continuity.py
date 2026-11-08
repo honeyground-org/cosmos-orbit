@@ -10,7 +10,9 @@ less for a few points of saving. scripts/measure_context_growth.py repeats the c
 
 The point is a setting, not a constant: `<home>/settings.json` holds it (section "handoff"), the
 `cosmos-orbit context` command writes it, a hand edit takes effect at the next hook event, and
-ORBIT_HANDOFF_AT overrides it for one terminal.
+ORBIT_HANDOFF_AT overrides it for one terminal. Each host has its own point (section "hosts": Claude Code 350k,
+Codex 250k built in), because the hosts' windows differ: Codex reports a 258,400-token window and compacts by
+itself at 235-246k (50 compactions measured 2026-10-27..11-06), so its point is further capped to 80% of the window.
 
 Nothing here calls a model. A handoff is rebuilt from the ledger plus one short checkpoint the executor
 writes about what the ledger cannot know: the approach in progress and the next concrete step.
@@ -29,6 +31,8 @@ import subprocess
 from .store import now
 
 DEFAULT_HANDOFF_AT = 350_000
+HOSTS = ('claude', 'codex')
+HOST_DEFAULTS = {'claude': 350_000, 'codex': 250_000}  # built-in point per host; a host's window still caps it (window_cap)
 MIN_GROWTH = 60_000          # never hand off a session that has not grown this much since it started
 SETTINGS_FILE = 'settings.json'
 LEGACY_GLOBAL_KEY = 'handoff_at'        # before the settings file these lived in the ledger's preferences table
@@ -146,8 +150,18 @@ def update_settings(store, change):
     return data
 
 
-def resolve_threshold(store, root):
-    """Winner first: ORBIT_HANDOFF_AT environment → settings file project → settings file default → built-in. 0 means off."""
+def _hosts(section):
+    hosts = section.get('hosts')
+    return hosts if isinstance(hosts, dict) else {}
+
+
+def host_default(host):
+    return HOST_DEFAULTS.get(host, DEFAULT_HANDOFF_AT)
+
+
+def resolve_threshold(store, root, host=None):
+    """Winner first: ORBIT_HANDOFF_AT environment → project → this host's point → the default for every host →
+    the host's built-in point. 0 means off."""
     env = os.environ.get('ORBIT_HANDOFF_AT')
     if env:
         try:
@@ -158,14 +172,28 @@ def resolve_threshold(store, root):
     value = _tokens(_projects(section).get(str(Path(root).resolve())))
     if value is not None:
         return value, 'project'
+    value = _tokens(_hosts(section).get(host)) if host else None
+    if value is not None:
+        return value, 'host'
     value = _tokens(section.get('at'))
     if value is not None:
         return value, 'default'
-    return DEFAULT_HANDOFF_AT, 'built-in'
+    return host_default(host), 'built-in'
 
 
-def set_threshold(store, value, root=None, global_default=False):
+def set_threshold(store, value, root=None, global_default=False, host=None):
     tokens = parse_tokens(value)
+    if host:
+        if host not in HOSTS:
+            raise ValueError('The host is claude or codex')
+
+        def change_host(section):
+            hosts = section.get('hosts')
+            if not isinstance(hosts, dict):
+                hosts = section['hosts'] = {}
+            hosts[host] = tokens
+        update_settings(store, change_host)
+        return {'scope': 'host', 'host': host, 'handoff_at': tokens, 'settings_file': str(settings_path(store))}
     if global_default:
         update_settings(store, lambda section: section.__setitem__('at', tokens))
         return {'scope': 'default', 'handoff_at': tokens, 'settings_file': str(settings_path(store))}
@@ -180,16 +208,20 @@ def set_threshold(store, value, root=None, global_default=False):
     return {'scope': 'project', 'root': project, 'handoff_at': tokens, 'settings_file': str(settings_path(store))}
 
 
-def clear_threshold(store, root=None, global_default=False):
-    """Remove a stored point so the next scope applies again (`cosmos-orbit context reset [--global]`)."""
+def clear_threshold(store, root=None, global_default=False, host=None):
+    """Remove a stored point so the next scope applies again (`cosmos-orbit context reset [--global | --host H]`)."""
     project = str(Path(root).resolve()) if root is not None else None
 
     def change(section):
-        if global_default:
+        if host:
+            _hosts(section).pop(host, None)
+        elif global_default:
             section.pop('at', None)
         else:
             _projects(section).pop(project, None)
     update_settings(store, change)
+    if host:
+        return {'scope': 'host', 'host': host, 'handoff_at': None, 'settings_file': str(settings_path(store))}
     return {'scope': 'default' if global_default else 'project', 'root': project, 'handoff_at': None,
             'settings_file': str(settings_path(store))}
 
@@ -244,8 +276,11 @@ def close_on_compaction(data, session):
     return False
 
 
-def threshold_view(store, root):
-    tokens, source = resolve_threshold(store, root)
+CODEX_WINDOW = 258_400  # what Codex reports (measured 2026-11-05); the view shows the point a Codex session gets
+
+
+def threshold_view(store, root, host=None):
+    tokens, source = resolve_threshold(store, root, host)
     data, problem = read_settings(store)
     section = _section(data)
     problems = [problem] if problem else []
@@ -257,10 +292,26 @@ def threshold_view(store, root):
     default = _tokens(section.get('at'))
     if section.get('at') is not None and default is None:
         problems.append('handoff.at = %r is not a token count (ignored)' % (section.get('at'),))
+    for name, value in _hosts(section).items():
+        if name not in HOSTS:
+            problems.append('handoff.hosts["%s"] is not claude or codex (ignored)' % name)
+        elif _tokens(value) is None:
+            problems.append('handoff.hosts["%s"] = %r is not a token count (ignored)' % (name, value))
+    hosts = {}
+    for name in HOSTS:
+        configured, origin = resolve_threshold(store, root, name)
+        row = {'handoff_at': configured, 'source': origin, 'built_in': HOST_DEFAULTS[name]}
+        if name == 'codex':
+            applied = window_cap(configured, CODEX_WINDOW)
+            row.update(applied=applied, window=CODEX_WINDOW)
+            if applied != configured:
+                row['why'] = ('Codex compacts by itself near %dk of its %dk window; the point is capped at 80%% of the '
+                              'window so the handoff comes first' % (245, CODEX_WINDOW // 1000))
+        hosts[name] = row
     if section.get('mode') is not None and section.get('mode') not in MODES:
         problems.append('handoff.mode = %r is not auto or tell (tell applies)' % (section.get('mode'),))
     path = settings_path(store)
-    return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0},
+    return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0, 'host': host}, 'hosts': hosts,
             'default': default if default is not None else DEFAULT_HANDOFF_AT, 'built_in': DEFAULT_HANDOFF_AT,
             'settings_file': {'path': str(path), 'exists': path.exists(), 'problems': problems},
             'projects': projects, 'min_growth': min_growth(),
@@ -362,7 +413,7 @@ def observe(store, task, payload, host, event, source=None):
     measured = measure(payload, host)
     session = payload.get('session_id')
     root = Path(task['workspace'])
-    threshold, threshold_source = resolve_threshold(store, root)
+    threshold, threshold_source = resolve_threshold(store, root, host)
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
         data = task['data']
@@ -919,7 +970,7 @@ def rollover_due(store, task, key):
     threshold = options.get('context_budget')
     if threshold is None:
         source = (data.get('development') or {}).get('source', task['workspace'])
-        threshold, _ = resolve_threshold(store, source)
+        threshold, _ = resolve_threshold(store, source, task.get('provider'))
     measurement = (data.get('context_measurements') or {}).get(key, {})
     tokens = measurement.get('tokens')
     threshold = window_cap(threshold, measurement.get('window'))

@@ -502,11 +502,17 @@ The handoff point follows the same three scopes as the on/off switch:
 | Scope | Set | Off | Show |
 |---|---|---|---|
 | Every project | `cosmos-orbit context 400k --global` | `cosmos-orbit context off --global` | `cosmos-orbit settings` |
+| One host (Claude Code or Codex) | `cosmos-orbit context 300k --host codex` | `cosmos-orbit context off --host codex` | `cosmos-orbit context` |
 | One project | `cosmos-orbit context 250k` | `cosmos-orbit context off` | `cosmos-orbit context` |
 | One terminal session | `export ORBIT_HANDOFF_AT=250k` | `export ORBIT_HANDOFF_AT=off` | `cosmos-orbit context` |
 | Who types `/clear` | `cosmos-orbit context auto` (cmux, tmux) | `cosmos-orbit context tell` (default) | `cosmos-orbit context` |
 
-`cosmos-orbit context on` sets the built-in point explicitly; `cosmos-orbit context reset [--global]`
+Each host has its own built-in point: **Claude Code 350k, Codex 250k**. Precedence: terminal → project →
+host → every project → the host's built-in point. A Codex session is further capped at 80% of the window
+Codex reports (258,400 → 206,720): Codex compacts by itself at 235–246k (50 compactions measured), so a
+higher point would never be reached. `cosmos-orbit context` shows each host's point and what Codex applies.
+
+`cosmos-orbit context on` sets the built-in point explicitly; `cosmos-orbit context reset [--global | --host H]`
 removes a stored point so the next scope applies again. Unattended tasks take the point at creation;
 `--context-budget TOKENS` overrides it for one task. Measurement continues when handoff is off.
 
