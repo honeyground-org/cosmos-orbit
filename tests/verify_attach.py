@@ -459,8 +459,11 @@ def main():
         check('brief shows D2 ✗ and the fix', 'D2 ✗' in brief and 'remove the stale comment' in brief)
         stop = attach.handle(store, 'stop', {'cwd': str(root), 'stop_hook_active': False, 'last_assistant_message': 'claimed'}, 'claude')
         check('stop after unmet verdict → continue the unfinished task', stop and stop.get('decision') == 'block')
+        # The living checklist: what the review found met is closed and not judged again; only D2 stays open.
+        check('D1, found met, is closed; D2 stays open', [d['id'] for d in task['data']['done'] if d['id'].startswith('D')] == ['D2']
+              and [(d['id'], d['state']) for d in task['data']['done_closed']] == [('D1', 'met')], task['data'].get('done_closed'))
+        check('brief lists D1 as closed', 'CLOSED 1 · ✔ met D1' in brief, brief)
         FakeReviewer.verdict = {'items': [{'id': 'G0', 'status': 'met', 'evidence': ['goal addressed']},
-                                          {'id': 'D1', 'status': 'met', 'evidence': ['verify.py exit 0']},
                                           {'id': 'D2', 'status': 'met', 'evidence': ['no subtraction in calc.py']},
                                           {'id': 'C1', 'status': 'met', 'evidence': ['host check exit 0']}],
                                 'extra': [], 'missing': [], 'fix': [], 'question': ''}

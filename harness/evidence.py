@@ -29,14 +29,38 @@ def evidence_bundle(task):
                                   'limits': 'Excludes ignored files and external paths; not a full access audit.'},
             'native_tool_trace': native_tool_trace(task),
             'file_limits': 'At most 20 files, 8000 characters per file and 48000 total. Omitted content is not verified.',
-            'executor_evidence': {key: [{k: v for k, v in row.items() if k != 'output_tail'} | {'output_tail': str(row.get('output_tail') or '')[-1200:]}
-                                        for row in rows[-5:]] for key, rows in (data.get('done_evidence') or {}).items()},
-            'executor_evidence_note': 'Records the executor made with cosmos-orbit evidence; claims to check, not proof.',
+            'host_observations': host_observations(data),
+            'host_observations_note': 'Commands Orbit itself ran on the host (runner "orbit") when the executor recorded '
+                                      'evidence: argv, exit code, time and output tail as observed. The executor chose the '
+                                      'argv; a note recorded with the command is still a claim.',
+            'executor_evidence': {key: [_claim(row) for row in rows[-5:]] for key, rows in (data.get('done_evidence') or {}).items()},
+            'executor_evidence_note': 'Notes and file fingerprints the executor recorded with cosmos-orbit evidence; claims to check, not proof.',
             'report': data.get('presentation', {}).get('report'),
             'executor_report': data.get('last_summary'),
             'executor_progress': data.get('objective_progress'),
             'executor_blocker': data.get('reason')}
 
+
+
+def host_observations(data):
+    """Evidence commands Orbit ran itself, per item (the latest five). Rows from before runners were recorded have
+    no runner and stay claims."""
+    rows = {}
+    for key, entries in (data.get('done_evidence') or {}).items():
+        ran = [{'at': e.get('at'), 'argv': e.get('argv'), 'exit_code': e.get('exit_code'), 'seconds': e.get('seconds'),
+                'output_tail': str(e.get('output_tail') or '')[-1200:], 'output_truncated': bool(e.get('output_truncated'))
+                or len(str(e.get('output_tail') or '')) > 1200}
+               for e in entries if e.get('kind') == 'command' and e.get('runner') == 'orbit']
+        if ran:
+            rows[key] = ran[-5:]
+    return rows
+
+
+def _claim(row):
+    """An evidence row as a claim: an Orbit-run command's output is reported under host_observations instead."""
+    if row.get('runner') == 'orbit':
+        return {k: v for k, v in row.items() if k not in ('output_tail',)} | {'output': 'see host_observations'}
+    return {k: v for k, v in row.items() if k != 'output_tail'} | {'output_tail': str(row.get('output_tail') or '')[-1200:]}
 
 
 def native_tool_trace(task, alias=None):

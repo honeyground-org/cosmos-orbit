@@ -29,6 +29,7 @@ def show(task):
             'done_evidence': data.get('done_evidence'), 'prompts': data.get('prompts'), 'briefs': data.get('briefs'),
             'verification_pending': data.get('verification_pending', False),
             'done_rev': data.get('done_rev'), 'done_history': data.get('done_history'),
+            'done_closed': data.get('done_closed'), 'objective': data.get('objective'),
             'requirements_pending': data.get('requirements_pending'),
             'retry_at': data.get('retry_at'), 'active_call': data.get('active_call'),
             'recoverable': data.get('recoverable', False),
@@ -115,6 +116,12 @@ def main(argv=None):
     done_cmd.add_argument('--check', dest='checks', action='append', default=[], metavar='ARGV_JSON',
                           help='Add a fixed verification command (append-only; existing checks never change)')
     done_cmd.add_argument('--user', action='store_true', help='Record as fixed by the user')
+    done_cmd.add_argument('--drop', action='append', default=[], metavar='ID',
+                          help='Withdraw an open item the user no longer wants (only while the user\'s change is pending; reviewed)')
+    done_cmd.add_argument('--replace', nargs=2, action='append', default=[], metavar=('ID', 'TEXT'),
+                          help='Supersede an open item by a new one with a new ID (reviewed)')
+    done_cmd.add_argument('--goal', metavar='TEXT', help='Set the current objective in one line (only while the user\'s change is pending)')
+    done_cmd.add_argument('--because', metavar='TEXT', help='Why the list changed (the user\'s words are recorded by Orbit)')
     evidence_cmd = sub.add_parser('evidence', help='Record evidence for one completion item: a note, a command actually run, or a file fingerprint')
     evidence_cmd.add_argument('id')
     evidence_cmd.add_argument('item')
@@ -383,7 +390,8 @@ def main(argv=None):
             result = show(task)
         elif args.command == 'done':
             from .attach import set_done
-            task = set_done(store, args.id, args.text, 'user' if args.user else 'executor', args.add, args.keep, args.checks)
+            task = set_done(store, args.id, args.text, 'user' if args.user else 'executor', args.add, args.keep, args.checks,
+                            args.drop, [tuple(r) for r in args.replace], args.goal, args.because)
             result = show(task)
             result['done_rev'] = task['data'].get('done_rev')
             result['revision'] = (task['data'].get('done_history') or [None])[-1]

@@ -869,8 +869,12 @@ def cli_feedback(store, task_id, text):
     return store.get(task_id)
 
 
-def set_done(store, task_id, texts, origin='executor', add=False, keep=False, checks=()):
-    """Write a revision of the result goals (D items) and verification goals (fixed checks, append-only)."""
+def set_done(store, task_id, texts, origin='executor', add=False, keep=False, checks=(), drop=(), replace=(), goal=None,
+             because=None):
+    """Write a revision of the result goals (D items) and verification goals (fixed checks, append-only).
+
+    drop: open IDs the user withdrew (allowed only while the user's change is pending) · replace: (ID, text) pairs
+    superseded by a new item · goal: the current objective in one line. Every reduction is reviewed."""
     from . import requirements
     commands = parse_checks(checks)
     task = drain_inbox(store, store.get(task_id))
@@ -883,7 +887,18 @@ def set_done(store, task_id, texts, origin='executor', add=False, keep=False, ch
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
         pending = dict(data.get('requirements_pending') or {})
         draft = data.pop('draft', None)
-        row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands)
+        changes = []
+        if goal is not None:
+            requirements.set_objective(data, goal, origin)
+            changes.append('objective')
+        for item_id in drop or ():
+            requirements.drop(data, item_id, because, origin)
+            changes.append('dropped ' + item_id)
+        for item_id, text in replace or ():
+            row = requirements.replace(data, item_id, text, origin, because)
+            changes.append('replaced %s by %s' % tuple(row['ids']))
+        row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands, because=because,
+                                  changes=changes)
         if draft:
             remember_label(store, task_id, task['prompt'], 'change', origin)  # the executor confirmed the work
         if pending.get('unsure'):
@@ -903,8 +918,8 @@ def record_evidence(store, task_id, item_id, note=None, command=None, file=None,
         data = task['data']
         if data.get('mode') != 'attached':
             raise ValueError('evidence applies to attached tasks')
-        ids = [d['id'] for d in data.get('done') or []]
-        if item_id not in ids:
+        ids = [d['id'] for d in data.get('done') or []] + [d['id'] for d in data.get('done_closed') or []]
+        if item_id not in ids:   # a closed item takes evidence too: the argument for reopening it, or for its withdrawal
             raise ValueError('Unknown completion item ' + item_id + '; known: ' + ', '.join(ids))
         if item_id.startswith('C'):
             raise ValueError('Fixed checks are run by Orbit; record evidence for D items or G0')
@@ -919,8 +934,8 @@ def record_evidence(store, task_id, item_id, note=None, command=None, file=None,
                 code = result.returncode
             except OSError as error:
                 output, code = str(error), 127
-            entry.update(kind='command', argv=argv, exit_code=code, output_tail=output[-4000:],
-                         seconds=round(time.monotonic() - started, 3))
+            entry.update(kind='command', argv=argv, exit_code=code, output_tail=output[-4000:], runner='orbit',
+                         output_truncated=len(output) > 4000, seconds=round(time.monotonic() - started, 3))
         if file:
             target = (root / file).resolve()
             if not target.is_relative_to(root) or not target.is_file():
@@ -1101,6 +1116,10 @@ def run_verification(engine, task_id, checks_only=False):
                 return task
             sent = [row['id'] + ': ' + row['status'] + ' ' + '; '.join(row['evidence'])
                     for row in verdict['items'] if row['status'] != 'met'] + verdict['missing'] + verdict['fix']
+            sent += [row['id'] + ': reopened ' + '; '.join(row['evidence']) for row in verdict.get('reopen') or []]
+            applied = verdict.get('applied') or {}
+            reopened = [i for i in applied.get('reopened') or [] if i not in {r['id'] for r in verdict.get('reopen') or []}]
+            sent += [i + ': withdrawal not supported — the item is open again' for i in reopened]
             data['resumes'].append({'turn': data['turns'], 'because': 'verdict', 'sent': sent})
             data.update(reason='\n'.join(sent)[:2000], reason_code='unmet')
             data['objective_progress'] = {'remaining': sent, 'next_action': 'Address the unmet items, record evidence, then claim again.', 'source': 'runtime'}
@@ -1162,7 +1181,13 @@ def brief_text(store, task, event='prompt', for_digest=False):
         head += ' (' + data['reason_code'] + ')'
     if data.get('verification_pending'):
         head += ' · ' + verification_progress(store, task)['reason']
-    lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 400)]
+    objective = (data.get('objective') or {}).get('text')
+    if objective:
+        lines = [head, 'GOAL (current, %s): %s · ORIGINAL REQUEST (still binds): %s' % (
+            _local((data.get('objective') or {}).get('at'), False), _one_line(objective, 300),
+            _one_line(data.get('goal') or task['prompt'], 200))]
+    else:
+        lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 400)]
     if data.get('draft') and task['status'] not in CLOSED:
         lines.append("DRAFT: Orbit is unsure this prompt asks for work. If it does, define the completion (that confirms "
                      "the task): %s done %s 'D1 …'. If it is only a question, just answer — the draft closes by itself "
@@ -1195,8 +1220,17 @@ def brief_text(store, task, event='prompt', for_digest=False):
             count = len(evidence.get(d['id']) or [])
             parts.append('%s %s%s %s' % (d['id'], mark, ' evidence %d' % count if count else '', _one_line(d['text'], 140)))
         lines.append(('DONE (rev %s): ' % data['done_rev'] if data.get('done_rev') else 'DONE: ') + ' · '.join(parts))
-    else:
+    closed_line = _closed_line(data)
+    if closed_line:
+        lines.append(closed_line)
+    if not d_items and data.get('done_closed'):
+        lines.append('OPEN: none — every D item is closed; G0 and the fixed checks remain. A new request adds items: '
+                     "%s done %s --add 'D… '" % (prefix, tid))
+    elif not d_items:
         lines.append("DONE: none yet — propose 1–12 completion definitions: %s done %s 'D1 …' 'D2 …' [--check '[\"…\"]']" % (prefix, tid))
+    if data.get('requirements_pending') and task['status'] not in CLOSED and (d_items or data.get('done_closed')):
+        lines.append("LIST (the goal stays, the list moves): --replace D3 'new text' · --drop D3 --because '…' · --goal '…' "
+                     "(drop and goal rest on this pending change; every withdrawal is reviewed)")
     from .requirements import pending_line
     changed = pending_line(data, prefix, tid)
     if changed and task['status'] not in CLOSED:
@@ -1259,6 +1293,23 @@ def brief_text(store, task, event='prompt', for_digest=False):
         # The user's own words are already in the session; they must not re-send the whole brief on every prompt.
         lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED'))]
     return _fit(lines, tail, BRIEF_LIMIT)
+
+
+def _closed_line(data):
+    """Closed items in one line: what is finished, what was withdrawn and whether a review accepted it."""
+    closed = data.get('done_closed') or []
+    if not closed:
+        return None
+    met = [d['id'] for d in closed if d.get('state') == 'met']
+    parts = ['CLOSED %d' % len(closed)]
+    if met:
+        parts.append('✔ met ' + ' '.join(met))
+    for d in closed:
+        if d.get('state') == 'dropped':
+            parts.append('− %s dropped%s' % (d['id'], '' if d.get('approved') else ' (awaiting review)'))
+        elif d.get('state') == 'superseded':
+            parts.append('↪ %s→%s%s' % (d['id'], d.get('replaced_by') or 'rewrite', '' if d.get('approved') else ' (awaiting review)'))
+    return ' · '.join(parts)
 
 
 def _fit(lines, tail, limit):
@@ -1723,7 +1774,7 @@ def stop_decision(store, task, payload):
             pass
         hint = ('If the work is complete, record evidence per item and run `%s claim %s --summary "…"`; if not, run `%s claim %s --remaining "…"` or simply continue. '
                 % (prefix, task['id'], prefix, task['id']))
-        if not d_items:
+        if not d_items and not data.get('done_closed'):
             hint = ('Propose the completion definitions first: `%s done %s \'D1 …\' \'D2 …\'`, then record evidence and claim. ' % (prefix, task['id'])) + hint
         return {'decision': 'block', 'reason': 'Orbit: this reads like a completion claim for task %s, but nothing was claimed and nothing is verified. ' % task['id'] + hint}
     return None
@@ -1833,6 +1884,23 @@ def handoff_markdown(store, task):
         verdict = statuses.get(d['id'])
         review = ('%s — %s' % (verdict['status'], _one_line('; '.join(verdict.get('evidence') or []), 200))) if verdict else 'not reviewed'
         lines.append('| %s | %s | %s | %s |' % (d['id'], _one_line(d['text'], 200), summary, review))
+    closed = data.get('done_closed') or []
+    if closed:
+        marks = {'met': '✔ met', 'dropped': '− dropped', 'superseded': '↪ superseded'}
+        lines += ['', '## Closed items (%d)' % len(closed), '', '| ID | Definition | State | Why |', '|---|---|---|---|']
+        for d in closed:
+            state = marks.get(d.get('state'), d.get('state'))
+            if d.get('state') != 'met':
+                state += ' (accepted by review)' if d.get('approved') else ' (awaiting review)'
+            why = ('turn %s — %s' % (d.get('verdict_turn'), _one_line('; '.join(d.get('evidence') or []), 160)) if d.get('state') == 'met'
+                   else _one_line(' · '.join(x for x in ((d.get('replaced_by') and 'by ' + d['replaced_by']), d.get('because'),
+                                                       (d.get('user_words') or {}).get('text') and 'user: "%s"' % _one_line(d['user_words']['text'], 100)) if x), 200))
+            lines.append('| %s | %s | %s | %s |' % (d['id'], _one_line(d['text'], 160), state, why or '—'))
+    history = data.get('objective_history') or []
+    if history:
+        lines += ['', '## Objective (current first)', '']
+        lines += ['- %s %s — %s' % (_local(h.get('at')), h['text'], 'user: "%s"' % _one_line((h.get('user_words') or {}).get('text'), 120))
+                  for h in reversed(history[-5:])]
     lines += ['', '## Independent review', '']
     if last:
         lines.append('- Outcome **%s** at turn %s' % (last.get('outcome'), last.get('turn')))

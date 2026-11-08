@@ -80,7 +80,7 @@ def diagnose(task, paused=False, message='', handoff=False):
         items = ['%s %s' % (row['id'], row.get('status')) for row in last.get('items', []) if row.get('status') != 'met']
         items += [_short(fix, 200) for fix in (last.get('fix') or [])[:3]]
         return _row('review_unmet', 'Fix what the independent review found unmet, record new evidence, then claim again.', items)
-    if not d_items:
+    if not d_items and not data.get('done_closed'):
         if data.get('draft'):
             return _row('draft', 'Nothing yet: define the completion if this prompt asked for work.')
         return _row('undefined', 'Define the completion items first, then work through them.')
@@ -143,11 +143,13 @@ def instruction(store, task, found):
 
 
 def progress_line(task):
-    """Where the work stands against the goal, item by item: ✓ the review found it met (or evidence is recorded and
-    no review judged it yet), ✗ the latest review found it unmet, · nothing recorded yet."""
+    """Where the work stands against the goal, item by item: ✔ closed (a review found it met), ✓ the review found it
+    met (or evidence is recorded and no review judged it yet), ✗ the latest review found it unmet, · nothing recorded
+    yet; withdrawn items: − dropped, ↪ superseded, each with ? while no review has judged the withdrawal."""
     data = task['data']
     items = [d for d in data.get('done') or [] if d['id'].startswith('D')]
-    if not items:
+    closed = data.get('done_closed') or []
+    if not items and not closed:
         return None
     evidence = data.get('done_evidence') or {}
     last = (data.get('verdicts') or [{}])[-1]
@@ -157,7 +159,15 @@ def progress_line(task):
         status = judged.get(item['id'])
         marks.append(item['id'] + (' ✓' if status == 'met' else ' ✗' if status in ('unmet', 'unclear') else
                                    ' ✓' if evidence.get(item['id']) else ' ·'))
-    return 'PROGRESS (✓ met or evidenced · ✗ review found unmet · · nothing yet): ' + ' '.join(marks)
+    done_marks = [d['id'] + ' ✔' for d in closed if d.get('state') == 'met']
+    gone = [d['id'] + (' −' if d.get('state') == 'dropped' else ' ↪' + (d.get('replaced_by') or ''))
+            + ('?' if d.get('approved') is None else '') for d in closed if d.get('state') in ('dropped', 'superseded')]
+    line = 'PROGRESS (✔ closed · ✓ met or evidenced · ✗ review found unmet · · nothing yet): ' + ' '.join(done_marks + marks)
+    if not marks and done_marks:
+        line += ' · every item closed — G0 and the fixed checks remain'
+    if gone:
+        line += ' · withdrawn (− dropped · ↪ superseded · ? awaiting review): ' + ' '.join(gone)
+    return line
 
 
 def brief_line(task):

@@ -220,11 +220,251 @@ def current_texts(data):
     return [d['text'] for d in data.get('done') or [] if d['id'].startswith('D')]
 
 
-def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), because=None):
+_ID_PREFIX = re.compile(r'^\s*(D\d+)\b[\s.:)\-–—]*')
+
+
+def _norm(text):
+    return re.sub(r'\s+', ' ', _ID_PREFIX.sub('', text or '')).strip().lower()
+
+
+def _number(item_id):
+    return int(item_id[1:]) if re.fullmatch(r'D\d+', item_id or '') else 0
+
+
+def _id_issuer(data):
+    """Hands out D IDs that were never used in this task, open or closed."""
+    used = [_number(d['id']) for d in (data.get('done') or []) + (data.get('done_closed') or [])]
+    used += [_number(i) for row in data.get('done_history') or [] for i in row.get('added') or []]
+    used += [_number(row.get('id')) for verdict in data.get('verdicts') or [] for row in verdict.get('items') or []]
+    used += [_number(i) for i in data.get('done_evidence') or {}]
+    start = max([data.get('done_next') or 1] + [n + 1 for n in used])
+
+    def issue():
+        value = 'D%d' % issue.next
+        issue.next += 1
+        return value
+    issue.next = start
+    return issue
+
+
+def _match_ids(existing, texts, issue):
+    """A rewritten list keeps an item's ID only when it repeats the item word for word (an "D3 " prefix aside);
+    reworded text is a new item with a new ID, and the old one is superseded for the review to judge. An ID never
+    comes to mean a different item, so evidence recorded under it stays with what it proved."""
+    by_text = {_norm(d['text']): d['id'] for d in existing}
+    taken, ids = set(), []
+    for text in texts:
+        candidate = by_text.get(_norm(text))
+        if candidate and candidate not in taken:
+            taken.add(candidate)
+            ids.append(candidate)
+        else:
+            ids.append(issue())
+    return ids
+
+
+def closed_items(data, state=None):
+    return [d for d in data.get('done_closed') or [] if state is None or d.get('state') == state]
+
+
+def defined(data):
+    """Whether completion was ever defined: open D items, closed ones, or a written revision. With every D item closed
+    the task is defined; only G0 and the fixed checks are left."""
+    return bool([d for d in data.get('done') or [] if d['id'].startswith('D')] or data.get('done_closed'))
+
+
+def user_words(data):
+    """The user's message a change rests on, as Orbit recorded it from the hook (never the executor's paraphrase):
+    the pending change, else the latest prompt. The review judges whether these words support the change."""
+    pending = data.get('requirements_pending') or {}
+    if pending.get('text'):
+        return {'at': pending.get('at'), 'source': pending.get('source'), 'text': pending['text']}
+    last = (data.get('prompts') or [{}])[-1]
+    return {'at': last.get('at'), 'source': 'prompt', 'text': last.get('text') or ''}
+
+
+def _transition(data, kind, ids, **extra):
+    row = dict({'at': now(), 'kind': kind, 'ids': list(ids), 'rev': data.get('done_rev') or 0}, **extra)
+    data.setdefault('done_transitions', []).append(row)
+    return row
+
+
+def archive(data, item, state, because=None, by=None, verdict=None, tree=None, replaced_by=None, words=None):
+    """Move one D item out of the open list into the closed list (met · dropped · superseded). The closed list is
+    never truncated: it is the task's record of what was finished or withdrawn and why."""
+    row = {'id': item['id'], 'text': item['text'], 'origin': item.get('origin'), 'how': item.get('how', 'inspect'),
+           'state': state, 'at': now(), 'rev': data.get('done_rev') or 0}
+    if because:
+        row['because'] = str(because)[:600]
+    if words:
+        row['user_words'] = words
+    if state in ('dropped', 'superseded'):
+        row['approved'] = None        # a withdrawal stands only once a review finds it supported
+    if by:
+        row['by'] = by
+    if verdict is not None:
+        row['verdict_turn'] = verdict.get('turn')
+        row['evidence'] = [str(e)[:400] for e in (verdict.get('evidence') or [])[:3]]
+    if tree:
+        row['tree'] = tree
+    if replaced_by:
+        row['replaced_by'] = replaced_by
+    closed = data.setdefault('done_closed', [])
+    closed[:] = [d for d in closed if d['id'] != item['id']] + [row]
+    data['done'] = [d for d in data.get('done') or [] if d['id'] != item['id']]
+    return row
+
+
+def _insert_open(data, item):
+    done = data.setdefault('done', [])
+    at = next((i for i, d in enumerate(done) if d['id'].startswith('C')), len(done))
+    done.insert(at, item)
+
+
+def reopen(data, item_id, evidence, by='reviewer'):
+    """A closed item back on the open list under the same ID. The open-item limit applies to new items only: a
+    reopened obligation is never lost to it."""
+    row = next((d for d in data.get('done_closed') or [] if d['id'] == item_id), None)
+    if row is None:
+        raise ValueError('Unknown closed item ' + item_id)
+    data['done_closed'] = [d for d in data['done_closed'] if d['id'] != item_id]
+    _insert_open(data, {'id': row['id'], 'text': row['text'], 'how': row.get('how', 'inspect'), 'origin': row.get('origin') or 'executor',
+                        'reopened': {'at': now(), 'by': by, 'from': row['state'], 'evidence': [str(e)[:400] for e in evidence[:3]]}})
+    return _transition(data, 'reopened', [item_id], by=by, evidence=[str(e)[:400] for e in evidence[:3]])
+
+
+def _needs_user_change(data, what):
+    if not (data.get('requirements_pending') or {}).get('text'):
+        raise ValueError('%s needs the user\'s words: it is allowed only while a change the user typed is pending. '
+                         'Nothing was saved. Ask the user, or keep the item open.' % what)
+
+
+def drop(data, item_id, because, origin='executor'):
+    """Withdraw an open item the user no longer wants. Orbit records the user's words; the review judges them."""
+    _needs_user_change(data, 'Dropping ' + item_id)
+    item = next((d for d in data.get('done') or [] if d['id'] == item_id and d['id'].startswith('D')), None)
+    if item is None:
+        raise ValueError('Unknown open item ' + item_id)
+    if not (because or '').strip():
+        raise ValueError('Say why: --because "…"')
+    archive(data, item, 'dropped', because=because, by=origin, words=user_words(data))
+    return _transition(data, 'dropped', [item_id], by=origin, because=because[:600])
+
+
+def replace(data, item_id, text, origin='executor', because=None):
+    """Supersede an open item by a new one with a new ID. The old item stays visible to the review, which reopens it
+    unless the new one covers it or the user's words withdrew it."""
+    item = next((d for d in data.get('done') or [] if d['id'] == item_id and d['id'].startswith('D')), None)
+    if item is None:
+        raise ValueError('Unknown open item ' + item_id)
+    if (data.get('done_fixed') or {}).get('origin') == 'user' and item.get('origin') == 'user' and origin != 'user':
+        raise ValueError('The user fixed %s; extend the list with --add instead' % item_id)
+    text = _ID_PREFIX.sub('', text or '').strip()
+    if not text or len(text) > 2000:
+        raise ValueError('Give the replacing definition (1–2000 characters)')
+    issue = _id_issuer(data)
+    new_id = issue()
+    data['done_next'] = issue.next
+    archive(data, item, 'superseded', because=because, by=origin, replaced_by=new_id, words=user_words(data))
+    _insert_open(data, {'id': new_id, 'text': text, 'how': 'inspect', 'origin': origin, 'replaces': item_id})
+    return _transition(data, 'replaced', [item_id, new_id], by=origin)
+
+
+def set_objective(data, text, origin='executor'):
+    """The current one-line statement of what is being completed. The original request never changes and still
+    binds; this follows the conversation."""
+    _needs_user_change(data, 'Changing the objective')
+    text = re.sub(r'\s+', ' ', text or '').strip()
+    if not text or len(text) > 600:
+        raise ValueError('Give the objective in one line (1–600 characters)')
+    row = {'at': now(), 'text': text, 'origin': origin, 'user_words': user_words(data),
+           'previous': (data.get('objective') or {}).get('text')}
+    data['objective'] = {'at': row['at'], 'text': text, 'origin': origin}
+    data.setdefault('objective_history', []).append(row)
+    return _transition(data, 'objective', [], by=origin, text=text)
+
+
+def checklist_binding(data):
+    """What a review is bound to besides the open items: the objective and the closed list. A review that finishes
+    after either moved is not applied as if nothing had changed."""
+    return {'objective': (data.get('objective') or {}).get('text'),
+            'closed': [[d['id'], d.get('state'), d.get('replaced_by'), d.get('approved'), d.get('text')]
+                       for d in data.get('done_closed') or []]}
+
+
+def pending_withdrawals(data):
+    """Dropped or superseded items no review has judged yet. Each one is assessed like an open item: met means the
+    withdrawal is supported; anything else keeps the obligation."""
+    return [d for d in data.get('done_closed') or [] if d.get('state') in ('dropped', 'superseded') and d.get('approved') is None]
+
+
+def review_items(data):
+    """What a review must assess, each exactly once: the open list plus every withdrawal awaiting judgement."""
+    return list(data.get('done') or []) + [
+        {'id': d['id'], 'text': 'WITHDRAWN (%s): %s' % (d['state'], d['text']), 'how': 'withdrawal', 'origin': d.get('origin')}
+        for d in pending_withdrawals(data)]
+
+
+def review_view(data, limit=40):
+    """The closed list as the reviewer sees it: met items to leave alone unless disproved, withdrawn items to check
+    against the user's words."""
+    closed = data.get('done_closed') or []
+    recent = {d['id'] for d in closed[-limit:]}
+    rows = []
+    for d in closed:
+        row = {'id': d['id'], 'text': d['text'][:400 if d['id'] in recent else 160], 'state': d.get('state')}
+        if d.get('approved') is not None:
+            row['approved'] = d['approved']
+        keys = ('verdict_turn', 'evidence', 'because', 'user_words', 'replaced_by') if d['id'] in recent or d.get('approved') is None \
+            else ('verdict_turn', 'replaced_by')
+        for key in keys:
+            if d.get(key):
+                row[key] = d[key]
+        rows.append(row)
+    return rows
+
+
+def apply_verdict(data, verdict, tree, clean=True):
+    """Apply one review to the list (attached tasks): D items found met leave the open list when `close` (a clean
+    review only); a withdrawal found supported is approved, one found unmet goes back on the open list; a closed item
+    the reviewer reopened with an observation goes back too. Closing and approving reduce what is open, so they need a
+    clean review (`clean`); reopening only adds and always applies. Returns {'closed', 'approved', 'reopened'}."""
+    rows = {row['id']: row for row in verdict.get('items') or []}
+    applied = {'closed': [], 'approved': [], 'reopened': []}
+    for item in pending_withdrawals(data):
+        row = rows.get(item['id'])
+        if row and row.get('status') == 'met' and clean:
+            item['approved'] = True
+            item['approved_turn'] = verdict.get('turn')
+            item['approval'] = [str(e)[:400] for e in (row.get('evidence') or [])[:3]]
+            applied['approved'].append(item['id'])
+        elif row and row.get('status') == 'unmet':
+            reopen(data, item['id'], row.get('evidence') or ['the withdrawal is not supported'], by='reviewer')
+            applied['reopened'].append(item['id'])
+    for ask in verdict.get('reopen') or []:
+        closed = next((d for d in data.get('done_closed') or [] if d['id'] == ask.get('id')), None)
+        if closed is not None and ask.get('evidence'):
+            reopen(data, closed['id'], ask['evidence'], by='reviewer')
+            applied['reopened'].append(closed['id'])
+    if clean:
+        for item in [d for d in data.get('done') or [] if d['id'].startswith('D') and d['id'] not in applied['reopened']]:
+            row = rows.get(item['id'])
+            if row and row.get('status') == 'met':
+                archive(data, item, 'met', verdict=dict(row, turn=verdict.get('turn')), tree=tree, by='reviewer')
+                applied['closed'].append(item['id'])
+    if applied['approved']:
+        _transition(data, 'approved', applied['approved'], by='reviewer', turn=verdict.get('turn'))
+    if applied['closed']:
+        _transition(data, 'closed', applied['closed'], by='reviewer', turn=verdict.get('turn'))
+    return applied
+
+
+def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), because=None, changes=()):
     """Write a new revision of the result goals (D items) and verification goals (fixed checks).
 
     add: append to the current items · keep: confirm they still cover the request · checks: argv lists appended
-    to the fixed checks (never replaced or removed). Returns the history row."""
+    to the fixed checks (never replaced or removed) · changes: what drop/replace/objective already did to the list
+    in this revision (recorded in the row). Returns the history row."""
     from .simple_loop import completion_items
     texts = [t.strip() for t in texts if t and t.strip()]
     if data.get('done_fixed') and not data.get('done_rev'):
@@ -235,8 +475,10 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
             'because': 'initial (recorded before revisions were tracked)', 'kept': False,
             'added': [d['id'] for d in data.get('done') or [] if d['id'].startswith('D')], 'removed': [], 'checks_added': [],
             'items': len(current_texts(data)), 'checks': len(data['development']['checks'])})
-    if not texts and not keep and not checks:
+    changes = list(changes or [])
+    if not texts and not keep and not checks and not changes:
         raise ValueError('Give completion definitions, --keep, or --check')
+    keep = keep or bool(changes and not texts)
     existing = [d for d in data.get('done') or [] if d['id'].startswith('D')]
     fixed = data.get('done_fixed') or {}
     if texts and not add and fixed.get('origin') == 'user' and origin != 'user' and existing:
@@ -249,30 +491,49 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
             added_checks.append(argv)
     if len(commands) > 12:
         raise ValueError('At most 12 fixed checks are supported')
+    numbered = data.get('mode') == 'attached'
+    issue = _id_issuer(data) if numbered else None
     if add or (keep and not texts):
-        known = {re.sub(r'\s+', ' ', t).lower() for t in current_texts(data)}
-        fresh = [t for t in texts if re.sub(r'\s+', ' ', t).lower() not in known]
+        same = _norm if numbered else (lambda t: re.sub(r'\s+', ' ', t).lower())
+        known = {same(t) for t in current_texts(data)}
+        fresh = [t for t in texts if same(t) not in known]
         final = current_texts(data) + fresh
         origins = [d.get('origin', origin) for d in existing] + [origin] * len(fresh)
+        ids = [d['id'] for d in existing] + [issue() for _ in fresh] if numbered else None
     else:
         final, origins = texts, [origin] * len(texts)
-    if len(final) > MAX_ITEMS:
-        raise ValueError('At most %d completion definitions; this revision would make %d. Nothing was saved: the %d '
+        ids = _match_ids(existing, texts, issue) if numbered else None
+    if len(final) > MAX_ITEMS and len(final) > len(existing):   # reopened items may exceed it; new ones may not
+        raise ValueError('At most %d open completion definitions; this revision would make %d. Nothing was saved: the %d '
                          'current items stand. Merge items that test the same behaviour and run it again'
                          % (MAX_ITEMS, len(final), len(existing)))
-    items = completion_items(final, commands, origin)
+    items = completion_items(final, commands, origin, ids)
     for item, item_origin in zip([i for i in items if i['id'].startswith('D')], origins):
         item['origin'] = item_origin
+    carried = {d['id']: d for d in existing}
+    for item in items:
+        for key in ('replaces', 'reopened'):
+            if key in carried.get(item['id'], {}):
+                item[key] = carried[item['id']][key]
     before = {d['id']: d['text'] for d in existing}
     after = {d['id']: d['text'] for d in items if d['id'].startswith('D')}
+    if numbered:
+        # An open item a rewrite leaves out is kept as superseded, never erased: the reviewer still sees it.
+        for gone in [d for d in existing if d['id'] not in after]:
+            archive(data, gone, 'superseded', because=because, by=origin, words=user_words(data))
+            _transition(data, 'superseded', [gone['id']], by=origin)
+        if issue:
+            data['done_next'] = issue.next
     revision = (data.get('done_rev') or 0) + 1
     pending = data.get('requirements_pending') or {}
     row = {'rev': revision, 'at': now(), 'origin': origin, 'turn': data.get('turns', 0),
            'because': (because or pending.get('text') or ('initial' if revision == 1 else 'revised'))[:600],
-           'kept': bool(keep and not texts and not added_checks),
+           'kept': bool(keep and not texts and not added_checks and not changes),
            'added': [i for i, t in after.items() if before.get(i) != t],
            'removed': [t[:200] for i, t in before.items() if i not in after or (not add and t not in after.values())],
            'checks_added': added_checks, 'items': len(after), 'checks': len(commands)}
+    if changes:
+        row['changes'] = changes
     data['development']['checks'] = commands
     data['done'] = items
     data['done_rev'] = revision
