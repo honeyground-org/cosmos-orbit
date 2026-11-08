@@ -265,6 +265,16 @@ def _match_ids(existing, texts, issue):
     return ids
 
 
+def last_met(data):
+    """IDs the latest review judged met. They stay open (the next review sees them again, and only a clean review
+    closes them), but they no longer take one of the 12 places: on 2026-11-08 eleven items already met kept a new
+    request out of the list twice in a row."""
+    verdicts = data.get('verdicts') or []
+    if not verdicts or verdicts[-1].get('superseded'):
+        return set()                     # a verdict set aside (files moved under it) vouches for nothing
+    return {i.get('id') for i in verdicts[-1].get('items') or [] if i.get('status') == 'met' and str(i.get('id', '')).startswith('D')}
+
+
 def closed_items(data, state=None):
     return [d for d in data.get('done_closed') or [] if state is None or d.get('state') == state]
 
@@ -505,10 +515,14 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
     else:
         final, origins = texts, [origin] * len(texts)
         ids = _match_ids(existing, texts, issue) if numbered else None
-    if len(final) > MAX_ITEMS and len(final) > len(existing):   # reopened items may exceed it; new ones may not
-        raise ValueError('At most %d open completion definitions; this revision would make %d. Nothing was saved: the %d '
-                         'current items stand. Merge items that test the same behaviour and run it again'
-                         % (MAX_ITEMS, len(final), len(existing)))
+    met = last_met(data) if numbered else set()
+    counted = [i for i in (ids or [None] * len(final)) if i not in met]
+    if len(counted) > MAX_ITEMS and len(final) > len(existing):   # reopened items may exceed it; new ones may not
+        states = ' · '.join('%s %s' % (d['id'], 'met' if d['id'] in met else 'open') for d in existing)
+        raise ValueError('At most %d open completion definitions still to prove; this revision would make %d. Nothing was saved: '
+                         'the %d current items stand (%s). Items the last review found met do not count. Merge items that test '
+                         'the same behaviour, or supersede one: cosmos-orbit done <task> --replace D<n> \'…\''
+                         % (MAX_ITEMS, len(counted), len(existing), states))
     items = completion_items(final, commands, origin, ids)
     for item, item_origin in zip([i for i in items if i['id'].startswith('D')], origins):
         item['origin'] = item_origin
@@ -559,8 +573,8 @@ def pending_line(data, prefix, tid):
                 % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid, prefix, tid))
     return ('REQUIREMENTS CHANGED (%s, after rev %s): "%s". Revise the result and verification goals before claiming: '
             "%s done %s --add 'D… what the change requires' [--check '[\"python3\",\"-m\",\"pytest\",\"…\"]'] "
-            "(or the same command with your rewritten items 'D1 …' 'D2 …', or with --keep if they already cover it)"
-            % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid))
+            "(or your rewritten items 'D1 …' 'D2 …') · or at claim time: %s claim %s --summary '…' --keep 'why they still cover it'"
+            % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid, prefix, tid))
 
 
 def _hhmm(stamp):

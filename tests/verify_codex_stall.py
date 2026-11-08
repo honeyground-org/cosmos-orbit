@@ -28,6 +28,8 @@ for name in ('ORBIT', 'COSMOS_ORBIT', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID', 'CMU
              'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
     os.environ.pop(name, None)               # never a real terminal: every terminal below is a fake one
 
+for _marker in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):  # these runs stand for sessions a person opened,
+    os.environ.pop(_marker, None)                                    # not ones an agent delegated (attach.delegated)
 from harness import attach, evolve, manager, providers, recovery, supervision, verifier, wake  # noqa: E402
 from harness.engine import Engine  # noqa: E402
 from harness.store import Store  # noqa: E402

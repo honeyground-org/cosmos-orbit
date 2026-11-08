@@ -20,6 +20,8 @@ for name in ('ORBIT', 'COSMOS_ORBIT', 'ORBIT_HANDOFF_AT', 'ORBIT_HANDOFF_MIN_GRO
              'CODEX_THREAD_ID', 'TMUX', 'TMUX_PANE', 'CMUX_SURFACE_ID', 'CMUX_PANEL_ID', 'CMUX_WORKSPACE_ID'):
     os.environ.pop(name, None)
 
+for _marker in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):  # these runs stand for sessions a person opened,
+    os.environ.pop(_marker, None)                                    # not ones an agent delegated (attach.delegated)
 from harness import attach  # noqa: E402
 from harness.store import Store  # noqa: E402
 

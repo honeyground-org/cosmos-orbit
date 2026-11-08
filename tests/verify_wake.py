@@ -20,6 +20,8 @@ os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 for name in ('ORBIT', 'COSMOS_ORBIT', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID', 'CMUX_SURFACE_ID', 'CMUX_BUNDLED_CLI_PATH'):
     os.environ.pop(name, None)  # never type into the terminal running this check
 
+for _marker in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):  # these runs stand for sessions a person opened,
+    os.environ.pop(_marker, None)                                    # not ones an agent delegated (attach.delegated)
 from harness import attach, continuity, requirements, wake  # noqa: E402
 from harness.store import Store  # noqa: E402
 

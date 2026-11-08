@@ -134,6 +134,10 @@ def main(argv=None):
     claim_cmd.add_argument('--remaining', action='append', default=[])
     claim_cmd.add_argument('--question', default='')
     claim_cmd.add_argument('--wait', action='store_true', help='Run the independent review now instead of in the background worker')
+    claim_cmd.add_argument('--keep', metavar='WHY', help='The request changed but the items still cover it: say why; the list is '
+                                                          'confirmed and the claim made in one step')
+    claim_cmd.add_argument('--add', action='append', default=[], metavar='TEXT',
+                           help='Add a result goal the changed request needs, then claim (repeatable)')
     brief_cmd = sub.add_parser('brief', help='Print the brief the hooks inject (current checkout or a task ID)')
     brief_cmd.add_argument('id', nargs='?')
     detach_cmd = sub.add_parser('detach', help='Close the current attached task without verification; the ledger stays')
@@ -402,7 +406,14 @@ def main(argv=None):
         elif args.command == 'claim':
             from .attach import claim, run_verification
             from .recovery import ensure_worker
-            task = claim(store, args.id, args.summary, args.remaining, args.question)
+            settle = {'add': args.add, 'keep': args.keep} if (args.keep is not None or args.add) else None
+            task = claim(store, args.id, args.summary, args.remaining, args.question, settle=settle)
+            from .attach import blind_items
+            blind = blind_items(task)
+            if blind:
+                print('Only a note backs %s: the reviewer cannot see this machine, so it will likely answer unclear. '
+                      'Record what Orbit can run itself: cosmos-orbit evidence %s %s --command \'["…"]\'' 
+                      % (', '.join(blind), args.id, blind[0]), file=sys.stderr)
             if task['data'].get('verification_pending'):
                 task = run_verification(engine, args.id, checks_only=not args.wait)
                 if task['data'].get('verification_pending') and not args.wait:

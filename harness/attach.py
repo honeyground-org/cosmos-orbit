@@ -875,41 +875,49 @@ def set_done(store, task_id, texts, origin='executor', add=False, keep=False, ch
 
     drop: open IDs the user withdrew (allowed only while the user's change is pending) · replace: (ID, text) pairs
     superseded by a new item · goal: the current objective in one line. Every reduction is reviewed."""
-    from . import requirements
     commands = parse_checks(checks)
     task = drain_inbox(store, store.get(task_id))
     with store.lock('task:' + task_id):
         task = store.get(task_id)
-        data = task['data']
-        if data.get('mode') != 'attached':
+        if task['data'].get('mode') != 'attached':
             raise ValueError('done applies to attached tasks; use feedback --done for managed tasks')
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
-        pending = dict(data.get('requirements_pending') or {})
-        draft = data.pop('draft', None)
-        changes = []
-        if goal is not None:
-            requirements.set_objective(data, goal, origin)
-            changes.append('objective')
-        for item_id in drop or ():
-            requirements.drop(data, item_id, because, origin)
-            changes.append('dropped ' + item_id)
-        for item_id, text in replace or ():
-            row = requirements.replace(data, item_id, text, origin, because)
-            changes.append('replaced %s by %s' % tuple(row['ids']))
-        row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands, because=because,
-                                  changes=changes)
-        if draft:
-            remember_label(store, task_id, task['prompt'], 'change', origin)  # the executor confirmed the work
-        if pending.get('unsure'):
-            remember_label(store, task_id, pending['text'], 'no_change' if row['kept'] else 'change', origin)
-        if commands:
-            data['development']['verified_tree'] = None  # new checks run at the next claim
-        kind = 'done_kept' if row['kept'] else 'goal_fixed'
-        status = 'working' if not row['kept'] and invalidate_verification(data) else task['status']
-        store.save(task, status, kind, {'done': data['done'], 'origin': origin, 'rev': row['rev'],
-                                                'added': row['added'], 'checks_added': row['checks_added'], 'because': row['because'][:200]})
+        _revise(store, task, texts, origin, add, keep, commands, drop, replace, goal, because)
     return store.get(task_id)
+
+
+def _revise(store, task, texts, origin='executor', add=False, keep=False, commands=(), drop=(), replace=(), goal=None,
+            because=None):
+    """The revision itself, for a caller that holds the task lock (set_done, and claim when it settles the list)."""
+    from . import requirements
+    task_id = task['id']
+    data = task['data']
+    pending = dict(data.get('requirements_pending') or {})
+    draft = data.pop('draft', None)
+    changes = []
+    if goal is not None:
+        requirements.set_objective(data, goal, origin)
+        changes.append('objective')
+    for item_id in drop or ():
+        requirements.drop(data, item_id, because, origin)
+        changes.append('dropped ' + item_id)
+    for item_id, text in replace or ():
+        row = requirements.replace(data, item_id, text, origin, because)
+        changes.append('replaced %s by %s' % tuple(row['ids']))
+    row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands, because=because,
+                              changes=changes)
+    if draft:
+        remember_label(store, task_id, task['prompt'], 'change', origin)  # the executor confirmed the work
+    if pending.get('unsure'):
+        remember_label(store, task_id, pending['text'], 'no_change' if row['kept'] else 'change', origin)
+    if commands:
+        data['development']['verified_tree'] = None  # new checks run at the next claim
+    kind = 'done_kept' if row['kept'] else 'goal_fixed'
+    status = 'working' if not row['kept'] and invalidate_verification(data) else task['status']
+    store.save(task, status, kind, {'done': data['done'], 'origin': origin, 'rev': row['rev'],
+                                            'added': row['added'], 'checks_added': row['checks_added'], 'because': row['because'][:200]})
+    return row
 
 
 def record_evidence(store, task_id, item_id, note=None, command=None, file=None, by=None):
@@ -959,8 +967,30 @@ def record_evidence(store, task_id, item_id, note=None, command=None, file=None,
     return entry
 
 
-def claim(store, task_id, summary='', remaining=(), question=''):
-    """The executor's completion claim. Checks run now; the independent review is queued (or run with wait)."""
+def blind_items(task):
+    """Open D items whose every piece of evidence is a note: nothing Orbit ran itself, no file.
+
+    The reviewer runs in a sandbox and cannot look at this machine, so a note alone came back `unclear` — 82 of 162
+    item verdicts on 2026-11-04..08, most citing "only the executor's record" or the sandbox. Said at claim time,
+    the executor can still record a command Orbit runs (its output reaches the reviewer as a host observation)."""
+    data = task['data']
+    met = __import__('harness.requirements', fromlist=['last_met']).last_met(data)
+    found = []
+    for item in data.get('done') or []:
+        if not item['id'].startswith('D') or item['id'] in met:
+            continue
+        rows = (data.get('done_evidence') or {}).get(item['id']) or []
+        if rows and all(r.get('kind') == 'note' for r in rows):
+            found.append(item['id'])
+    return found
+
+
+def claim(store, task_id, summary='', remaining=(), question='', settle=None):
+    """The executor's completion claim. Checks run now; the independent review is queued (or run with wait).
+
+    settle: {'add': [texts]} or {'keep': 'why'} — the list revision a changed request needs, made under the same
+    lock as the claim, so a request arriving in between waits in the inbox instead of splitting the two (a refused
+    claim then changes nothing: every refusal comes before the revision)."""
     from .simple_loop import stop_for_input
     drain_inbox(store, store.get(task_id))
     with store.lock('task:' + task_id):
@@ -970,12 +1000,21 @@ def claim(store, task_id, summary='', remaining=(), question=''):
             raise ValueError('claim applies to attached tasks')
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
+        if settle:
+            added = [t for t in settle.get('add') or [] if t.strip()]
+            why = (settle.get('keep') or '').strip()
+            if not added and not why:
+                raise ValueError('--keep needs the reason the current items still cover the change')
+            _revise(store, task, added, add=bool(added), keep=not added, because=why or None)
+            task = store.get(task_id)
+            data = task['data']
         remaining = [r.strip() for r in remaining if r and r.strip()]
         pending = data.get('requirements_pending')
         if pending and not remaining and not question.strip():
             raise ValueError('The request changed after completion definitions rev %s: "%s". Revise the result and verification goals '
-                             'first (cosmos-orbit done %s --add \'…\' [--check …]) or confirm they still cover it (cosmos-orbit done %s --keep).'
-                             % (pending.get('rev') or 0, pending['text'][:200], task_id, task_id))
+                             'first (cosmos-orbit done %s --add \'…\' [--check …]) or confirm they still cover it (cosmos-orbit done %s --keep). '
+                             'In one step: cosmos-orbit claim %s --summary \'…\' --keep \'why the items still cover it\' (or --add \'D…\').'
+                             % (pending.get('rev') or 0, pending['text'][:200], task_id, task_id, task_id))
         answer = {'summary': (summary or '')[:4000], 'finished': not remaining and not question.strip(),
                   'remaining': remaining, 'question': question.strip(), 'done_proposed': []}
         data['executor_result'] = answer
@@ -1466,9 +1505,42 @@ def _carried_workspaces(store, session, event, prompt=None):
     return [workspace for _, workspace in sorted(waiting, reverse=True)]
 
 
+def delegated(host, payload=None, environ=None):
+    """Why this session is a sub-task another agent ran (None if it is not; when unsure, None: it attaches).
+
+    Both must hold. The session is a non-interactive `codex exec` run — Codex writes `source: exec` in the first
+    line of its own transcript (55 of the last 60 transcripts on this Mac; a pane a person opens says `cli`) — and
+    it carries a Claude Code session's marks, which everything that session starts inherits. On 2026-11-04..08,
+    11 of 42 tasks were such Astra reviews a Claude session ran: each became a one-prompt task left working or
+    stalled, and 5 of them also took an Orbit review of their own. The Claude session that ran it owns that
+    work. An explicit ORBIT=on still attaches it; ORBIT=off was always the way to say it outright.
+
+    Not told apart: a person who runs `codex exec` by hand from a shell a Claude Code session opened (`! codex
+    exec …`). The environment and the transcript are the same; it is logged once (hooks.log) with the way back."""
+    env = os.environ if environ is None else environ
+    if host != 'codex' or not (env.get('CLAUDE_CODE_SESSION_ID') or env.get('CLAUDECODE')):
+        return None
+    path = (payload or {}).get('transcript_path')
+    try:
+        with open(path, encoding='utf-8') as handle:
+            first = json.loads(handle.readline() or '{}')
+    except (OSError, TypeError, ValueError):
+        return None
+    meta = first.get('payload') if isinstance(first.get('payload'), dict) else first
+    if meta.get('source') == 'exec' or meta.get('originator') == 'codex_exec':
+        return 'a codex exec run launched from a Claude Code session'
+    return None
+
+
 def _handle(store, event, payload, host):
     cwd = payload.get('cwd') or os.getcwd()
     session = payload.get('session_id')
+    if normalise(os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT')) != 'on':
+        why = delegated(host, payload)
+        if why:
+            if event == 'session-start':
+                hook_log(store, 'not attached (%s): session %s · ORBIT=on attaches it' % (why, session))
+            return None
     root = hook_root(store, cwd, session, event, payload.get('prompt'))
     if root is None:
         return None

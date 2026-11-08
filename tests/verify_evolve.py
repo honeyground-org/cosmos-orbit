@@ -25,6 +25,8 @@ os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 for name in ('ORBIT', 'COSMOS_ORBIT'):
     os.environ.pop(name, None)
 
+for _marker in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):  # these runs stand for sessions a person opened,
+    os.environ.pop(_marker, None)                                    # not ones an agent delegated (attach.delegated)
 from harness import attach, evolve  # noqa: E402
 from harness.store import Store  # noqa: E402
 
