@@ -24,13 +24,14 @@ MODE_KEY = 'followup.mode'
 HIDDEN_KEY = 'followup.hidden'
 MAX_SHOWN = 3
 MAX_CONCEPTS = 5
-FIELD_LIMIT = 300
+FIELD_LIMIT = 160
 
 _WORD = r'(?:팔로업|followup|follow-up)'
 _SHOW = re.compile(r'^\s*' + _WORD + r'\s*(\d+)?\s*[.!?]?\s*$', re.I)
 _KNOWN = re.compile(r'^\s*(?:이건\s*알아|알아|known|i know(?: this)?)\s*(\d+)\s*[.!?]?\s*$', re.I)
 _RESTORE = re.compile(r'^\s*' + _WORD + r'\s*(?:복원|restore)\s*(\d+|.+)?\s*$', re.I)
 _MODE = re.compile(r'^\s*' + _WORD + r'\s*(끄기|꺼|off|켜기|켜|on|자동|auto|항상|always)\s*$', re.I)
+_SOURCE = re.compile(r'^\s*' + _WORD + r'\s*(\d+)\s*(?:근거|source)\s*$', re.I)
 _CLOSE = re.compile(r'^\s*(?:닫기|close)\s*$', re.I)
 _MODE_WORDS = {'끄기': 'off', '꺼': 'off', 'off': 'off', '켜기': 'auto', '켜': 'auto', 'on': 'auto',
                '자동': 'auto', 'auto': 'auto', '항상': 'always', 'always': 'always'}
@@ -53,8 +54,22 @@ def parse_concept(raw):
     if len(parts) > 4:
         raise ValueError('A concept has at most four parts separated by |')
     parts += [''] * (4 - len(parts))
-    return {'name': parts[0][:80], 'plain': parts[1][:FIELD_LIMIT], 'here': parts[2][:FIELD_LIMIT],
-            'impact': parts[3][:FIELD_LIMIT]}
+    return {'name': _one_line(parts[0], 60), 'plain': _one_line(parts[1], FIELD_LIMIT), 'here': _one_line(parts[2], FIELD_LIMIT),
+            'impact': _one_line(parts[3], FIELD_LIMIT)}
+
+
+def _one_line(text, limit):
+    """One line, one sentence's worth: a card is three sentences, so a field never brings a paragraph."""
+    text = re.sub(r'\s+', ' ', text or '').strip()
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+_PATH = re.compile(r'(?:~|\.{0,2})?/?(?:[\w.-]+/){2,}[\w.-]+')
+
+
+def _short_paths(text):
+    """A long path reads as noise in a card: show its last part; the whole path stays for '근거'/'source'."""
+    return _PATH.sub(lambda m: '…/' + m.group(0).rstrip('/').rsplit('/', 1)[-1], text)
 
 
 def mode(store, task=None):
@@ -91,22 +106,28 @@ def _set_hidden(store, names):
     store.preference(HIDDEN_KEY, json.dumps(sorted(set(names)), ensure_ascii=False))
 
 
-def record(data, concepts, moment):
+def record(data, concepts, moment, about=''):
     """Attach the executor's concepts to the stop they belong to (data is saved by the caller, under its lock).
 
-    moment: 'question' (the claim asked the user) or 'completion' (shown once the review verifies)."""
-    if not concepts:
-        return
-    if len(concepts) > MAX_CONCEPTS:
+    Every claim moves `latest`, with or without concepts: a new question never shows the last one's background.
+    moment: 'question' (the claim asked the user) or 'completion' (shown once the review verifies). Card numbers
+    only grow, so "팔로업 61" always means one card even after old ones are dropped."""
+    if len(concepts or ()) > MAX_CONCEPTS:
         raise ValueError('At most %d concepts per stop' % MAX_CONCEPTS)
+    state = data.get('followup')
+    if not concepts and not state:
+        return
     state = data.setdefault('followup', {})
     cards = state.setdefault('cards', [])
-    turn = data.get('turns', 0)
-    key = '%s:%s' % (moment, turn)
-    for concept in concepts:
-        cards.append(dict(concept, n=len(cards) + 1, moment=moment, key=key, at=now()))
-    del cards[:-60]
+    key = '%s:%s' % (moment, data.get('turns', 0))
     state['latest'] = key
+    state['about'] = _one_line(about, 120)
+    state.pop('open', None)
+    for concept in concepts or ():
+        state['next'] = state.get('next') or (max([c.get('n', 0) for c in cards] or [0]) + 1)
+        cards.append(dict(concept, n=state['next'], moment=moment, key=key, about=state['about'], at=now()))
+        state['next'] += 1
+    del cards[:-60]
 
 
 def _moment_ready(task, key):
@@ -144,17 +165,41 @@ def stop_line(store, task):
     return 'Background · %s%s — "followup %d"' % (numbers, more, cards[0]['n'])
 
 
+def _last_prompt(data):
+    prompts = data.get('prompts') or []
+    return prompts[-1].get('at') if prompts else None
+
+
 def mark_announced(store, task, key=None):
     key = key or (task['data'].get('followup') or {}).get('latest')
     if not key:
         return
     with store.lock('task:' + task['id']):
         current = store.get(task['id'])
-        announced = current['data'].setdefault('followup', {}).setdefault('announced', [])
+        state = current['data'].setdefault('followup', {})
+        announced = state.setdefault('announced', [])
         if key not in announced:
             announced.append(key)
             del announced[:-30]
-            store.save(current, current['status'], 'followup_announced', {'key': key, 'layer': 'followup'})
+        state['open'] = {'after': _last_prompt(current['data'])}
+        store.save(current, current['status'], 'followup_announced', {'key': key, 'layer': 'followup'})
+
+
+def _mark_open(store, task, value):
+    """Background is open on screen until the user's next own words (or a close). Only then is a bare 닫기/close ours."""
+    with store.lock('task:' + task['id']):
+        current = store.get(task['id'])
+        state = current['data'].setdefault('followup', {})
+        if value:
+            state['open'] = {'after': _last_prompt(current['data'])}
+        else:
+            state.pop('open', None)
+        store.save(current, current['status'], 'followup_open' if value else 'followup_closed', {'layer': 'followup'})
+
+
+def is_open(task):
+    state = (task['data'].get('followup') or {}).get('open')
+    return bool(state) and state.get('after') == _last_prompt(task['data'])
 
 
 def _circled(n):
@@ -171,11 +216,13 @@ def card(task, n):
     lines = ['%s %s' % (_circled(c['n']), c['name']),
              ('뜻: ' if ko else 'What: ') + c['plain']]
     if c.get('here'):
-        lines.append(('이번 작업: ' if ko else 'In this work: ') + c['here'])
+        lines.append(('이번 작업: ' if ko else 'In this work: ') + _short_paths(c['here']))
     if c.get('impact'):
         lines.append(('영향: ' if ko else 'What it changes: ') + c['impact'])
     lines.append('')
-    lines.append(('이건 알아 %d · 닫기' % c['n']) if ko else ('known %d · close' % c['n']))
+    has_source = c.get('here') and _short_paths(c['here']) != c['here']
+    lines.append((('이건 알아 %d · 닫기' + (' · 팔로업 %d 근거' if has_source else '')) % ((c['n'],) * (2 if has_source else 1))) if ko
+                 else (('known %d · close' + (' · followup %d source' if has_source else '')) % ((c['n'],) * (2 if has_source else 1))))
     lines.append(_still_waiting(task, ko))
     return '\n'.join(l for l in lines if l is not None)
 
@@ -190,6 +237,9 @@ def listing(store, task):
     rows = ['%s %s%s' % (_circled(c['n']), c['name'], (' (숨김)' if ko else ' (hidden)') if _norm(c['name']) in known else '')
             for c in cards]
     head = ('배경 카드 — "팔로업 N" · 모드 %s' if ko else 'Background cards — "followup N" · mode %s') % mode(store, task)
+    about = (task['data'].get('followup') or {}).get('about')
+    if about:
+        head += '\n' + ('이 멈춤: ' if ko else 'This stop: ') + about
     return '\n'.join([head] + rows + [_still_waiting(task, ko)])
 
 
@@ -239,19 +289,36 @@ def intercept(store, task, text):
         value = _MODE_WORDS[m.group(1).lower()]
         set_mode(store, value)
         ko = korean(task)
-        return (('팔로업 모드: %s (전체 기본값). 이 작업만: cosmos-orbit followup --mode %s --task %s' % (value, value, task['id']))
-                if ko else ('Follow-up mode: %s (default everywhere). This task only: cosmos-orbit followup --mode %s --task %s'
+        return (('팔로업 모드: %s (전체 기본값). 이 작업만: cosmos-orbit followup --mode %s --here --task %s' % (value, value, task['id']))
+                if ko else ('Follow-up mode: %s (default everywhere). This task only: cosmos-orbit followup --mode %s --here --task %s'
                             % (value, value, task['id'])))
     m = _RESTORE.match(text)
     if m:
         return restore(store, task, (m.group(1) or '').strip())
+    m = _SOURCE.match(text)
+    if m:
+        _mark_open(store, task, True)
+        return source(task, int(m.group(1)))
     m = _SHOW.match(text)
     if m:
-        return card(task, int(m.group(1))) if m.group(1) else listing(store, task)
+        _mark_open(store, task, True)
+        return card(store.get(task['id']), int(m.group(1))) if m.group(1) else listing(store, store.get(task['id']))
     m = _KNOWN.match(text)
     if m and (task['data'].get('followup') or {}).get('cards'):
         return hide(store, task, int(m.group(1)))
-    if _CLOSE.match(text) and (task['data'].get('followup') or {}).get('announced'):
+    if _CLOSE.match(text) and is_open(task):
+        _mark_open(store, task, False)
         ko = korean(task)
         return ('닫았습니다. ' if ko else 'Closed. ') + _still_waiting(task, ko)
     return None
+
+
+def source(task, n):
+    ko = korean(task)
+    found = [c for c in (task['data'].get('followup') or {}).get('cards') or [] if c.get('n') == n]
+    if not found:
+        return ('%d번 카드가 없습니다.' % n) if ko else ('There is no card %d.' % n)
+    c = found[-1]
+    return '\n'.join([('%s %s — 근거' if ko else '%s %s — source') % (_circled(c['n']), c['name']),
+                      c.get('here') or ('(없음)' if ko else '(none)'),
+                      ('이 멈춤: ' if ko else 'This stop: ') + (c.get('about') or ''), _still_waiting(task, ko)])

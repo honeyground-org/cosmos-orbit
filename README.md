@@ -370,14 +370,17 @@ Nothing more appears unless the user asks, in the chat:
 |---|---|
 | `팔로업` / `followup` | the list of this stop's cards |
 | `팔로업 1` / `followup 1` | card 1: what it is, where it is in this work, what it changes (three sentences) |
+| `팔로업 1 근거` / `followup 1 source` | the card's full reference (long paths are shortened in the card) |
 | `이건 알아 1` / `known 1` | hide that concept's basics in `auto`; `팔로업 복원 1` brings it back |
 | `팔로업 끄기 · 자동 · 항상` | mode `off` · `auto` (default: concepts not hidden; none → silent) · `always` (hidden ones too) |
-| `닫기` / `close` | right after background was shown: closes it |
+| `닫기` / `close` | only while background is on screen (until your next own words): closes it |
 
 Asking for background never moves the task: Orbit answers these itself and blocks the prompt, so the pending question,
 the completion items and the review stay as they were, and no turn runs. Orbit never guesses that a person knows a
 concept; only "known" hides one. The same commands exist as `cosmos-orbit followup [N] [--known N] [--restore X]
-[--mode off|auto|always [--here]]`. A completion line waits for the verified review, not the claim.
+[--mode off|auto|always [--here]]`. A completion line waits for the verified review, not the claim; a review that
+ends after the session's last stop carries the line in its "verified" notice. Each claim starts its stop's cards
+afresh, so a new question never shows the last one's background.
 
 ## Context and mid-task handoff
 

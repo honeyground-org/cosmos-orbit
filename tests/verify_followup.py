@@ -144,6 +144,77 @@ def run(base, store):
             ok = True
         check('a malformed concept is refused: %r' % bad, ok)
 
+    print('⑦ Astra review regressions (REPORT_F2)')
+    root, pay, tid = attached(store, base, 'repo-r1', 's6')
+    followup.set_mode(store, 'off')
+    attach.claim(store, tid, '선택 필요', question='어느 쪽?', concepts=CONCEPTS[:1])
+    stop(store, pay)
+    before = frozen(store.get(tid))
+    prompt(store, pay, '팔로업 1')
+    closed_reply = prompt(store, pay, '닫기')
+    check('off → a card asked for by hand → 닫기 is ours, and the task does not resume',
+          closed_reply.get('decision') == 'block' and frozen(store.get(tid)) == before, (closed_reply, store.get(tid)['status']))
+    again = prompt(store, pay, '닫기')
+    check('control: a second 닫기 (nothing open) is the user\'s own words', again.get('decision') != 'block')
+    followup.set_mode(store, 'auto')
+
+    root, pay, tid = attached(store, base, 'repo-r3', 's7')
+    attach.claim(store, tid, '선택 필요', question='어느 쪽?', concepts=CONCEPTS[:1])
+    stop(store, pay)
+    prompt(store, pay, 'B로 해 주세요')
+    later = prompt(store, pay, 'close')
+    check('after the user answered, a later "close" is not swallowed', later.get('decision') != 'block')
+
+    root, pay, tid = attached(store, base, 'repo-r4', 's8')
+    attach.claim(store, tid, '질문 A', question='A 질문?', concepts=CONCEPTS[:2])
+    attach.claim(store, tid, '질문 B', question='B 질문?')
+    check('a new question without concepts shows none of the last one\'s', '배경' not in (stop(store, pay).get('systemMessage') or ''))
+    listed = prompt(store, pay, '팔로업').get('reason', '')
+    check('…and the list is this stop\'s (empty), not A\'s', '관리자 병합' not in listed and '배경 카드가 없' in listed, listed)
+
+    with store.lock('task:' + tid):
+        task = store.get(tid)
+        for i in range(63):
+            followup.record(task['data'], [followup.parse_concept('c%d | plain %d' % (i, i))], 'question', 'q')
+        store.save(task, task['status'], 'test_setup', {})
+    numbers = [c['n'] for c in store.get(tid)['data']['followup']['cards']]
+    check('card numbers only grow (63 records, 60 kept, all distinct)', len(numbers) == len(set(numbers)) == 60
+          and numbers[-1] == max(numbers), numbers[-5:])
+
+    messy = followup.parse_concept('긴\n이름 | 첫 문장.\n둘째   문장. | /Users/sean/Development/projects/cosmos-orbit/harness/followup.py:120 | ' + '가' * 400)
+    check('fields become one line, at most 160 characters', '\n' not in json.dumps(messy, ensure_ascii=False).replace('\\n', '')
+          and all('\n' not in v for v in messy.values()) and len(messy['impact']) <= 160, messy)
+    root, pay, tid = attached(store, base, 'repo-r6', 's9')
+    attach.claim(store, tid, '선택', question='어느 쪽?', concepts=[messy])
+    shown = prompt(store, pay, '팔로업 %d' % store.get(tid)['data']['followup']['cards'][-1]['n']).get('reason', '')
+    check('a long path is shortened in the card, with the way to see it whole', '…/followup.py:120' in shown and '근거' in shown
+          and '/Users/sean' not in shown, shown)
+    whole = prompt(store, pay, '팔로업 %d 근거' % store.get(tid)['data']['followup']['cards'][-1]['n']).get('reason', '')
+    check('…"팔로업 N 근거" shows the whole path', '/Users/sean/Development/projects/cosmos-orbit/harness/followup.py:120' in whole, whole)
+    mode_reply = prompt(store, pay, '팔로업 항상').get('reason', '')
+    check('the "this task only" hint is a command that really sets this task only', '--here --task ' + tid in mode_reply, mode_reply)
+    followup.set_mode(store, 'auto')
+
+    print('⑧ a review that ends after the last stop carries the line in its notice')
+    root, pay, tid = attached(store, base, 'repo-async', 's10')
+    attach.claim(store, tid, '설정 완료', concepts=CONCEPTS[:1])
+    stop(store, pay)                                        # the turn ends while the review still runs
+    with store.lock('task:' + tid):
+        task = store.get(tid)
+        task['data']['verification_pending'] = False
+        store.save(task, 'verified', 'test_verified', {})
+    from harness import supervision, wake
+    sent = []
+    original = (wake.resolve, wake.notify_command)
+    wake.resolve = lambda store, session=None, **k: ({'kind': 'tmux', 'target': '%1'}, 'test')
+    wake.notify_command = lambda terminal, text: ['notify', text]
+    try:
+        told = supervision.tell(store, store.get(tid), 's10', runner=lambda argv: (sent.append(argv[-1]) or 0, ''))
+    finally:
+        wake.resolve, wake.notify_command = original
+    check('the verified notice says 배경 · ① …', told and sent and '배경 · ① 로그인 시 자동 실행' in sent[-1], sent)
+    check('…and the next stop does not repeat it', '배경' not in (stop(store, pay).get('systemMessage') or ''))
+
     print('⑥ the CLI')
     root, pay, tid = attached(store, base, 'repo-cli', 's5')
     cli = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home)]

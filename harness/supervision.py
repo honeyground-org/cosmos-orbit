@@ -128,11 +128,26 @@ def tell(store, task, session, runner=None):
     if not claimed:
         return False
     run = runner or wake._run
-    code, _ = run(wake.notify_command(terminal, outcome_text(task)))
+    text = outcome_text(task)
+    background = None
+    try:                                     # a review that ends after the last Stop has no Stop to carry its line
+        from . import followup
+        background = followup.stop_line(store, task)
+    except Exception:  # noqa: BLE001 - background is optional; the outcome must still be told
+        background = None
+    if background:
+        text += ' · ' + background
+    code, _ = run(wake.notify_command(terminal, text))
     if code != 0:                                             # the named pane is gone: the screen names the task
         found = locate(terminal, task['id'], run, idle=False)  # measured: the verdict came while its turn still ran
         if found:
-            code, _ = run(wake.notify_command(found, outcome_text(task)))
+            code, _ = run(wake.notify_command(found, text))
+    if code == 0 and background:
+        try:
+            from . import followup
+            followup.mark_announced(store, task)
+        except (RuntimeError, ValueError):
+            pass
     with store.db:
         store._event(task['id'], 'outcome_told', {'session': session, 'status': task['status'], 'shown': code == 0,
                                                   'layer': 'control'})

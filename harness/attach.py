@@ -1008,9 +1008,9 @@ def claim(store, task_id, summary='', remaining=(), question='', settle=None, co
             _revise(store, task, added, add=bool(added), keep=not added, because=why or None)
             task = store.get(task_id)
             data = task['data']
-        if concepts:
-            from . import followup
-            followup.record(data, list(concepts), 'question' if question.strip() else 'completion')
+        from . import followup
+        followup.record(data, list(concepts or ()), 'question' if question.strip() else 'completion',
+                        about=question.strip() or summary)
         remaining = [r.strip() for r in remaining if r and r.strip()]
         pending = data.get('requirements_pending')
         if pending and not remaining and not question.strip():
