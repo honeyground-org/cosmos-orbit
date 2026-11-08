@@ -3,7 +3,7 @@ import copy
 import datetime
 import json
 
-from . import context, providers
+from . import context, providers, requirements
 from .evidence import evidence_bundle, native_tool_trace
 from .telemetry import recorder
 from . import recovery
@@ -14,7 +14,8 @@ SCHEMA = providers.obj({
         'status': {'type': 'string', 'enum': ['met', 'unmet', 'unclear']},
         'evidence': providers.STRINGS})},
     'extra': providers.STRINGS, 'missing': providers.STRINGS,
-    'fix': providers.STRINGS, 'question': providers.STRING})
+    'fix': providers.STRINGS, 'question': providers.STRING,
+    'reopen': {'type': 'array', 'items': providers.obj({'id': providers.STRING, 'evidence': providers.STRINGS})}})
 
 
 def fixed_checks(task):
@@ -28,10 +29,15 @@ def fixed_checks(task):
         for argv, row in zip(commands, evidence))
 
 
-def assess(answer, done):
-    """Validate ID coverage locally; never retry a model to make it say 'met'."""
-    if not isinstance(answer, dict) or set(answer) != {'items', 'extra', 'missing', 'fix', 'question'}:
-        raise ValueError('Verifier response must contain items, extra, missing, fix and question')
+def assess(answer, done, closed_ids=()):
+    """Validate ID coverage locally; never retry a model to make it say 'met'.
+
+    `closed_ids`: items an earlier review found met. A reviewer may reopen one with an observation; a reopen of any
+    other ID, or without an observation, is dropped (it was never a closed obligation to restore)."""
+    if isinstance(answer, dict) and 'reopen' not in answer:
+        answer = dict(answer, reopen=[])     # a result saved before reopen existed
+    if not isinstance(answer, dict) or set(answer) != {'items', 'extra', 'missing', 'fix', 'question', 'reopen'}:
+        raise ValueError('Verifier response must contain items, extra, missing, fix, question and reopen')
     expected = [item['id'] for item in done]
     if not expected or len(expected) != len(set(expected)):
         raise ValueError('Completion definitions must have unique IDs and cannot be empty')
@@ -59,10 +65,22 @@ def assess(answer, done):
     if not isinstance(result['question'], str):
         raise ValueError('Verifier question must be a string')
     result['question'] = result['question'].strip()
+    if not isinstance(result['reopen'], list):
+        raise ValueError('Verifier reopen must be a list')
+    reopened, seen = [], set()
+    for row in result['reopen']:
+        if not isinstance(row, dict) or not isinstance(row.get('id'), str) or not isinstance(row.get('evidence'), list):
+            raise ValueError('Invalid verifier reopen entry')
+        evidence = [value.strip() for value in row['evidence'] if isinstance(value, str) and value.strip()]
+        if row['id'] in closed_ids and row['id'] not in seen and evidence:
+            seen.add(row['id'])
+            reopened.append({'id': row['id'], 'evidence': evidence})
+    result['reopen'] = reopened
     # Scope drift needs one human decision, not an automatic undo/retry loop.
     if result['question'] or result['extra']:
         outcome = 'needs_input'
-    elif all(row['status'] == 'met' for row in result['items']) and not result['missing'] and not result['fix']:
+    elif (all(row['status'] == 'met' for row in result['items']) and not result['missing'] and not result['fix']
+          and not result['reopen']):
         outcome = 'verified'
     else:
         outcome = 'working'
@@ -160,14 +178,17 @@ def evaluate(engine, task, lease_fds=()):
         raise ValueError('Only an executor completion claim can trigger the verifier')
     if not fixed_checks(task) or not evidence_current(task):
         raise ValueError('Verifier requires all current fixed checks to pass')
-    done = copy.deepcopy(data.get('done', []))
+    attached = data.get('mode') == 'attached'
+    done = copy.deepcopy(requirements.review_items(data) if attached else data.get('done', []))
     binding = {'goal': data.get('goal', task['prompt']),
                'context': data.get('context_prompts', []),
                'feedback': data.get('feedback', []), 'done': done,
-               'done_fixed': data.get('done_fixed')}
+               'done_fixed': data.get('done_fixed'), 'checklist': requirements.checklist_binding(data)}
     binding = copy.deepcopy(binding)
     tree = fingerprint(task['workspace'])
     payload = dict(binding, observations=evidence_bundle(task),
+                   objective=data.get('objective'), objective_history=(data.get('objective_history') or [])[-10:],
+                   closed=requirements.review_view(data),
                    executor_capabilities=providers.native_capabilities(
                        task['provider'], data['options'].get('public_web', False)))
     prompt = (
@@ -200,6 +221,15 @@ def evaluate(engine, task, lease_fds=()):
         'requested. Check meaningful precision and cancellation boundaries, not arbitrary machine maxima. '
         'When a missing domain decision is essential, ask for it instead of repeatedly expanding the task. '
         'State material limits in the evidence and never claim exhaustive mathematical correctness. '
+        'The task list changes while the work runs; the goal does not. objective is the current one-line statement of '
+        'what is being completed; it never narrows the original request or the corrections. closed lists items earlier '
+        'reviews found met (approved withdrawals too): do not reassess them, but when you observe that a closed met '
+        'item no longer holds, put it in reopen with that observation. done items whose text starts with WITHDRAWN '
+        'were dropped or superseded by the executor: mark met only if the user\'s own words (user_words in closed) '
+        'withdrew it or its replacement fully covers it, otherwise unmet — the obligation returns. '
+        'observations.host_observations are commands Orbit itself ran on the host when the executor recorded evidence: '
+        'the output is what that command printed at that time, but the executor chose the command, so judge whether '
+        'it actually tests the item. '
         'Reply in the user request language.\n' + json.dumps(payload, ensure_ascii=False))
     alias = task['provider'] + ':verifier'
     saved = recovery.owned_record(store, task)
@@ -230,14 +260,15 @@ def evaluate(engine, task, lease_fds=()):
     current_binding = {'goal': task['data'].get('goal', task['prompt']),
                        'context': task['data'].get('context_prompts', []),
                        'feedback': task['data'].get('feedback', []),
-                       'done': task['data'].get('done', []),
-                       'done_fixed': task['data'].get('done_fixed')}
+                       'done': requirements.review_items(task['data']) if attached else task['data'].get('done', []),
+                       'done_fixed': task['data'].get('done_fixed'),
+                       'checklist': requirements.checklist_binding(task['data'])}
     moved_tree = fingerprint(task['workspace']) != tree
     why = 'request' if current_binding != binding else 'checks' if not fixed_checks(task) else 'files' if moved_tree else None
     if why and task['data'].get('mode') != 'attached':
         raise ValueError('Task or evidence changed during verification; rerun fixed checks')  # a private clone
     try:
-        result, outcome = assess(answer, done)
+        result, outcome = assess(answer, done, {d['id'] for d in requirements.closed_items(task['data'], 'met')})
     except ValueError as error:
         if why:
             raise ChangedDuringReview(why) from error
@@ -282,6 +313,15 @@ def evaluate(engine, task, lease_fds=()):
         task['data'].setdefault('verdicts', []).append(verdict)
         store.save(task, 'verifying', 'verdict_superseded', dict(verdict, layer='control'))
         raise ChangedDuringReview(why, verdict)
+    if attached:
+        # Applied in the same save as the verdict, under the same lock: a crash leaves both or neither. A review is
+        # clean when nothing it judged moved under it: no requirement waiting in the inbox, no change by this task's
+        # own session during it. Only a clean review closes or approves; a reopen always applies.
+        from .requirements import classify
+        waiting = any(classify(m['text']) in ('requirement', 'unsure') for m in store.inbox(task['id']))
+        clean = not waiting and verdict.get('changed_during_review') != 'own_session'
+        verdict['applied'] = requirements.apply_verdict(task['data'], verdict, tree, clean=clean)
+        verdict['applied']['clean'] = clean
     task['data'].setdefault('verdicts', []).append(verdict)
     store.save(task, 'verifying', 'verdict', dict(verdict, layer='control'))
     return verdict

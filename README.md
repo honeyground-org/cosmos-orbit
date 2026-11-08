@@ -249,7 +249,27 @@ a habit:
    ```
 
 3. Fixed checks can only be added, never replaced or removed. Definitions the user fixed can be
-   extended with `--add` but not rewritten by the executor. Up to twelve items.
+   extended with `--add` but not rewritten by the executor. Up to twelve **open** items.
+
+   **The goal stays; the list moves.** In an attached session the list is a living checklist:
+
+   - IDs are permanent. `--add` issues the next number; a rewrite keeps an ID only for an item
+     repeated word for word, and a reworded item gets a new ID (an ID never comes to mean a different
+     item, so evidence stays with what it proved).
+   - What a review finds met is **closed**: it leaves the open list, keeps the review's evidence, and is
+     not judged again. The reviewer still sees every closed item and reopens one, with an observation,
+     when it no longer holds. Only a clean review closes (nothing moved under it: no request waiting,
+     no change by the task's own session during it); a reopen always applies.
+   - Narrowing is reviewed. `--replace D3 'new text'` supersedes an item; a rewrite that leaves one out
+     supersedes it; `--drop D3 --because '…'` withdraws one the user no longer wants. Each withdrawal is
+     kept with the user's own words as Orbit recorded them and is judged by the next review like an open
+     item: met accepts it, unmet puts the obligation back, unclear blocks completion.
+   - `--goal '…'` restates the current objective in one line. The original request never changes and
+     still binds. `--drop` and `--goal` are accepted only while a change the user typed is pending.
+   - The brief shows `CLOSED n · ✔ met D1 D2 … · − D5 dropped · ↪ D3→D9`, `OPEN: none` once every item
+     is closed (G0 and the fixed checks remain), and `handoff --write` lists the closed items.
+   - Evidence commands (`evidence --command`) run by Orbit on the host reach the reviewer as host
+     observations (argv, exit code, time, output); notes and file fingerprints stay claims.
 4. Every revision is kept with its number, time, origin, reason and what it added; the brief shows
    `DONE (rev N)`, and the dashboard lists the revisions.
 5. A change that arrives while the review runs is queued, not lost; a verified verdict then reopens

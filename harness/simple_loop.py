@@ -1,6 +1,7 @@
 """The single goal -> executor -> checks -> independent verification loop."""
 import hashlib
 import json
+import re
 from . import recovery
 
 from . import context, providers, verifier
@@ -13,13 +14,20 @@ RESULT = providers.obj({'summary': providers.STRING, 'finished': {'type': 'boole
                         'done_proposed': providers.STRINGS})
 
 
-def completion_items(texts, commands, origin):
-    if (not isinstance(texts, list) or len(texts) > 12
+def completion_items(texts, commands, origin, ids=None):
+    """G0, the D items and the fixed checks. `ids` keeps each D item's permanent ID (an attached task's list grows and
+    shrinks while it runs; an ID never comes to mean a different item); without it they are numbered from D1."""
+    # Twelve is the limit for a positional list; a numbered list is limited where items are added (requirements.revise),
+    # so reopened obligations it carries are never refused.
+    if (not isinstance(texts, list) or (ids is None and len(texts) > 12)
             or any(not isinstance(text, str) or not text.strip() or len(text) > 2000 for text in texts)):
         raise ValueError('Supply up to twelve nonempty completion definitions, at most 2000 characters each')
+    if ids is not None and (len(ids) != len(texts) or len(set(ids)) != len(ids)
+                            or any(not re.fullmatch(r'D[1-9]\d*', str(i)) for i in ids)):
+        raise ValueError('One unique ID per completion definition')
     return ([{'id': 'G0', 'text': 'The original user goal and subsequent corrections are fully addressed, including requirements omitted from this checklist.',
               'how': 'inspect', 'origin': 'user'}]
-            + [{'id': 'D' + str(i + 1), 'text': text, 'how': 'inspect', 'origin': origin}
+            + [{'id': ids[i] if ids is not None else 'D' + str(i + 1), 'text': text, 'how': 'inspect', 'origin': origin}
              for i, text in enumerate(texts)]
             + [{'id': 'C' + str(i + 1), 'text': 'Fixed check ' + str(i + 1),
                 'how': 'check:' + str(i + 1), 'origin': 'check'} for i, _ in enumerate(commands)])
