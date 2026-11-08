@@ -276,8 +276,11 @@ a habit:
      is closed (G0 and the fixed checks remain), and `handoff --write` lists the closed items.
    - Evidence commands (`evidence --command`) run by Orbit on the host reach the reviewer as host
      observations (argv, exit code, time, output); notes and file fingerprints stay claims.
-   - The limit of 12 counts items still to prove: one the latest review found met stays open (and is
-     reviewed again) but no longer takes a place. A refusal lists each item and how to supersede one.
+   - The limit of 12 counts items still to prove: one the latest review found met, or whose latest
+     command evidence Orbit ran and saw pass (or a file in the workspace), stays open (and is reviewed)
+     but no longer takes a place — a session whose every stop is a question never gets a review, and
+     its finished items used to fill the list. A note alone still counts. At most 24 items are open in
+     all. A refusal lists each item (open · proven · met) and how to supersede one.
    - The list is settled in the claim itself: `claim <task> --summary '…' --keep 'why the items still
      cover it'` or `--add 'D…'` (repeatable). The claim also names items only a note backs, since the
      reviewer cannot see this machine; record a command Orbit runs for them.

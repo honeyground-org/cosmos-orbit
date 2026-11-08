@@ -16,6 +16,7 @@ import re
 from .store import now
 
 MAX_ITEMS = 12
+MAX_TOTAL = 24   # every open D item, proven or not: the list never grows without bound
 _TRIVIAL = {
     'ok', 'okay', 'k', 'yes', 'yep', 'go', 'go on', 'continue', 'proceed', 'thanks', 'thank you', 'next', 'done',
     '계속', '계속해', '계속해줘', '계속 진행', '계속 진행해', '진행', '진행해', '진행해줘', '진행해 줘', '이어서', '이어서 진행',
@@ -275,6 +276,20 @@ def last_met(data):
     return {i.get('id') for i in verdicts[-1].get('items') or [] if i.get('status') == 'met' and str(i.get('id', '')).startswith('D')}
 
 
+def orbit_proven(data):
+    """IDs whose latest command or file evidence Orbit recorded itself and that passed (exit 0, or a file
+    fingerprint). Like `last_met` they stay open for the review, but they no longer take one of the 12 places: on
+    2026-11-08 eight items already backed by passing commands kept two new requests out of the list, because every
+    claim in that session ended in a question and no review had run yet. A note alone still counts — the
+    reviewer cannot check it."""
+    proven = set()
+    for item_id, rows in (data.get('done_evidence') or {}).items():
+        solid = [r for r in rows or [] if r.get('kind') in ('command', 'file')]
+        if solid and (solid[-1].get('kind') == 'file' or solid[-1].get('exit_code') == 0) and str(item_id).startswith('D'):
+            proven.add(item_id)
+    return proven
+
+
 def closed_items(data, state=None):
     return [d for d in data.get('done_closed') or [] if state is None or d.get('state') == state]
 
@@ -516,13 +531,18 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
         final, origins = texts, [origin] * len(texts)
         ids = _match_ids(existing, texts, issue) if numbered else None
     met = last_met(data) if numbered else set()
-    counted = [i for i in (ids or [None] * len(final)) if i not in met]
-    if len(counted) > MAX_ITEMS and len(final) > len(existing):   # reopened items may exceed it; new ones may not
-        states = ' · '.join('%s %s' % (d['id'], 'met' if d['id'] in met else 'open') for d in existing)
-        raise ValueError('At most %d open completion definitions still to prove; this revision would make %d. Nothing was saved: '
-                         'the %d current items stand (%s). Items the last review found met do not count. Merge items that test '
-                         'the same behaviour, or supersede one: cosmos-orbit done <task> --replace D<n> \'…\''
-                         % (MAX_ITEMS, len(counted), len(existing), states))
+    proven = orbit_proven(data) if numbered else set()
+    counted = [i for i in (ids or [None] * len(final)) if i not in met and i not in proven]
+    growing = len(final) > len(existing)                          # reopened items may exceed a limit; new ones may not
+    if growing and (len(counted) > MAX_ITEMS or len([t for t in final if t]) > MAX_TOTAL):
+        states = ' · '.join('%s %s' % (d['id'], 'met' if d['id'] in met else 'proven' if d['id'] in proven else 'open')
+                            for d in existing)
+        raise ValueError('At most %d open completion definitions still to prove (and %d open in all); this revision would make '
+                         '%d to prove, %d in all. Nothing was saved: the %d current items stand (%s). Items the last review '
+                         'found met, or backed by a passing command Orbit ran, do not count toward the %d. Record such '
+                         'evidence for finished items, merge items that test the same behaviour, or supersede one: '
+                         'cosmos-orbit done <task> --replace D<n> \'…\''
+                         % (MAX_ITEMS, MAX_TOTAL, len(counted), len(final), len(existing), states, MAX_ITEMS))
     items = completion_items(final, commands, origin, ids)
     for item, item_origin in zip([i for i in items if i['id'].startswith('D')], origins):
         item['origin'] = item_origin
