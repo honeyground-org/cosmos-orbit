@@ -138,6 +138,16 @@ def run(base, store, engine):
     check('control: a reworded item never keeps its ID, even when the text names it',
           attach.set_done(store, tid, ['D1 report renders', 'D4 totals are correct to the cent', 'D3 CSV and PDF export'])
           and open_ids(store.get(tid)) == ['D1', 'D4', 'D5'], open_ids(store.get(tid)))
+    t0 = attach.create(store, root, 'Serve the admin page', 'claude')['id']
+    attach.set_done(store, t0, ['Serve /Admin'])
+    task = attach.set_done(store, t0, ['Serve /admin'])
+    check('a change of case is a different item (new ID, the old one superseded)',
+          open_ids(task) == ['D2'] and closed(task).get('D1', {}).get('state') == 'superseded', (open_ids(task), closed(task)))
+    long_words = 'x' * 700 + ' D1은 그대로 두고 D2만 빼자.'
+    user_says(store, t0, long_words)
+    task = attach.set_done(store, t0, [], drop=['D2'], because='user removed it')
+    check('a withdrawal keeps the user\'s whole message, not the 600-character preview',
+          closed(task)['D2']['user_words']['text'].endswith('D2만 빼자.'), len(closed(task)['D2']['user_words']['text']))
     data = {'mode': 'attached', 'done': [], 'done_history': [{'added': ['D9']}], 'verdicts': [{'items': [{'id': 'D11'}]}],
             'done_evidence': {'D7': []}}
     check('an ID used anywhere in the ledger is never issued again', requirements._id_issuer(data)() == 'D12')
@@ -220,6 +230,14 @@ def run(base, store, engine):
         store.save(task, task['status'], 'test_reopen', {})
     task = attach.set_done(store, t2, [], keep=True)
     check('a reopened item may exceed the limit, and --keep still works', len(open_ids(task)) == 13, len(open_ids(task)))
+    with store.lock('task:' + t2):
+        task = store.get(t2)
+        for n in range(100, 162):
+            requirements.archive(task['data'], {'id': 'D%d' % n, 'text': 'old %d' % n}, 'met')
+            requirements.reopen(task['data'], 'D%d' % n, ['regressed'])
+        store.save(task, task['status'], 'test_reopen', {})
+    task = attach.set_done(store, t2, [], keep=True)
+    check('…even with 75 open after many reopens', len(open_ids(task)) == 75, len(open_ids(task)))
 
     print('⑥ reductions and the objective need the user\'s words')
     t3 = attach.create(store, root, 'Ship the onboarding flow', 'claude', checks=['["python3","verify.py"]'])['id']

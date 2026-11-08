@@ -210,7 +210,7 @@ def learn(learned, text, label):
 
 def mark_pending(data, text, source, unsure=False):
     previous = data.get('requirements_pending') or {}
-    data['requirements_pending'] = {'at': now(), 'text': (text or '').strip()[:600], 'source': source,
+    data['requirements_pending'] = {'at': now(), 'text': (text or '').strip()[:600], 'full': (text or '').strip()[:8000], 'source': source,
                                     'count': (previous.get('count') or 0) + 1, 'rev': data.get('done_rev') or 0,
                                     'unsure': bool(unsure) and (not previous or bool(previous.get('unsure')))}
     return data['requirements_pending']
@@ -224,7 +224,9 @@ _ID_PREFIX = re.compile(r'^\s*(D\d+)\b[\s.:)\-–—]*')
 
 
 def _norm(text):
-    return re.sub(r'\s+', ' ', _ID_PREFIX.sub('', text or '')).strip().lower()
+    """An item's text for identity: an "D3 " prefix and the outer whitespace aside, exactly as written. Case and
+    inner spacing can carry meaning ("/Admin" is not "/admin"), so they make a different item."""
+    return _ID_PREFIX.sub('', text or '').strip()
 
 
 def _number(item_id):
@@ -278,7 +280,7 @@ def user_words(data):
     the pending change, else the latest prompt. The review judges whether these words support the change."""
     pending = data.get('requirements_pending') or {}
     if pending.get('text'):
-        return {'at': pending.get('at'), 'source': pending.get('source'), 'text': pending['text']}
+        return {'at': pending.get('at'), 'source': pending.get('source'), 'text': pending.get('full') or pending['text']}
     last = (data.get('prompts') or [{}])[-1]
     return {'at': last.get('at'), 'source': 'prompt', 'text': last.get('text') or ''}
 

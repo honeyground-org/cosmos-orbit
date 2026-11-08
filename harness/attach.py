@@ -1291,7 +1291,7 @@ def brief_text(store, task, event='prompt', for_digest=False):
         tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
     if for_digest:
         # The user's own words are already in the session; they must not re-send the whole brief on every prompt.
-        lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED'))]
+        lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED', 'LIST ('))]
     return _fit(lines, tail, BRIEF_LIMIT)
 
 
