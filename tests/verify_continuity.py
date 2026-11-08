@@ -128,6 +128,38 @@ def main():
     continuity.clear_threshold(store, global_default=True)
     check('reset --global: the built-in point applies again', continuity.resolve_threshold(store, root) == (350000, 'built-in'))
 
+    # per host: Claude Code 350k and Codex 250k built in, each settable on its own
+    check('built in per host: claude 350k · codex 250k · unknown 350k',
+          [continuity.resolve_threshold(store, root, h) for h in ('claude', 'codex', None)]
+          == [(350000, 'built-in'), (250000, 'built-in'), (350000, 'built-in')])
+    continuity.set_threshold(store, '220k', host='codex')
+    check('--host codex changes Codex only', continuity.resolve_threshold(store, root, 'codex') == (220000, 'host')
+          and continuity.resolve_threshold(store, root, 'claude') == (350000, 'built-in'))
+    continuity.set_threshold(store, '300k', global_default=True)
+    check('a host point beats the default for every host; the other host takes the default',
+          continuity.resolve_threshold(store, root, 'codex') == (220000, 'host')
+          and continuity.resolve_threshold(store, root, 'claude') == (300000, 'default'))
+    continuity.set_threshold(store, '200k', root)
+    check('project beats the host point', continuity.resolve_threshold(store, root, 'codex') == (200000, 'project'))
+    view = continuity.threshold_view(store, root, 'codex')
+    check('the view shows each host, and what Codex gets after its window cap',
+          view['hosts']['claude']['handoff_at'] == 200000 and view['hosts']['codex']['applied'] == 200000, view['hosts'])
+    continuity.clear_threshold(store, root)
+    view = continuity.threshold_view(store, root, 'codex')
+    check('Codex 220k is applied as 206.7k (80% of its 258.4k window) and the view says why',
+          view['hosts']['codex']['handoff_at'] == 220000 and view['hosts']['codex']['applied'] == 206720
+          and 'compacts' in view['hosts']['codex'].get('why', ''), view['hosts']['codex'])
+    try:
+        continuity.set_threshold(store, '250k', host='gemini')
+        check('an unknown host is refused', False)
+    except ValueError:
+        check('an unknown host is refused', True)
+    continuity.clear_threshold(store, host='codex')
+    continuity.clear_threshold(store, global_default=True)
+    check('reset --host: the built-in point per host applies again',
+          continuity.resolve_threshold(store, root, 'codex') == (250000, 'built-in')
+          and 'hosts' in json.loads(settings.read_text())['handoff'])
+
     on_disk['handoff']['at'] = 'lots'
     settings.write_text(json.dumps(on_disk))
     view = continuity.threshold_view(store, root)
@@ -136,7 +168,7 @@ def main():
     settings.write_text('{"handoff": {"at": 300000,')
     view = continuity.threshold_view(store, root)
     check('broken JSON: the hooks fall back to the built-in point and the view says why',
-          view['here'] == {'handoff_at': 350000, 'source': 'built-in', 'off': False} and view['settings_file']['problems'], view)
+          view['here'] == {'handoff_at': 350000, 'source': 'built-in', 'off': False, 'host': None} and view['settings_file']['problems'], view)
     try:
         continuity.set_threshold(store, '400k', global_default=True)
         refused = False

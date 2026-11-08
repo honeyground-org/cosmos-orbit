@@ -184,12 +184,14 @@ def main(argv=None):
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
     checkpoint_cmd.add_argument('--notes', default='')
     checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
-    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global] · '
+    context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global | --host claude|codex] · '
                                                  'auto | tell (who types /clear) · background on|off (the Claude Code mod) · '
                                                  'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
+    context_cmd.add_argument('--host', choices=('claude', 'codex'), default=None,
+                             help='the point for every session of one host (built in: claude 350k, codex 250k)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
     hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
@@ -317,7 +319,7 @@ def main(argv=None):
             from .continuity import resolve_threshold
             handoff_at = args.context_budget
             if handoff_at is None:
-                handoff_at = resolve_threshold(store, memory_config['workspace'])[0] or None
+                handoff_at = resolve_threshold(store, memory_config['workspace'], provider)[0] or None
             task['data']['options'] = {'model': args.model, 'public_web': args.public_web,
                                       'context_budget': handoff_at, 'auto_handoff': bool(handoff_at)}
             task['data']['memory'] = memory_config['data']['memory']
@@ -527,13 +529,14 @@ def main(argv=None):
             if args.value in ('auto', 'tell'):
                 changed = {'handoff_mode': continuity.set_handoff_mode(store, args.value)}
             elif args.value == 'reset':
-                changed = continuity.clear_threshold(store, root, args.global_default)
+                changed = continuity.clear_threshold(store, root, args.global_default, args.host)
             elif args.value is not None:
-                changed = continuity.set_threshold(store, args.value, root, args.global_default)
+                changed = continuity.set_threshold(store, args.value, root, args.global_default, args.host)
             else:
                 changed = None
             task = current_task(store, root)
-            result = dict(continuity.threshold_view(store, root), root=str(root), changed=changed,
+            result = dict(continuity.threshold_view(store, root, args.host or (task['data'].get('host') if task else None)),
+                          root=str(root), changed=changed,
                           task=task['id'] if task else None,
                           measured=continuity.context_view(task['data']) if task else None,
                           checkpoints=len(task['data'].get('checkpoints') or []) if task else 0)
