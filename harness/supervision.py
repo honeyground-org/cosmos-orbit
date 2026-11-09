@@ -50,6 +50,17 @@ def handoff_pending(task):
             and state.get('state') in OPEN_STATES)
 
 
+def handoff_continues(store, task):
+    """The handoff is ready and the work goes on: the supervisor starts the fresh context itself (auto mode only).
+
+    A stop that waits for the user (a question, a decision) is not work going on: needs_work is False there, and the
+    handoff keeps waiting for the user's answer, which it then carries (continuity.auto_handoff)."""
+    from .continuity import READY_STATES, handoff_mode
+    data = task['data']
+    return (handoff_pending(task) and (data.get('handoff_state') or {}).get('state') in READY_STATES
+            and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and needs_work(task))
+
+
 def _ended_key(task_id, session):
     return 'turn_ended:%s:%s' % (task_id, session)
 
@@ -294,7 +305,8 @@ def tick(store, task_id, session, runner=None):
         return 'reviewing'
     if not needs_work(task):
         return 'no_work'
-    if handoff_pending(task):
+    handing_off = handoff_continues(store, task)
+    if handoff_pending(task) and not handing_off:
         return 'awaiting_handoff'
     mark = task['data'].get('supervision', {}).get(session, {})
     stop_at = _stop_at(store, task_id, session, mark)
@@ -335,6 +347,15 @@ def tick(store, task_id, session, runner=None):
         code, screen = runner(wake.screen_command(terminal))
         if code or wake.read_state(screen) != 'empty':
             return 'input_changed'
+        if handing_off:
+            # Past the handoff point the continuation runs in a fresh context: same checks, a handoff instead of a line.
+            if not handoff_continues(store, latest):
+                return 'changed'
+            current.update(stop_at=stop_at, sent_for=stop_at, turn_open=False)
+            started = continuity.continue_in_fresh_context(store, latest, session, latest['data'].get('host'), terminal)
+            if started:
+                wake.record_wake(store.home, terminal['target'])
+            return 'handed_off' if started else 'awaiting_handoff'
         # Persist before sending: a crash after Enter cannot submit the same continuation twice.
         current.update(stop_at=stop_at, sent_for=stop_at, turn_open=False)
         store.save(latest, latest['status'], 'continuation_attempted',
@@ -351,8 +372,10 @@ def ensure(store, task, session):
     if not session or task['status'] not in ('working', 'checking', 'verifying'):
         return
     from . import manager, wake
-    if not manager.diagnose(task, paused=store.paused(task['id']), handoff=handoff_pending(task))['supervise']:
-        return  # waiting for the user, a handoff, a draft: nothing to resume, so no supervisor (and no terminal)
+    paused = store.paused(task['id'])
+    if (not manager.diagnose(task, paused=paused, handoff=handoff_pending(task))['supervise']
+            and (paused or not handoff_continues(store, task))):
+        return  # waiting for the user, a draft, a handoff nobody can start: nothing to resume, so no supervisor
     terminal, reason = wake.resolve(store, session=session)
     if not terminal:
         with store.db:
@@ -395,7 +418,8 @@ def main(home, task_id, session, close_workspace=False, sleep=time.sleep, clock=
     store = Store(home)
     last, since = None, clock()
     terminal_outcomes = {'disabled', 'settled', 'input_required', 'session_ended', 'no_terminal',
-                         'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work'}
+                         'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work',
+                         'handed_off'}  # the fresh session's own Stop starts its supervisor
     try:
         with store.lock('supervisor:' + task_id + ':' + session):
             while True:

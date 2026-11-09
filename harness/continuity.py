@@ -630,6 +630,38 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         'and runs there by itself; there is nothing to retype.' % (_k(live.get('tokens')), _k(state.get('limit'))))}
 
 
+READY_STATES = ('checkpointed', 'told')  # the handoff is ready and no one has started it yet
+CONTINUE_TEXT = ('Continue the unfinished task. Orbit started this fresh context by itself because work remained '
+                 'past the handoff point; the user asked nothing new.')
+
+
+def continue_in_fresh_context(store, task, session, host, terminal, spawn=None):
+    """The supervisor's automatic handoff: work remains, the turn has ended and nobody typed. Caller holds the lock.
+
+    The handoff used to start only from the user's next request (auto_handoff), so a session past the point with
+    work left sat idle until the user came back: 2026-11-09, a Codex task for three hours (12:12-15:17 KST) and a
+    Claude task for 25 minutes after the manager had decided "checkpoint, then continue in a fresh context". The
+    user: when the work must go on, the handoff is automatic. A continuation request is carried instead of the
+    user's, with the checkpoint's next step; the typist clears or opens a new conversation in this session's own
+    pane, which the supervisor has just read as stopped with an empty input. Returns True when it started."""
+    data = task['data']
+    state = data.get('handoff_state') or {}
+    if (not terminal or host not in ('claude', 'codex') or handoff_mode(store) != 'auto'
+            or state.get('session') != session or state.get('state') not in READY_STATES):
+        return False
+    next_step = ((data.get('checkpoints') or [{}])[-1]).get('next')
+    data['carried_prompt'] = {'text': (CONTINUE_TEXT + (' Next step from the checkpoint: ' + next_step if next_step else ''))[:4000],
+                              'at': now(), 'from_session': session, 'by': 'supervisor'}
+    state.update(state='auto', auto_at=now(), panel=terminal.get('target'), by='supervisor')
+    store.save(task, task['status'], 'handoff_auto', {'terminal': terminal.get('kind'), 'mod': False, 'by': 'supervisor',
+                                                      'layer': 'context'})
+    from . import typist
+    # No ctrl+u: the input was just read empty, and erasing could only ever remove what the user began to type.
+    steps = typist.handoff_steps(host, presses=0, settle=0.3, expect=None)
+    (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'])
+    return True
+
+
 HANDOFF_PREFIX = 'Orbit: handing off to a fresh context'  # the block reason starts so; the mod reads it
 MOD_GRACE_SECONDS = 3.0  # how long the typist waits for the Claude Code mod to take the handoff before it types
 MOD_KEY = 'mod:claude:'
