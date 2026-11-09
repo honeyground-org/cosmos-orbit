@@ -28,6 +28,23 @@ def child_env(read_only=False):
     return env
 
 
+def user_default_model(name):
+    """The model the person chose for this CLI, read from their user settings; None when they chose none.
+
+    A reviewer or planner call runs with `--setting-sources ''` so the person's hooks, MCP and permissions cannot
+    steer it. That also dropped their model, and the CLI fell back to its built-in default: observed 2026-11-09,
+    every review ran on claude-fable-5-1 and failed with "You're out of usage credits" while the person's own
+    sessions ran on the model in their settings ("opus")."""
+    if name != 'claude':
+        return None
+    base = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+    try:
+        model = json.loads((base / 'settings.json').read_text(encoding='utf-8')).get('model')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
 def obj(properties):
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
@@ -128,12 +145,16 @@ class Provider:
             else:
                 if '--tools' in command:
                     command[command.index('--tools') + 1] += ',WebSearch,WebFetch'
-        if self.model:
+        model = self.model
+        if not model and '--setting-sources' in command and not os.environ.get('ANTHROPIC_MODEL'):
+            # This call skips the person's settings; keep their model, not the CLI's built-in default.
+            model = user_default_model(self.name)
+        if model:
             # Options precede the stdin prompt marker for Codex.
             if self.name == 'codex':
-                command[-1:-1] = ['--model', self.model]
+                command[-1:-1] = ['--model', model]
             else:
-                command += ['--model', self.model]
+                command += ['--model', model]
         started = time.monotonic()
         started_wall = time.time()
         invocation = directory / (call_id + '.invocation.json')
@@ -145,7 +166,7 @@ class Provider:
         os.chmod(invocation, 0o600)
         receipt = directory / (call_id + '.receipt.json')
         record = {'task_id': task_id, 'call_id': call_id, 'receipt': str(receipt),
-                  'provider': self.name, 'requested_model': self.model, 'session': session,
+                  'provider': self.name, 'requested_model': model, 'session': session,
                   'status': 'prepared', 'started_wall': started_wall, 'process': None,
                   'log': str(log_path), 'error_log': str(error_path), 'answer_path': str(output_path),
                   'invocation': str(invocation), 'exit_code': None, 'seconds': None}
