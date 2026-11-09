@@ -506,6 +506,11 @@ def main():
     check('unchanged brief is not repeated in the same session', (snap['briefs'] or {}).get('skipped', 0) >= 1, snap['briefs'])
     snap2 = snapshot(store, task2['id'])['tasks'][0]
     check('snapshot: attached working is not unattended', snap2['status'] == 'working' and snap2['operation']['title_key'] == 'simple.attached')
+    # A task the reviewer has seen keeps its executor: the idle reviewer session must not stand in for it, or the
+    # dashboard labels the person's own working session "Reviewer" (5 of 14 live tasks, 2026-11-09).
+    names2 = [s['name'] for s in snap2['sessions']]
+    check('control: the reviewed task has a reviewer session', 'claude:verifier' in store.get(task2['id'])['data'].get('sessions', {}), names2)
+    check('snapshot: executor listed first after a review', names2[:1] == ['claude'] and 'claude:verifier' in names2, names2)
     rendered = terminal(snapshot(store), 'en')
     check('terminal twin shows entrance line', 'entrance: attached' in rendered)
     for i in range(2):
