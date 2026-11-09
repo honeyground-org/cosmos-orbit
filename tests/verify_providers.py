@@ -88,6 +88,44 @@ def main():
     leftovers = [p.name for p in (base / 'home' / 'runs').rglob('*.prompt.txt')]
     check('the prompt file is removed after the call', not leftovers, leftovers)
 
+    print('③ a call that skips the person\'s settings keeps the model they chose (2026-11-09: reviews ran on the CLI default)')
+    os.environ.pop('ANTHROPIC_MODEL', None)
+    config = base / 'claude-config'
+    config.mkdir()
+    os.environ['CLAUDE_CONFIG_DIR'] = str(config)
+
+    def argv_of(task_id, model=None, read_only=False, workspace=base):
+        provider = providers.Provider('claude', base / 'home', model)
+        provider.read_only = read_only
+        provider.call(task_id, 'review this', schema, workspace=workspace)
+        run = base / 'home' / 'runs' / task_id
+        argv = json.loads(next(run.glob('*.invocation.json')).read_text())['argv']
+        receipt = json.loads(next(run.glob('*.receipt.json')).read_text())
+        return argv, receipt.get('requested_model')
+
+    def model_flag(argv):
+        return argv[argv.index('--model') + 1] if '--model' in argv else None
+
+    argv, _ = argv_of('m-none', read_only=True)
+    check('control: no model in the settings → no --model (the CLI default, as before)', model_flag(argv) is None, argv)
+    (config / 'settings.json').write_text(json.dumps({'model': 'opus', 'effortLevel': 'xhigh'}), encoding='utf-8')
+    argv, requested = argv_of('m-review', read_only=True)
+    check('reviewer (settings skipped) runs on the settings model', '--setting-sources' in argv and model_flag(argv) == 'opus', argv)
+    check('the receipt records the model Orbit requested', requested == 'opus', requested)
+    argv, _ = argv_of('m-plan', workspace=None)
+    check('a planner call without a workspace also keeps it', model_flag(argv) == 'opus', argv)
+    argv, requested = argv_of('m-explicit', model='sonnet', read_only=True)
+    check('an explicit task model wins over the settings', model_flag(argv) == 'sonnet' and argv.count('--model') == 1 and requested == 'sonnet', argv)
+    argv, _ = argv_of('m-exec')
+    check('control: the executor loads the settings itself → no --model added', '--setting-sources' not in argv and model_flag(argv) is None, argv)
+    os.environ['ANTHROPIC_MODEL'] = 'haiku'
+    argv, _ = argv_of('m-env', read_only=True)
+    os.environ.pop('ANTHROPIC_MODEL')
+    check('control: ANTHROPIC_MODEL is left to the CLI', model_flag(argv) is None, argv)
+    (config / 'settings.json').write_text('{not json', encoding='utf-8')
+    argv, _ = argv_of('m-broken', read_only=True)
+    check('control: unreadable settings → no --model, the call still runs', model_flag(argv) is None, argv)
+
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 
