@@ -326,6 +326,72 @@ def main():
     attach.handle(store, 'pre-compact', dict(pay5, trigger='auto'), 'claude')
     check('second compaction in the same session: no duplicate auto checkpoint', len(store.get(tid)['data']['checkpoints']) == before + 1)
 
+    print('⑦-b a session that handed off and was used again can hand off again (it used to stay "adopted" for good)')
+    root4 = make_repo(base, 'repo4')
+    attach.set_switch(store, 'on', root4)
+    ta = base / 'a1.jsonl'
+    claude_turn(ta, 50_000)
+    paya = {'cwd': str(root4), 'session_id': 'a1', 'transcript_path': str(ta)}
+    attach.handle(store, 'prompt', dict(paya, prompt='Split the report builder into modules and keep its output identical'), 'claude')
+    tid4 = attach.current_task(store, root4)['id']
+    claude_turn(ta, 210_000)
+    attach.handle(store, 'prompt', dict(paya, prompt='keep going with the module split'), 'claude')
+    attach.handle(store, 'stop', dict(paya, stop_hook_active=False, last_assistant_message='half done'), 'claude')
+    continuity.record_checkpoint(store, tid4, 'Move the totals into report/totals.py')
+    attach.handle(store, 'stop', dict(paya, stop_hook_active=True, last_assistant_message='checkpoint saved'), 'claude')
+    tb = base / 'a2.jsonl'
+    claude_turn(tb, 40_000)
+    payb = {'cwd': str(root4), 'session_id': 'a2', 'transcript_path': str(tb)}
+    attach.handle(store, 'session-end', {'cwd': str(root4), 'session_id': 'a1', 'reason': 'clear'}, 'claude')
+    attach.handle(store, 'session-start', dict(payb, source='clear'), 'claude')
+    state = store.get(tid4)['data'].get('handoff_state') or {}
+    check('the fresh session took the handoff over', state.get('state') == 'adopted' and state.get('adopted_by') == 'a2'
+          and state.get('session') == 'a1', state)
+    # the first session is used again (resumed in its pane) after the host compacted it, as on 2026-11-04 06:31Z
+    claude_turn(ta, 120_000)
+    attach.handle(store, 'prompt', dict(paya, prompt='also rename the totals helper'), 'claude')
+    task4 = store.get(tid4)
+    live = task4['data']['context_live']
+    check('it is measured again from where it came back (120k), its point 200k',
+          live.get('session') == 'a1' and live.get('start') == 120_000 and live.get('limit') == 200_000, live)
+    claude_turn(ta, 150_000)
+    attach.handle(store, 'prompt', dict(paya, prompt='and update the docstring'), 'claude')
+    check('below its point (150k): still adopted, nothing asked (control)',
+          (store.get(tid4)['data'].get('handoff_state') or {}).get('state') == 'adopted')
+    recommended = events(store, tid4).count('handoff_recommended')
+    claude_turn(ta, 215_000)
+    attach.handle(store, 'prompt', dict(paya, prompt='now add the tests for totals'), 'claude')
+    state = store.get(tid4)['data'].get('handoff_state') or {}
+    check('past its point again (215k): the handoff opens for it (before: never — it ran to 760k)',
+          state.get('session') == 'a1' and state.get('state') in ('recommended', 'checkpointed')
+          and events(store, tid4).count('handoff_recommended') == recommended + 1, state)
+
+    print('⑦-c a task that joins a session already past the point hands off at the point')
+    root5 = make_repo(base, 'repo5')
+    attach.set_switch(store, 'on', root5)
+    tj = base / 'j1.jsonl'
+    claude_turn(tj, 260_000)
+    payj = {'cwd': str(root5), 'session_id': 'j1', 'transcript_path': str(tj)}
+    out = attach.handle(store, 'prompt', dict(payj, prompt='Pull the latest release and check that it runs here'), 'claude')
+    task5 = attach.current_task(store, root5)
+    live = task5['data']['context_live']
+    check('joined at 260k: point 200k (before: 320k, the growth guard), handoff recommended at once',
+          live.get('joined') is True and live['limit'] == 200_000
+          and (task5['data'].get('handoff_state') or {}).get('session') == 'j1', live)
+    check('… and the brief carries the CONTEXT line', bool(out) and 'CONTEXT 260k' in out['hookSpecificOutput']['additionalContext'],
+          (out or {}).get('hookSpecificOutput', {}).get('additionalContext', '')[-300:])
+    root6 = make_repo(base, 'repo6')
+    attach.set_switch(store, 'on', root6)
+    tk = base / 'k9.jsonl'
+    claude_turn(tk, 150_000)
+    payk = {'cwd': str(root6), 'session_id': 'k9', 'transcript_path': str(tk)}
+    attach.handle(store, 'prompt', dict(payk, prompt='Add a dry-run flag to the exporter'), 'claude')
+    claude_turn(tk, 205_000)
+    attach.handle(store, 'prompt', dict(payk, prompt='and print what it would write'), 'claude')
+    task6 = attach.current_task(store, root6)
+    check('joined below the point (150k): the growth guard still applies — point 210k, 205k is no handoff (control)',
+          task6['data']['context_live']['limit'] == 210_000 and not task6['data'].get('handoff_state'), task6['data']['context_live'])
+
     print('⑧ Codex host: measurement from the rollout through the hook')
     root2 = make_repo(base, 'repo2')
     attach.set_switch(store, 'on', root2)
