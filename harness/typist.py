@@ -77,7 +77,9 @@ def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, d
     emptied; /new in a Git repository first asks where the conversation runs (Enter keeps the current worktree);
     the fresh session's hooks run only when its first prompt is submitted, so the carry line is typed once the screen
     shows a fresh conversation, and the takeover is confirmed after it. `expect`: the start of the request the hook
-    just blocked; the pane is typed into only when its screen shows that block (see new_conversation)."""
+    just blocked; the pane is typed into only when its screen shows that block (see new_conversation). None: no
+    request was blocked — the supervisor starts the handoff after reading this session's own pane as stopped with an
+    empty input (supervision.tick), so that reading is the pane's confirmation."""
     if host == 'codex':
         return [('wait', settle), ('codex_new', {'wait': new_wait, 'expect': expect}), ('deliver', deliver_wait),
                 ('adopted', adopt_wait)]
@@ -154,7 +156,7 @@ def new_conversation(terminal, wait, press, screen, sleep=time.sleep, clock=time
     from .wake import CODEX_WHERE, PASTE_GAP, codex_fresh, read_state
     deadline = clock() + wait
     before, answered = None, 0
-    if not shows_block(screen(terminal), expect):
+    if expect is not None and not shows_block(screen(terminal), expect):  # None: the supervisor confirmed the pane
         found = (find or find_pane)(terminal, expect)
         if not found:
             raise RuntimeError('the pane %s does not show the blocked request and no other pane does; nothing was '

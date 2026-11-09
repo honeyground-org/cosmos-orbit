@@ -182,6 +182,114 @@ def verify_supervision(base):
     store.close()
 
 
+def verify_handoff_continues(base):
+    """Past the handoff point with work left, the supervisor starts the fresh context itself; a stop that asks the user
+    still waits for the user. 2026-11-09: a Codex session sat past the point for three hours and a Claude session for
+    25 minutes after the manager had decided "checkpoint, then continue", because the automatic handoff started only
+    from the user's next request. The user: when the work must go on, the handoff is automatic."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from harness import continuity, supervision, typist, wake
+    store = Store(base / 'continue-home')
+    attach.set_switch(store, 'on', global_default=True)
+    supervision.configure(store, 'auto')
+    continuity.set_handoff_mode(store, 'auto')
+    terminal = {'kind': 'tmux', 'cli': 'tmux', 'target': '%98'}
+    empty, typing = '› Ask a follow-up question\n\n', '› and also the chart\n\n'
+    screens = {'now': empty}
+    typed, spawned = [], []
+
+    def runner(argv):
+        typed.append(argv)
+        return 0, screens['now']
+
+    def ready(host, session, state='told', question=None):
+        root = base / ('continue-' + session)
+        root.mkdir()
+        git(root, 'init', '-q')
+        git(root, 'commit', '-q', '--allow-empty', '-m', 'init')
+        tid = attach.create(store, root, 'Build the exporter in two stages and verify both', host, session,
+                            done=['Both stages built'])['id']
+        attach.claim(store, tid, remaining=['second stage'], **({'question': question} if question else {}))
+        continuity.record_checkpoint(store, tid, 'build the second stage')
+        task = store.get(tid)
+        task['data'].setdefault('context_live', {})['session'] = session
+        task['data']['handoff_state'] = {'session': session, 'state': state, 'limit': 206720}
+        store.save(task, task['status'], 'test_handoff')
+        # A pane per session: one pane typed into is throttled for a while (wake.allowed), as it should be.
+        wake.note(store, session, host, 'stop', dict(terminal, target='%' + session))
+        supervision.record_stop(store, store.get(tid), session)
+        return tid
+
+    def tick(tid, session):
+        with patch.object(typist, 'spawn', lambda term, steps, log, home=None, task=None: spawned.append((term, steps, task))):
+            return supervision.tick(store, tid, session, runner)
+
+    resume_typed = lambda: [a for a in typed if supervision.RESUME_LINE in ' '.join(a)]  # noqa: E731
+    tid = ready('codex', 'cx-continue')
+    check('control: the task has work left (the manager would resume it)', supervision.needs_work(store.get(tid)))
+    outcome = tick(tid, 'cx-continue')
+    after = store.get(tid)['data']
+    state, carried = after.get('handoff_state') or {}, after.get('carried_prompt') or {}
+    check('Codex, checkpoint ready, work left, turn over, input empty → the supervisor hands off by itself',
+          outcome == 'handed_off' and state.get('state') == 'auto' and state.get('by') == 'supervisor'
+          and state.get('panel') == '%cx-continue', (outcome, state))
+    check('…it carries a continuation with the checkpoint\'s next step, from this session',
+          carried.get('from_session') == 'cx-continue' and 'build the second stage' in carried.get('text', ''), carried)
+    steps = spawned[-1][1] if spawned else []
+    check('…the typist opens a new Codex conversation in the pane the supervisor read (no blocked request to find)',
+          len(spawned) == 1 and [k for k, _ in steps] == ['wait', 'codex_new', 'deliver', 'adopted']
+          and dict(steps).get('codex_new', {}).get('expect', '') is None, steps)
+    check('…and the old session gets no "continue" line', not resume_typed(), typed)
+    check('…a second look starts nothing more', tick(tid, 'cx-continue') == 'awaiting_handoff' and len(spawned) == 1)
+
+    tid = ready('claude', 'cc-continue')
+    check('Claude Code: the same, with /clear and the carry line',
+          tick(tid, 'cc-continue') == 'handed_off' and len(spawned) == 2
+          and ('text', '/clear') in spawned[-1][1] and ('text', typist.CARRY_LINE) in spawned[-1][1], spawned[-1:])
+    check('…nothing is erased first: the input was read empty, so a ctrl+u could only remove the user\'s typing',
+          len(spawned) == 2 and ('key', 'ctrl+u') not in spawned[-1][1], spawned[-1:])
+
+    count = len(spawned)
+    tid = ready('codex', 'cx-question', question='Which source should be used?')
+    check('control: a stop that asks the user waits for the answer — no handoff, no continuation',
+          tick(tid, 'cx-question') != 'handed_off' and len(spawned) == count and not resume_typed())
+    tid = ready('codex', 'cx-recommended', state='recommended')
+    check('control: no checkpoint yet (recommended) → the Stop asks for one first; the supervisor waits',
+          tick(tid, 'cx-recommended') == 'awaiting_handoff' and len(spawned) == count)
+    tid = ready('codex', 'cx-tell')
+    continuity.set_handoff_mode(store, 'tell')
+    check('control: handoff mode tell → the user is asked, nothing is typed',
+          tick(tid, 'cx-tell') == 'awaiting_handoff' and len(spawned) == count)
+    continuity.set_handoff_mode(store, 'auto')
+    screens['now'] = typing
+    check('control: the user is typing → nothing is started over their input',
+          tick(tid, 'cx-tell') == 'typing' and len(spawned) == count)
+    screens['now'] = empty
+    check('…once the input is empty again, it hands off', tick(tid, 'cx-tell') == 'handed_off' and len(spawned) == count + 1)
+
+    popen = MagicMock()
+    fake = SimpleNamespace(Popen=popen, run=MagicMock(), DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError)
+    with patch.object(supervision, 'subprocess', fake):
+        supervision.ensure(store, store.get(ready('codex', 'cx-ensure')), 'cx-ensure')
+        launched = popen.call_count
+        supervision.ensure(store, store.get(ready('codex', 'cx-ensure-q', question='Which one?')), 'cx-ensure-q')
+    check('the Stop starts a supervisor for a ready handoff with work left (it used to start none)', launched == 1, launched)
+    check('control: none for a stop that asks the user', popen.call_count == 1, popen.call_count)
+
+    task = store.get(ready('codex', 'cx-message', state='checkpointed'))
+    with patch.object(typist, 'detect', return_value=terminal):
+        said = (attach.context_decision(store, task) or {}).get('systemMessage', '')
+    check('the user is told the handoff starts by itself, not asked for a request', 'Work remains' in said
+          and 'nothing to type' in said, said)
+    task = store.get(ready('codex', 'cx-message-q', state='checkpointed', question='Which one?'))
+    with patch.object(typist, 'detect', return_value=terminal):
+        said = (attach.context_decision(store, task) or {}).get('systemMessage', '')
+    check('control: a stop that asks the user keeps the old message (the answer is carried over)',
+          'Work remains' not in said and 'Your next request' in said, said)
+    store.close()
+
+
 def verify_quiet_supervisor(base):
     """The supervisor opens no terminal and leaves when nothing is left to do; Orbit's own model calls never
     become user tasks (user, 2026-11-05: three 'Orbit supervisor' workspaces had appeared, polling for up to
@@ -555,6 +663,7 @@ def main():
     check('claude: foreign hook survives uninstall', data['hooks']['Stop'][0]['hooks'][0]['command'] == 'echo keep' and 'UserPromptSubmit' not in data['hooks'])
     store.close()
     verify_supervision(base)
+    verify_handoff_continues(base)
     verify_manager(base)
     verify_quiet_supervisor(base)
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))

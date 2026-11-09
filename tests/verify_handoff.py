@@ -644,6 +644,15 @@ def main():
     keys, error = codex_run([old_screen, where, fresh], steps=typist.handoff_steps('codex'), adopted=lambda: False,
                             deliver=lambda terminal, wait, line: ('woken', [['typed', line]]))
     check('…no takeover after the carry line: reported as a failure (the user is then told)', error and 'take the task over' in error, error)
+    # 2026-11-09: the supervisor hands off by itself when work remains; no request was blocked, so no block is on screen.
+    stopped = old_screen.replace('■ Blocked by hook · Orbit: handing off\n', '')
+    keys, error = codex_run([stopped, where, fresh], steps=typist.handoff_steps('codex', expect=None), adopted=lambda: True,
+                            deliver=lambda terminal, wait, line: ('woken', [['typed', line]]))
+    check('supervisor handoff (expect None): /new in the pane the supervisor read as stopped, the question, a fresh conversation',
+          keys == ['/new', 'Enter', 'Enter'] and error is None, (keys, error))
+    keys, error = codex_run([stopped], steps=(('codex_new', {'wait': 40.0, 'expect': ''}),))
+    check('…control: a handoff from a prompt still types only where the block is on screen',
+          keys == [] and error and 'nothing was typed' in error, (keys, error))
 
     cx = {'kind': 'tmux', 'cli': 'tmux', 'target': '%CX'}
     typed = []
