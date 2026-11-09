@@ -340,6 +340,23 @@ def window_cap(threshold, window):
     return min(threshold, int(window * WINDOW_SHARE))
 
 
+# A handoff this session already finished does not hold its next one. 'adopted' is the case that stuck (2026-11-04/09):
+# a session handed off, a fresh one took the task, then the first session was used again (resumed in its pane, then
+# compacted) — the ledger kept "this session: adopted" and the point never opened for it again, through 760k.
+REOPENED_STATES = ('compacted', 'adopted')
+
+
+def joined_limit(threshold, live):
+    """The point for an attached session. A session the task joined already past the point hands off at the point:
+    the growth guard is for a session that STARTS near it (a fresh one re-reading files), not for one the task met
+    at 468k (2026-11-09: a new task attached to a running session, its point became 528k). Started sessions and
+    the unattended loop keep the guard."""
+    start = live.get('start')
+    if threshold and live.get('joined') and isinstance(start, (int, float)) and start >= threshold:
+        return threshold
+    return limit_for_session(threshold, start)
+
+
 def limit_for_session(threshold, start):
     """The point at which this session should hand off; 0 when handoff is off."""
     if not threshold:
@@ -428,7 +445,9 @@ def observe(store, task, payload, host, event, source=None):
             kind = 'session_rotated'
             live.clear()
         if session and not live.get('session'):
-            live.update(session=session, started=now(), start=None, peak=0)
+            # joined: this task first met the session already running (a prompt or stop, or the session came back),
+            # not at its start — its first size is where the task came in, not where the session began.
+            live.update(session=session, started=now(), start=None, peak=0, joined=event != 'session-start')
             log.append({'session': session, 'started': live['started'], 'start': None, 'peak': 0, 'reason': source or event})
             del log[:-20]
             kind = kind or 'session_observed'
@@ -452,10 +471,10 @@ def observe(store, task, payload, host, event, source=None):
             kind = kind or ('context_measured' if moved else None)
         capped = window_cap(threshold, live.get('window'))
         live.update(threshold=capped, threshold_source='window' if capped != threshold else threshold_source,
-                    configured_threshold=threshold, limit=limit_for_session(capped, live.get('start')))
+                    configured_threshold=threshold, limit=joined_limit(capped, live))
         state = data.get('handoff_state') or {}
         if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
-                and (state.get('session') != live.get('session') or state.get('state') == 'compacted')
+                and (state.get('session') != live.get('session') or state.get('state') in REOPENED_STATES)
                 and task['status'] not in ('stalled', 'interrupted', 'closed')):
             ready = ready_checkpoint(data, live, state)
             data['handoff_state'] = {'session': live.get('session'), 'state': 'checkpointed' if ready else 'recommended',
