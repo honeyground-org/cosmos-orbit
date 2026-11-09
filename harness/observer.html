@@ -400,7 +400,7 @@ function render(){
  if(!data)return;
  observeSignals();
  const live=data.tasks.filter(t=>!PAST.has(t.status)),past=data.tasks.filter(t=>PAST.has(t.status));
- modules=live.flatMap(t=>t.sessions.map(session=>({task:t,session})));
+ modules=live.flatMap(t=>{const shown=t.sessions.filter(s=>s.peer||!s.name.includes(':')||s.state==='running');return (shown.length?shown:t.sessions).map(session=>({task:t,session}))});
  modulePage=Math.min(modulePage,Math.max(0,Math.ceil(modules.length/8)-1));
  const executing=data.tasks.filter(t=>t.busy||(t.mode==='attached'&&t.status==='working')).length, attention=data.tasks.filter(t=>t.attention).length;
  $('headline').textContent=executing?T('headline.working'):attention?(data.tasks.filter(t=>t.attention).every(t=>t.status==='needs_review')?T('headline.review'):T('headline.attention')):T('headline.none');
@@ -409,7 +409,7 @@ function render(){
  replace('layers',[
  [T('layer.1.title'),T('layer.1.value',{t:live.length,p:data.tasks.filter(t=>t.pause_requested).length})],
  [T('layer.2.title'),T('layer.2.value',{e:executing,w:data.tasks.reduce((n,t)=>n+t.messages.filter(m=>!m.reply).length,0)})],
- [T('layer.3.title'),T('layer.3.value',{h:modules.reduce((n,m)=>n+m.session.handoff_count,0),c:modules.filter(m=>m.session.context_tokens!==null).length})],
+ [T('layer.3.title'),T('layer.3.value',{h:modules.reduce((n,m)=>n+m.session.handoff_count,0),c:modules.filter(m=>m.session.context_tokens!=null||(!m.session.peer&&m.session.name===m.task.provider&&m.task.context_live?.tokens!=null)).length})],
  [T('layer.4.title'),T('layer.4.value',{c:data.tasks.reduce((n,t)=>n+t.checks.filter(c=>c.passed).length,0),a:attention})]
  ].map(([a,b],i)=>{const d=el('div');d.append(el('small',a),el('b',b),el('small',T('layer.'+(i+1)+'.note')));return d}));
  {const fl=data.continuity||{};replace('readouts',[[executing,T('readout.executing')],[attention,T('readout.attention')],[data.tasks.filter(t=>['completed','already_satisfied','verified'].includes(t.status)).length,T('readout.verified')],...(fl.handoff_mode?[[fl.handoff_mode,T('readout.handoff')],[(fl.wake||{}).reachable??0,T('readout.wake')+(((fl.wake||{}).recent||[])[0]?' · '+fl.wake.recent[0].outcome:'')],[(fl.evolve||{}).mode||'local',T('readout.evolve')+((fl.evolve||{}).due?' · '+fl.evolve.due+' due':'')]]:[])].map(([v,k])=>{const d=el('div');d.append(el('b',v),el('span',k));return d}))}

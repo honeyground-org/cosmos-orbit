@@ -191,9 +191,11 @@ def snapshot(store, task_id=None):
                 state = 'pause_pending' if busy and task['status'] != 'paused' else 'paused'
             messages = store.messages(task['id'])
             sessions = []
-            bindings = dict(data.get('sessions', {}))
-            if not any(k == task['provider'] or k.startswith(task['provider'] + ':') for k in bindings):
-                bindings[task['provider']] = None
+            # The executor is always listed, first. A bound reviewer or manager ('claude:verifier') used to count as
+            # the provider's session, so a task the reviewer had seen showed only that idle reviewer — and an
+            # attached task, whose executor is the person's own session and never bound here, read "Reviewer".
+            bindings = {task['provider']: None}
+            bindings.update(data.get('sessions', {}))
             for name in data.get('peers', {}):
                 bindings.setdefault('peer:' + name, None)
             for alias, session_id in bindings.items():
