@@ -1,0 +1,28 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+// Usage: node scripts/verify_observer_motion.cjs [repository-or-installed-package-root] [baseline-html]
+const path=require('path'),cp=require('child_process');
+const repo=path.resolve(__dirname,'..'),root=process.argv[2]||repo,html=fs.readFileSync(root+'/harness/observer.html','utf8');
+const code=html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];new vm.Script(code);
+const gradient={addColorStop(){}};
+const paint=new Proxy({}, {get:(o,k)=>o[k]||(()=>k.startsWith('create')?gradient:undefined),set:(o,k,v)=>(o[k]=v,true)});
+let made=0,removed=0;
+const ctx={paint,performance:{now:()=>1000},devicePixelRatio:1,Math,Map,Set,Date,connected:true,data:{worker_running:false},modules:[],modulePage:0,yaw:0,zoom:1,hitAreas:[],animation:0,hoveredCore:null,pulses:[],layerPulses:[],stateRings:new Map(),machine:{getBoundingClientRect:()=>({width:1050,height:730})},matchMedia:()=>({matches:false}),document:{hidden:false,createElement(){made++;return {attrs:{},setAttribute(k,v){this.attrs[k]=v},getAttribute(k){return this.attrs[k]},remove(){removed++}}}},$:()=>({append(){}}),T:x=>x,cancelAnimationFrame(){},requestAnimationFrame(){return 1},heartbeat:()=>false,sessionKey:(t,s)=>t.id+':'+s.name,sessionRole:s=>s.name,stateColor:()=> '#a9f7ff',operation:()=>({title:'state'}),tempo:()=>2.6,envelope:()=>.5,animatedState:()=>false,vocab:Object.fromEntries(['running','planning','checking','evaluating','completed','waiting','blocked','idle','standby','review'].map(x=>[x,{color:'#a9f7ff',period:3}]))};
+vm.createContext(ctx);vm.runInContext(code.slice(code.indexOf('function coreState'),code.indexOf('// Measured tempo')),ctx);vm.runInContext(code.slice(code.indexOf('function drawMachine'),code.indexOf('function setZoom')),ctx);
+const task={id:'probe',mode:'attached',status:'working',runtime_version:3,busy:false,stage:0,checks:[],goal:'Synthetic UI state'},session={name:'executor',provider:'codex',state:'idle',context_tokens:null,context_limit:null};task.sessions=[session];ctx.modules=[{task,session}];
+ctx.drawMachine(1000);assert.equal(ctx.stateRings.size,2,'Working without measurements gets controller + core CSS rings');const first=ctx.stateRings.get('probe:executor');ctx.drawMachine(9000);assert.strictEqual(ctx.stateRings.get('probe:executor'),first,'Do not restart CSS animation on snapshots');assert.equal(made,2);
+task.status='needs_input';ctx.drawMachine();assert.equal(ctx.stateRings.size,1,'Waiting stops execution orbit');task.status='verified';ctx.drawMachine();assert.equal(ctx.stateRings.size,1,'Completion does not look executing');ctx.connected=false;ctx.drawMachine();assert.equal(ctx.stateRings.size,0,'Offline removes all state orbit animations');
+assert(code.includes('for(const pulse of pulses.filter'), 'Observed event transport remains separate');
+const before=(process.argv[3]?fs.readFileSync(process.argv[3],'utf8'):cp.execFileSync('git',['show','5831de2:harness/observer.html'],{cwd:repo,encoding:'utf8'})).match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
+for(const token of ['fetch(','new EventSource','setInterval(','setTimeout('])assert.equal(code.split(token).length,before.split(token).length,'No added network or measurement timer: '+token);
+console.log('PASS: JS syntax, unmeasured attached work, persistent CSS nodes, waiting/completed/offline transitions, existing real signals, no added network/timers');
+ctx.connected=true;task.status='working';ctx.data.tasks=[task];ctx.dragging=null;ctx.machine.style={};ctx.machine.getBoundingClientRect=()=>({width:1050,height:730,x:0,y:0});
+const elements={};ctx.$=id=>elements[id]||(elements[id]={append(){}});ctx.label=x=>x;
+ctx.drawMachine(2000);const hit=ctx.hitAreas[0];let hover;
+ctx.machine.addEventListener=(name,fn)=>{hover=fn};
+const hoverLine=code.split('\n').find(l=>l.includes("machine.addEventListener('pointermove'")&&l.includes('card.hidden='));
+vm.runInContext(hoverLine,ctx);hover({clientX:hit.x,clientY:hit.y});assert.equal(ctx.hoveredCore,'probe:executor');assert.equal(elements.hoverCard.hidden,false);assert.equal(ctx.machine.style.cursor,'pointer');
+hover({clientX:0,clientY:0});assert.equal(ctx.hoveredCore,null);assert.equal(elements.hoverCard.hidden,true);
+let frames=0;ctx.matchMedia=()=>({matches:true});ctx.requestAnimationFrame=()=>{frames++;};ctx.drawMachine(3000);assert.equal(frames,0,'Reduced motion does not schedule canvas animation');
+assert(html.includes('@media(prefers-reduced-motion:reduce){.state-orbit i{animation:none}}'));
+assert(html.includes('dialog[open],#hoverCard:not([hidden]){animation:none}'));
+console.log('PASS: actual pointer handler highlights/unhighlights core and hover card; reduced-motion canvas has zero scheduled frames; CSS rings and panels disable animation.');
