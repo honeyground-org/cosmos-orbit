@@ -436,6 +436,38 @@ def verify_manager(base):
           not (out and out.get('decision') == 'block') and state.get('reason') == 'waiting_for_user', out or state)
     check('manager: …and no supervisor (no terminal opened for nothing)', launched == 0, launched)
 
+    # 2026-11-10 05:37Z, a real Claude Code session: waiting on "top up Bright Data", the user asked where the money
+    # went; the session answered and stopped, and the Stop was sent back: "you stopped — stopped before the work was
+    # finished … Continue with the unfinished items" (the user: Orbit triggers a hook on a session that was waiting).
+    def ask(text):
+        with patch.object(attach, '_pane', return_value={'kind': 'tmux', 'cli': 'tmux', 'target': '%42'}):
+            reply = attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': text}, 'claude')
+        return json.dumps(reply or {}, ensure_ascii=False)
+    brief = ask('Why did the second stage take so long?')
+    asked = store.get(tid)
+    check('setup: while the task waits, the user asks a question (classified a question)',
+          asked['data']['prompts'][-1]['kind'] == 'question', asked['data']['prompts'][-1])
+    check('the brief of that turn says the question still waits and the turn may stop after answering',
+          'who asked a question meanwhile' in brief and 'Ascending or descending?' in brief, brief[-600:])
+    out, state, launched = stop('It sorted 2 GB on disk; that is why it took so long.')
+    waiting = store.get(tid)
+    check('manager: the turn that only answered the question may stop — not sent back, the task waits again on the same '
+          'question (was: blocked, "stopped before the work was finished")',
+          not (out and out.get('decision') == 'block') and state.get('reason') == 'waiting_for_user'
+          and waiting['status'] == 'needs_input' and waiting['data'].get('reason') == 'Ascending or descending?',
+          (out, state.get('reason'), waiting['status'], waiting['data'].get('reason')))
+    check('manager: …and no supervisor', launched == 0, launched)
+    ask('Could you re-run the first stage while I decide?')
+    attach.record_evidence(store, tid, 'D1', note='stage one re-ran on the sample file')
+    out, state, launched = stop('Re-ran the first stage.')
+    worked = store.get(tid)
+    check('control: a question after which the session recorded work is managed as before (not set back to waiting)',
+          worked['status'] == 'working' and state.get('reason') != 'waiting_for_user' and not worked['data'].get('asked_while_waiting'),
+          (worked['status'], state.get('reason')))
+    attach.claim(store, tid, remaining=['which sort order'], question='Ascending or descending?')
+    stop('I asked the user which order to use.')
+    check('setup: waiting on the question again', store.get(tid)['status'] == 'needs_input')
+
     attach.handle(store, 'prompt', {'cwd': str(root), 'session_id': session, 'prompt': 'Ascending order, please.'}, 'claude')
     answered = store.get(tid)
     check('setup: the answer returns the task to working and leaves the old question behind (the 15:58-16:13 state)',

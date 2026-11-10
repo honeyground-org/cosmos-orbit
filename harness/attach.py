@@ -812,8 +812,17 @@ def _apply_prompt(store, task, text, session=None):
     if kind in ('requirement', 'unsure') or task['status'] == 'needs_input':
         data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
                                                  'at': now(), 'source': 'prompt', 'kind': kind})
+    if kind != 'question':
+        data.pop('asked_while_waiting', None)            # an answer, an order or a go-ahead settles what was asked
     status = task['status']
     if task['status'] == 'needs_input':
+        if kind == 'question':
+            # The user asked something while the task waited for their answer. The task works again (a question can
+            # carry the answer), but the turn that only answers it ends waiting on the same question (restore_waiting).
+            # Observed 2026-11-10 05:37Z: waiting on "top up Bright Data", the user asked where the money went; the
+            # session answered and stopped, and the Stop was sent back as "stopped before the work was finished".
+            data['asked_while_waiting'] = {'at': now(), 'reason_code': data.get('reason_code') or 'question',
+                                           'question': data.get('reason') or (data.get('executor_result') or {}).get('question') or ''}
         data.update(reason='', reason_code='', verification_pending=False)
         data['development']['phase'] = 'ready'
         data['resumes'].append({'turn': data.get('turns', 0), 'because': 'feedback', 'sent': [text[:600]]})
@@ -828,6 +837,31 @@ def _apply_prompt(store, task, text, session=None):
         store.save(task, status, 'feedback_applied', {'source': 'prompt', 'chars': len(text)})
     else:
         store.save(task, status, 'prompt_recorded', {'chars': len(text), 'session': session, 'kind': kind})
+
+
+def restore_waiting(store, task):
+    """At a Stop: a turn that only answered the question the user asked while the task waited for them returns the
+    task to waiting on the question it had. Work recorded since (evidence, a claim, a revision of the items, a changed
+    request) means the question became work: the task stays managed as before. Returns True when restored."""
+    if not task['data'].get('asked_while_waiting'):
+        return False
+    from .simple_loop import stop_for_input
+    with store.lock('task:' + task['id']):
+        task = store.get(task['id'])
+        data = task['data']
+        asked = data.pop('asked_while_waiting', None)
+        if not asked:
+            return False
+        since = asked.get('at') or ''
+        worked = (task['status'] != 'working' or data.get('requirements_pending') or data.get('verification_pending')
+                  or (data.get('claimed_at') or '') > since or ((data.get('done_fixed') or {}).get('at') or '') > since
+                  or any((entry.get('at') or '') > since
+                         for entries in (data.get('done_evidence') or {}).values() for entry in entries))
+        if worked or not asked.get('question'):
+            store.save(task, task['status'], 'waiting_settled', {'by': 'work' if worked else 'no_question', 'layer': 'control'})
+            return False
+        stop_for_input(store, task, asked['question'], asked.get('reason_code') or 'question')
+        return True
 
 
 def drain_inbox(store, task):
@@ -1318,6 +1352,10 @@ def brief_text(store, task, event='prompt', for_digest=False):
         lines.append(verdict_line)
     if task['status'] == 'needs_input' and data.get('reason'):
         lines.append('WAITING FOR THE USER: ' + _one_line(data['reason'], 400))
+    elif (data.get('asked_while_waiting') or {}).get('question'):
+        lines.append('WAITING FOR THE USER, who asked a question meanwhile — answer it; unless their words settle this or '
+                     'change the work, stop after answering and the task waits again: '
+                     + _one_line(data['asked_while_waiting']['question'], 400))
     elif data.get('reason_code') == 'checks_failed':
         lines.append('FIXED CHECK FAILED: ' + _one_line(data.get('reason'), 600))
     elif data.get('reason_code') == 'unmet':
@@ -1788,7 +1826,8 @@ def _stop_reply(store, task, session, payload):
     # Each step on its own: a review holds the task lock for minutes, and when the Stop's record failed on it the
     # supervisor was never started either (2026-11-05 01:50, Codex: the session then waited, told nothing).
     # The supervisor starts after the reply is decided (_handle): see there.
-    for name, step in (('stop not recorded', lambda: supervision.record_stop(store, task, session)),
+    for name, step in (('waiting not restored', lambda: restore_waiting(store, store.get(task['id']))),
+                       ('stop not recorded', lambda: supervision.record_stop(store, task, session)),
                        ('stop not diagnosed', lambda: manager.observe(store, store.get(task['id']), session, said))):
         try:
             step()
