@@ -92,9 +92,9 @@ def assess(answer, done, closed_ids=()):
 class ChangedDuringReview(ValueError):
     """The review finished, but what it reviewed moved under it. `verdict` keeps what the reviewer found."""
 
-    def __init__(self, why, verdict=None):
+    def __init__(self, why, verdict=None, excuse=()):
         super().__init__('Task or evidence changed during verification (%s); rerun fixed checks' % why)
-        self.why, self.verdict = why, verdict
+        self.why, self.verdict, self.excuse = why, verdict, sorted(set(excuse or ()))
 
 
 TRANSCRIPT_KEY = 'transcript:'          # + session: the transcript or rollout path its hooks last reported
@@ -124,6 +124,15 @@ def tool_calls_since(path, since):
 
 CODEX_TOOL_OUTPUTS = ('function_call_output', 'custom_tool_call_output')
 RUN_SLACK = 1.0      # seconds around a call's run in which a file it could write counts as its own
+# Claude Code tells a session when a background job it started ends: a <task-notification> naming the call
+# (<tool-use-id>) and how it ended. It is a user message when the session is idle and a queued_command attachment while
+# a turn runs (both measured 2026-11-10 in this machine's transcripts: statuses completed, failed, killed, stopped). A
+# status not listed here is taken as still running (the safe side: the job counts longer).
+NOTIFICATION = re.compile(r'<task-notification>(.*?)</task-notification>', re.S)
+NOTIFIED_CALL = re.compile(r'<tool-use-id>\s*([^<\s]+)\s*</tool-use-id>')
+NOTIFIED_STATUS = re.compile(r'<status>\s*([^<]*?)\s*</status>')
+JOB_ENDED = frozenset(('completed', 'failed', 'killed', 'stopped'))
+EXCUSED_KEY = 'background_excused'   # task data: background jobs already held to what they changed once
 
 
 def _output_text(value):
@@ -132,11 +141,34 @@ def _output_text(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
+def _notified(event):
+    """(call id, status) of each background job end a Claude Code event reports."""
+    texts = []
+    if event.get('type') == 'user':
+        content = (event.get('message') or {}).get('content') if isinstance(event.get('message'), dict) else None
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [str(part.get('text') or '') for part in content if isinstance(part, dict) and part.get('type') == 'text']
+    elif event.get('type') == 'attachment' and isinstance(event.get('attachment'), dict):
+        attachment = event['attachment']
+        if attachment.get('type') == 'queued_command':
+            texts = [str(attachment.get('prompt') or '')]
+    found = []
+    for text in texts:
+        for block in NOTIFICATION.findall(text):
+            call, status = NOTIFIED_CALL.search(block), NOTIFIED_STATUS.search(block)
+            if call:
+                found.append((call.group(1), status.group(1).lower() if status else ''))
+    return found
+
+
 def _tool_runs(path, since):
     """(runs, start): every tool call in a session's transcript (Claude Code) or rollout (Codex) tail, each a dict of
-    its start, its end (its result's time; None while it runs), its input as text, the folder it ran in, whether it
-    may write and whether it leaves a process running; start is `since` to the millisecond. None when that cannot be
-    told (no file, no timestamps, or the readable tail starts after `since`)."""
+    its id, its start, its end (its result's time; None while it runs), when a background job it started ended (from
+    Claude Code's completion notice; None while it runs or when nothing tells), its input as text, the folder it ran
+    in, whether it may write and whether it leaves a process running; start is `since` to the millisecond. None when
+    that cannot be told (no file, no timestamps, or the readable tail starts after `since`)."""
     from .attribution import call_effect
     from .continuity import tail_lines
     start = _stamp(since)
@@ -162,7 +194,8 @@ def _tool_runs(path, since):
         payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
         content = (event.get('message') or {}).get('content') if isinstance(event.get('message'), dict) else None
         if event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_ITEMS:
-            run = {'start': at, 'end': None, 'provider': 'codex', 'call': payload, 'cwd': None, 'output': ''}
+            run = {'id': payload.get('call_id'), 'start': at, 'end': None, 'finished': None, 'provider': 'codex',
+                   'call': payload, 'cwd': None, 'output': ''}
             runs.append(run)
             by_id[payload.get('call_id') or id(run)] = run
         elif event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_OUTPUTS:
@@ -172,13 +205,18 @@ def _tool_runs(path, since):
         elif event.get('type') == 'assistant' and isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and part.get('type') == 'tool_use':
-                    run = {'start': at, 'end': None, 'provider': 'claude', 'call': part, 'cwd': event.get('cwd'), 'output': ''}
+                    run = {'id': part.get('id'), 'start': at, 'end': None, 'finished': None, 'provider': 'claude',
+                           'call': part, 'cwd': event.get('cwd'), 'output': ''}
                     runs.append(run)
                     by_id[part.get('id') or id(run)] = run
-        elif event.get('type') == 'user' and isinstance(content, list):
-            for part in content:
+        elif event.get('type') in ('user', 'attachment'):
+            for part in content if event.get('type') == 'user' and isinstance(content, list) else ():
                 if isinstance(part, dict) and part.get('type') == 'tool_result' and part.get('tool_use_id') in by_id:
                     by_id[part['tool_use_id']]['end'] = at
+            for call, status in _notified(event):
+                if call in by_id and status in JOB_ENDED:
+                    # The latest notice: a subagent resumed by a message notifies again when it stops again.
+                    by_id[call]['finished'] = at
     if earliest is None or earliest > start:
         return None                                      # the tail does not reach back to the review's start
     for run in runs:
@@ -194,7 +232,7 @@ def _names(text, path):
     return re.search(r'(?<![\w.-])' + re.escape(path) + r'(?![\w.-])', text) is not None
 
 
-def paths_moved_by(transcript, since, moved, root):
+def paths_moved_by(transcript, since, moved, root, excused=(), blamed=None):
     """Of `moved` (paths in the workspace `root` that changed since `since`), those a session's own tool calls moved.
     None when that cannot be told.
 
@@ -207,9 +245,15 @@ def paths_moved_by(transcript, since, moved, root):
       · what changed while it ran (the file's change time within its run): a `make` at the root writes output it
         never names (2026-11-10: left open while only names counted);
       · anything deleted (a deleted file has no change time; the safe side).
-    A call still running counts until now; so does a process left running by a call made in the window (a background
-    job). One left running from before the window counts by its names only: a dev server started an hour ago would
-    otherwise claim every file another session writes, and send the task back to claim again and again."""
+    A call still running counts until now; so does a process left running (a background job): until Claude Code's
+    notice that it ended, else until now (Codex sends none).
+
+    A job started before the window and still running in it (left running before the claim) is held to what it
+    changed once: the first review in which it alone accounts for a moved path is its own change, and its call id goes
+    into `blamed`. A job in `excused` (blamed by an earlier review) counts only for a path its command names exactly:
+    a dev server started an hour ago would otherwise claim every file another session writes, and send the task back
+    to claim again and again (2026-11-10: such a job was left out entirely, so a build left running before the claim
+    could change files during the review unseen)."""
     found = _tool_runs(transcript, since)
     if found is None:
         return None
@@ -217,14 +261,19 @@ def paths_moved_by(transcript, since, moved, root):
     import time
     begin, current = start.timestamp(), time.time()
     root = os.path.realpath(str(root))
+    excused = set(excused or ())
     writers = []
     for run in runs:
         if not run['writes']:
             continue
         opened = run['start'].timestamp()
         closed = run['end'].timestamp() if run['end'] else current
-        if run['background'] and opened >= begin - RUN_SLACK:
-            closed = current
+        lingering = False
+        if run['background']:
+            closed = run['finished'].timestamp() if run.get('finished') else current
+            lingering = opened < begin - RUN_SLACK
+            if lingering and not run['id']:
+                continue                                 # it could never be excused: blamed in every review
         if closed < begin - RUN_SLACK:
             continue                                     # it ended before the window began
         folder = None
@@ -232,7 +281,8 @@ def paths_moved_by(transcript, since, moved, root):
             relative = os.path.relpath(os.path.realpath(run['cwd']), root)
             if relative != '.' and not relative.startswith('..'):
                 folder = relative.split(os.sep, 1)[0]
-        writers.append((run, opened, closed, folder))
+        kind = 'named' if lingering and run['id'] in excused else 'lingering' if lingering else 'window'
+        writers.append((run, opened, closed, folder, kind))
     named = set()
     for path in moved:
         clean = path.rstrip('/')
@@ -241,15 +291,35 @@ def paths_moved_by(transcript, since, moved, root):
             changed = os.lstat(os.path.join(root, clean)).st_ctime
         except OSError:
             changed = None                               # deleted
-        for run, opened, closed, folder in writers:
-            if (folder == top or _names(run['text'], clean) or _names(run['text'], top) or changed is None
-                    or opened - RUN_SLACK <= changed <= closed + RUN_SLACK):
+        alone = []                                       # jobs left running before the window that reach this path
+        for run, opened, closed, folder, kind in writers:
+            if kind == 'named':
+                reached = _names(run['text'], clean)
+            else:
+                reached = (folder == top or _names(run['text'], clean) or _names(run['text'], top) or changed is None
+                           or opened - RUN_SLACK <= changed <= closed + RUN_SLACK)
+            if reached and kind == 'lingering':
+                alone.append(run['id'])
+            elif reached:
                 named.add(path)
                 break
+        else:
+            if alone:
+                named.add(path)
+                if blamed is not None:
+                    blamed.update(call for call in alone if call)
     return named
 
 
-def executor_moved(store, task, since, moved=None):
+def excuse_background(data, calls):
+    """Record in task data the background jobs a review already held to what they changed (paths_moved_by blamed)."""
+    known = list(data.get(EXCUSED_KEY) or [])
+    added = [call for call in sorted(set(calls or ())) if call and call not in known]
+    if added:
+        data[EXCUSED_KEY] = (known + added)[-50:]
+
+
+def executor_moved(store, task, since, moved=None, blamed=None):
     """Whether this task's own sessions worked since `since` (the review's start). A review holds the task lock, so
     the records that still get written while it runs are: a hook (a prompt or a Stop means a turn ran), a turn end
     recorded outside the lock, a message waiting in its inbox. A hook alone is not work when the session's
@@ -258,7 +328,8 @@ def executor_moved(store, task, since, moved=None):
 
     `moved`: the paths that changed since `since`, when known. Then a session moved them only if one of its tool
     calls that may write reaches one of them (paths_moved_by), with or without a hook yet; without a readable
-    transcript any hook still counts."""
+    transcript any hook still counts. `blamed` receives the background jobs left running before `since` that alone
+    moved a path (paths_moved_by); the caller records them (excuse_background) so the next review holds them to names."""
     if not since:
         return True                                      # unknown: assume it did
     sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
@@ -270,7 +341,8 @@ def executor_moved(store, task, since, moved=None):
             if hooked and tool_calls_since(transcript, since) != 0:
                 return True
             continue
-        named = paths_moved_by(transcript, since, moved, task['workspace'])
+        named = paths_moved_by(transcript, since, moved, task['workspace'],
+                               task['data'].get(EXCUSED_KEY) or (), blamed)
         if named or (named is None and hooked):
             return True
     return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
@@ -299,8 +371,9 @@ def evaluate(engine, task, lease_fds=()):
         if not attached or not dev.get('verified_tree') or checked is None:
             raise ValueError('Verifier requires all current fixed checks to pass')
         moved_before = moved_entries(checked, entries)
-        if executor_moved(store, task, dev.get('verified_at'), moved_before):
-            raise ChangedDuringReview('own_files_before')
+        blamed = set()
+        if executor_moved(store, task, dev.get('verified_at'), moved_before, blamed):
+            raise ChangedDuringReview('own_files_before', excuse=blamed)   # no save here: the caller records it
     done = copy.deepcopy(requirements.review_items(data) if attached else data.get('done', []))
     binding = {'goal': data.get('goal', task['prompt']),
                'context': data.get('context_prompts', []),
@@ -428,7 +501,9 @@ def evaluate(engine, task, lease_fds=()):
     # Who moved them is told by the paths that moved (executor_moved with `moved`), not by any tool call at all.
     if moved_before:
         verdict['changed_before_review'] = {'by': 'other_sessions', 'paths': moved_before[:10], 'count': len(moved_before)}
-    own = why == 'files' and executor_moved(store, task, started, moved)
+    blamed = set()
+    own = why == 'files' and executor_moved(store, task, started, moved, blamed)
+    excuse_background(task['data'], blamed)              # saved with the verdict below, superseded or not
     if why == 'files' and own and outcome == 'verified':
         why = 'own_files'
     elif why == 'files':
@@ -440,7 +515,7 @@ def evaluate(engine, task, lease_fds=()):
         verdict['superseded'] = why                      # kept in the ledger: what the reviewer found still counts
         task['data'].setdefault('verdicts', []).append(verdict)
         store.save(task, 'verifying', 'verdict_superseded', dict(verdict, layer='control'))
-        raise ChangedDuringReview(why, verdict)
+        raise ChangedDuringReview(why, verdict, excuse=blamed)
     if attached:
         # Applied in the same save as the verdict, under the same lock: a crash leaves both or neither. A review is
         # clean when nothing it judged moved under it: no requirement waiting in the inbox, no change by this task's

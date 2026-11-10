@@ -38,7 +38,16 @@ READ_TOOLS = frozenset('''
     ScheduleWakeup Monitor TaskStop TaskOutput BashOutput KillShell KillBash ExitPlanMode EnterPlanMode TaskList TaskGet
     TaskCreate TaskUpdate sleep wait update_plan view_image clock__curr_time clock__sleep web__run web_search
 '''.split())
-BACKGROUND_TOOLS = frozenset(('Agent', 'Task'))  # a subagent works on after the call returns
+BACKGROUND_TOOLS = frozenset(('Agent', 'Task', 'Workflow'))  # subagents work on after the call returns
+# An MCP tool (mcp__server__tool, from Claude Code; tools.mcp__server__tool( from a Codex exec script) is told by the
+# words of its last part. A read verb and no write verb: it reads. Anything else may write, unknown words included
+# (2026-11-10: recall, search_graph and get_code_snippet calls counted as writes, so a session that looked something
+# up while another session wrote a file was held to that file).
+MCP_READ_VERBS = frozenset('''
+    recall search get list read query describe status view find fetch trace neighbors timeline history suggest
+    capabilities
+'''.split())
+MCP_WRITE_VERBS = frozenset('remember create update delete write apply send upload screenshot index reindex'.split())
 HEREDOC = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][\w.-]*)\1')
 BACKGROUND = re.compile(r'(?<![&<>|])&(?![&>])')
 CODEX_RUNNING = re.compile(r'session[_ ]id\W{0,4}\d', re.I)  # exec_command returned while its process still runs
@@ -197,6 +206,19 @@ def _program_writes(program, args):
     return False
 
 
+def tool_writes(name):
+    """Whether a tool that is not a shell may change files: a known reading tool or an MCP tool whose name reads
+    (MCP_READ_VERBS without MCP_WRITE_VERBS) does not; every other tool may."""
+    name = str(name or '')
+    if name in READ_TOOLS:
+        return False
+    if name.startswith('mcp__'):
+        last = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', name.rsplit('__', 1)[-1]).lower()
+        words = set(re.findall(r'[a-z]+', last))
+        return bool(words & MCP_WRITE_VERBS) or not words & MCP_READ_VERBS
+    return True
+
+
 def _arguments(value):
     if isinstance(value, dict):
         return value
@@ -246,7 +268,7 @@ def _codex_script(script, output):
         if command is not None:
             command_writes, command_background = shell_effect(command)
             writes, background = writes or command_writes, background or command_background
-    writes = writes or any(name not in READ_TOOLS and name != 'exec_command' for name in called)
+    writes = writes or any(tool_writes(name) for name in called if name != 'exec_command')
     if 'exec_command' in called and CODEX_RUNNING.search(output or ''):
         background = True
     return writes, background, workdir
@@ -263,7 +285,7 @@ def call_effect(provider, call, output=''):
             return writes, background or bool(data.get('run_in_background')), None
         if name in BACKGROUND_TOOLS:
             return True, True, None
-        return name not in READ_TOOLS, False, None
+        return tool_writes(name), False, None
     kind, name = call.get('type'), call.get('name')
     if kind == 'local_shell_call':
         action = call.get('action') if isinstance(call.get('action'), dict) else {}
@@ -278,4 +300,4 @@ def call_effect(provider, call, output=''):
     if name == 'exec_command':
         writes, background = _argv_effect(data.get('cmd'))
         return writes, background or bool(CODEX_RUNNING.search(output or '')), data.get('workdir')
-    return name not in READ_TOOLS, False, None
+    return tool_writes(name), False, None
