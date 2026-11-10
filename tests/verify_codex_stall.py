@@ -527,11 +527,25 @@ def run(base, store, engine):
           (task['status'], task['data'].get('reason_code'), last_of(task).get('superseded'), last_of(task).get('changed_during_review')))
     def play(log, steps):
         """Write a session's transcript and the shared folder in this order. A step: ('call', id, command[, cwd[,
-        background]]) and ('result', id) for Claude Code · ('codex', id, exec script) and ('codex_out', id, text) for
+        background]]) and ('result', id) for Claude Code · ('tool', id, name) another Claude Code tool · ('notify', id,
+        status) Claude Code's notice that a background job ended, as a user message (the session idle) · ('queued', id,
+        status) the same notice queued while a turn runs · ('codex', id, exec script) and ('codex_out', id, text) for
         Codex · ('write', fn) · ('pause', seconds)."""
         import time
         for step in steps:
-            if step[0] == 'call':
+            if step[0] in ('notify', 'queued'):
+                notice = ('<task-notification>\n<task-id>b%s</task-id>\n<tool-use-id>%s</tool-use-id>\n<output-file>/tmp/'
+                          'b%s.output</output-file>\n<status>%s</status>\n<summary>Background command "a step" %s (exit '
+                          'code 0)</summary>\n</task-notification>' % (step[1], step[1], step[1], step[2], step[2]))
+                if step[0] == 'notify':
+                    append(log, {'timestamp': stamp(), 'type': 'user', 'message': {'role': 'user', 'content': notice}})
+                else:
+                    append(log, {'timestamp': stamp(), 'type': 'attachment', 'attachment': {
+                        'type': 'queued_command', 'prompt': notice, 'commandMode': 'task-notification'}})
+            elif step[0] == 'tool':
+                append(log, {'timestamp': stamp(), 'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': step[1], 'name': step[2], 'input': {'query': 'export'}}]}})
+            elif step[0] == 'call':
                 data = {'command': step[2], 'description': 'a step'}
                 if len(step) > 4 and step[4]:
                     data['run_in_background'] = True
@@ -666,10 +680,93 @@ def run(base, store, engine):
                     claim_line="cosmos-orbit claim S-R8 --summary 'ran `make` in dist-r8/ and $(make) twice'")
     check('control: the claiming call itself still runs during the review; its summary names `make` and dist-r8/ in '
           'quotes; another session writes there: verified (the summary is text, not a command)', others(task), seen(task))
+    def again(session, tid_, steps):
+        """The same session claims again after a review sent it back; `steps` happen during the next review."""
+        log = base / ('%s.jsonl' % session)
+        if store.get(tid_)['status'] != 'working':
+            return store.get(tid_)                       # nothing sent it back: there is no second claim
+        append(log, claude_item('tool', 'cosmos-orbit claim %s' % session))
+        attach.claim(store, tid_, summary='export done')
+
+        def during():
+            play(log, steps)
+            stop_hook(session, log)
+        return review(engine, tid_, verdict('met'), during=during)
+
     task = timeline('S-R9', 'Build the Julia export and make it robust', [('write', other('notes-r9.md'))],
                     before=[('call', 'r9', 'npm run dev', root, True), ('result', 'r9'), ('pause', gap)])
-    check('control: a dev server the session left running from before the claim does not claim every file another '
-          'session writes (else the task is sent back to claim again and again): verified', others(task), seen(task))
+    check('a job the session left running from before the claim (no notice that it ended) changes a file during the '
+          'review: held to it once, the pass is superseded (was: left out entirely, its changes never reviewed)',
+          own(task), seen(task))
+    check('…and the job is recorded as already held to what it changed once',
+          task['data'].get('background_excused') == ['r9'], task['data'].get('background_excused'))
+    task = again('S-R9', task['id'], [('write', other('notes-r9b.md'))])
+    check('…the session claims again, the same job is still running and another file changes: verified, judged by '
+          'names only (else the task is sent back to claim again and again)', others(task), seen(task))
+    task = timeline('S-R15', 'Build the Pascal export and make it robust', [('write', other('notes-r15.md'))],
+                    before=[('call', 'r15', 'npm run watch -- --log watch-r15.log', root, True), ('result', 'r15'),
+                            ('pause', gap)])
+    task = again('S-R15', task['id'], [('write', other('watch-r15.log'))])
+    check('a job already held once still counts for a path its command names exactly (watch-r15.log): its own change',
+          own(task), seen(task))
+
+    print('⑦ when a background job ended is read from Claude Code\'s notice; MCP tools are told apart by their names')
+    task = timeline('S-R10', 'Build the Ada export and make it robust',
+                    [('call', 'r10', 'npm run build', root, True), ('result', 'r10'), ('notify', 'r10', 'completed'),
+                     ('pause', gap), ('write', other('notes-r10.md'))])
+    check('a background build started during the review ended (its notice came) before another session wrote a file: '
+          'verified (was: counted as running until now, its own change)', others(task), seen(task))
+    task = timeline('S-R11', 'Build the COBOL export and make it robust',
+                    [('call', 'r11', 'npm run build', root, True), ('result', 'r11'), ('queued', 'r11', 'failed'),
+                     ('pause', gap), ('write', other('notes-r11.md'))])
+    check('…the same when the notice was queued while a turn ran (an attachment, status failed)', others(task), seen(task))
+    task = timeline('S-R12', 'Build the Prolog export and make it robust', [('write', other('notes-r12.md'))],
+                    before=[('call', 'r12', 'npm run build', root, True), ('result', 'r12'),
+                            ('notify', 'r12', 'completed'), ('pause', gap)])
+    check('control: a job left running before the claim had ended (its notice came) before the review: verified at the '
+          'first review', others(task), seen(task))
+    task = timeline('S-R16', 'Build the Smalltalk export and make it robust',
+                    [('call', 'r16', 'npm run build', root, True), ('result', 'r16'), ('notify', 'r16', 'running'),
+                     ('pause', gap), ('write', dist('dist-r16'))])
+    check('control: a notice with a status that is not an end leaves the job running: what changed is its own',
+          own(task), seen(task))
+    task = timeline('S-R13', 'Build the Groovy export and make it robust',
+                    [('tool', 'r13', 'mcp__brain__recall'), ('write', other('notes-r13.md')), ('result', 'r13')])
+    check('the session looks something up with an MCP tool (mcp__brain__recall) while another session writes a file: '
+          'verified (was: any MCP tool may write, its own change)', others(task), seen(task))
+    task = timeline('S-R14', 'Build the Perl export and make it robust',
+                    [('tool', 'r14', 'mcp__brain__remember'), ('write', other('notes-r14.md')), ('result', 'r14')])
+    check('control: an MCP tool that writes (mcp__brain__remember) runs while a file changes: its own change',
+          own(task), seen(task))
+    mcp = [('claude', {'name': 'mcp__brain__recall'}, False),
+           ('claude', {'name': 'mcp__codebase-memory-mcp__search_graph'}, False),
+           ('claude', {'name': 'mcp__codebase-memory-mcp__get_code_snippet'}, False),
+           ('claude', {'name': 'mcp__claude_ai_Slack__slack_read_channel'}, False),
+           ('claude', {'name': 'mcp__claude_ai_Notion__notion-search'}, False),
+           ('claude', {'name': 'mcp__stylmatch__list_feature_requests'}, False),
+           ('claude', {'name': 'mcp__brain__brain_capabilities'}, False),
+           ('claude', {'name': 'mcp__example__getUserStatus'}, False),
+           ('claude', {'name': 'mcp__brain__remember'}, True), ('claude', {'name': 'mcp__brain__reindex'}, True),
+           ('claude', {'name': 'mcp__claude_ai_Slack__slack_send_message'}, True),
+           ('claude', {'name': 'mcp__playwright__browser_take_screenshot'}, True),
+           ('claude', {'name': 'mcp__codebase-memory-mcp__index_repository'}, True),
+           ('claude', {'name': 'mcp__codex_apps__slack_slack_get_file_upload_url'}, True),
+           ('claude', {'name': 'mcp__claude_ai_Figma__authenticate'}, True),
+           ('claude', {'name': 'mcp__playwright__browser_click'}, True),
+           ('codex', {'type': 'custom_tool_call', 'name': 'exec',
+                      'input': 'text(await tools.mcp__brain__recall({query:"export"}));'}, False),
+           ('codex', {'type': 'custom_tool_call', 'name': 'exec',
+                      'input': 'text(await tools.mcp__codebase_memory_mcp__search_graph({name_pattern:"x"}));'}, False),
+           ('codex', {'type': 'custom_tool_call', 'name': 'exec', 'input': 'text(await tools.mcp__brain__reindex({}));'}, True),
+           ('codex', {'type': 'function_call', 'name': 'mcp__brain__recall', 'arguments': '{}'}, False)]
+    from harness import attribution
+    wrong = [(call.get('name'), call.get('input'), want) for provider, call, want in mcp
+             if attribution.call_effect(provider, dict(call, input=call.get('input', {})))[0] != want]
+    check('the MCP classifier: a read verb and no write verb reads, a write verb or an unknown name may write '
+          '(%d tools, Claude Code and Codex)' % len(mcp), not wrong, wrong)
+    check('a Workflow works on after its call returns, like a subagent',
+          attribution.call_effect('claude', {'name': 'Workflow', 'input': {}})[:2] == (True, True),
+          attribution.call_effect('claude', {'name': 'Workflow', 'input': {}}))
 
     own_log = base / 'S-P3.jsonl'
     append(own_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-P3'}})
@@ -682,6 +779,27 @@ def run(base, store, engine):
           "reviewed, sent back to claim again (was: reviewed as another session's change)",
           task['status'] == 'working' and task['data'].get('reason_code') == 'changed_during_review'
           and not task['data'].get('verdicts'), (task['status'], task['data'].get('reason_code'), len(task['data'].get('verdicts') or [])))
+
+    lingering_log = base / 'S-P4.jsonl'
+    append(lingering_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-P4'}})
+    play(lingering_log, [('call', 'p4', 'npm run dev', root, True), ('result', 'p4'), ('pause', gap)])
+    append(lingering_log, claude_item('tool', 'cosmos-orbit claim S-P4'))
+    tid = claimed(store, root, 'S-P4', 'Build the Tcl export and make it robust')
+    store.preference(verifier.TRANSCRIPT_KEY + 'S-P4', str(lingering_log))
+    with patch.object(development, 'check', side_effect=then(other('notes-p4.md'))):
+        task = review(engine, tid, verdict('met'))
+    check('before the review: a job left running from before the claim, a file changes after the checks: sent back once '
+          'and the job recorded (the caller reloads the task, so the record travels with the error)',
+          task['data'].get('reason_code') == 'changed_during_review' and task['data'].get('background_excused') == ['p4'],
+          (task['status'], task['data'].get('reason_code'), task['data'].get('background_excused')))
+    if task['status'] == 'working':                      # else nothing sent it back: there is no second claim
+        append(lingering_log, claude_item('tool', 'cosmos-orbit claim S-P4'))
+        attach.claim(store, tid, summary='export done')
+        with patch.object(development, 'check', side_effect=then(other('notes-p4b.md'))):
+            task = review(engine, tid, verdict('met'))
+    check('…claimed again, the same job still running, another file changes after the checks: reviewed and verified',
+          task['status'] == 'verified' and (last_of(task).get('changed_before_review') or {}).get('by') == 'other_sessions',
+          (task['status'], task['data'].get('reason_code'), last_of(task).get('changed_before_review')))
 
 
 if __name__ == '__main__':

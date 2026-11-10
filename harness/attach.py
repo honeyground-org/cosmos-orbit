@@ -1160,6 +1160,8 @@ def run_verification(engine, task_id, checks_only=False):
                 data.pop('checks_done_for', None)
                 why = getattr(error, 'why', None)
                 found = getattr(error, 'verdict', None) or {}
+                # Background jobs this review held to what they changed: the next review holds them to names only.
+                verifier.excuse_background(data, getattr(error, 'excuse', ()))
                 sent = [row['id'] + ': ' + row['status'] + ' ' + '; '.join(row['evidence'])
                         for row in found.get('items') or [] if row['status'] != 'met'] + (found.get('missing') or []) + (found.get('fix') or [])
                 if why in ('own_files', 'own_files_before') and not data.get('requirements_pending'):
