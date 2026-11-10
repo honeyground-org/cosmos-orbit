@@ -118,13 +118,26 @@ def tool_calls_since(path, since):
     2026-11-06 in a real cmux Codex pane: the review started 01:04:21, the claiming turn's last tool call was issued
     01:04:20, its Stop came 01:04:37, and the verdict was filed under the session's own changes while only another
     process had written a file)."""
-    calls = _tool_calls(path, since)
-    return None if calls is None else len(calls)
+    found = _tool_runs(path, since)
+    return None if found is None else sum(1 for run in found[0] if run['start'] >= found[1])
 
 
-def _tool_calls(path, since):
-    """The tools a session called after `since`, each as (its input as text, the folder it ran in or None), from its
-    transcript (Claude Code) or rollout (Codex); None when that cannot be told."""
+CODEX_TOOL_OUTPUTS = ('function_call_output', 'custom_tool_call_output')
+RUN_SLACK = 1.0      # seconds around a call's run in which a file it could write counts as its own
+
+
+def _output_text(value):
+    if isinstance(value, list):
+        return '\n'.join(str(part.get('text', '')) if isinstance(part, dict) else str(part) for part in value)
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _tool_runs(path, since):
+    """(runs, start): every tool call in a session's transcript (Claude Code) or rollout (Codex) tail, each a dict of
+    its start, its end (its result's time; None while it runs), its input as text, the folder it ran in, whether it
+    may write and whether it leaves a process running; start is `since` to the millisecond. None when that cannot be
+    told (no file, no timestamps, or the readable tail starts after `since`)."""
+    from .attribution import call_effect
     from .continuity import tail_lines
     start = _stamp(since)
     if not path or start is None:
@@ -136,7 +149,7 @@ def _tool_calls(path, since):
         lines = tail_lines(path)
     except OSError:
         return None
-    calls, earliest = [], None
+    runs, by_id, earliest = [], {}, None
     for line in lines:
         try:
             event = json.loads(line)
@@ -146,19 +159,34 @@ def _tool_calls(path, since):
         if at is None:
             continue
         earliest = at if earliest is None else min(earliest, at)
-        if at < start:
-            continue
         payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        content = (event.get('message') or {}).get('content') if isinstance(event.get('message'), dict) else None
         if event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_ITEMS:
-            calls.append((json.dumps(payload, ensure_ascii=False), None))  # its workdir, when set, is in the call
-        elif event.get('type') == 'assistant':
-            content = (event.get('message') or {}).get('content')
-            if isinstance(content, list):
-                calls += [(json.dumps(part.get('input'), ensure_ascii=False), event.get('cwd'))
-                          for part in content if isinstance(part, dict) and part.get('type') == 'tool_use']
+            run = {'start': at, 'end': None, 'provider': 'codex', 'call': payload, 'cwd': None, 'output': ''}
+            runs.append(run)
+            by_id[payload.get('call_id') or id(run)] = run
+        elif event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_OUTPUTS:
+            run = by_id.get(payload.get('call_id'))
+            if run:
+                run['end'], run['output'] = at, _output_text(payload.get('output'))
+        elif event.get('type') == 'assistant' and isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'tool_use':
+                    run = {'start': at, 'end': None, 'provider': 'claude', 'call': part, 'cwd': event.get('cwd'), 'output': ''}
+                    runs.append(run)
+                    by_id[part.get('id') or id(run)] = run
+        elif event.get('type') == 'user' and isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'tool_result' and part.get('tool_use_id') in by_id:
+                    by_id[part['tool_use_id']]['end'] = at
     if earliest is None or earliest > start:
         return None                                      # the tail does not reach back to the review's start
-    return calls
+    for run in runs:
+        call = run['call']
+        run['writes'], run['background'], workdir = call_effect(run['provider'], call, run['output'])
+        run['cwd'] = run['cwd'] or workdir
+        run['text'] = json.dumps(call.get('input') if run['provider'] == 'claude' else call, ensure_ascii=False)
+    return runs, start
 
 
 def _names(text, path):
@@ -166,32 +194,58 @@ def _names(text, path):
     return re.search(r'(?<![\w.-])' + re.escape(path) + r'(?![\w.-])', text) is not None
 
 
-def paths_named_since(transcript, since, moved, root):
-    """Of `moved` (paths in the workspace `root` that changed), those a session's tool calls after `since` reach: a
-    call names the path or the folder at its top, or runs inside that folder. None when that cannot be told.
+def paths_moved_by(transcript, since, moved, root):
+    """Of `moved` (paths in the workspace `root` that changed since `since`), those a session's own tool calls moved.
+    None when that cannot be told.
 
     A folder shared by several sessions moves all the time (2026-11-10: two files of another project in 90 s), so a
     session that merely called a tool during a review — it waited for the verdict with `cosmos-orbit status` — did
-    not move what others wrote (2026-11-09: such a pass was set aside as the task's own change). Only the calls'
-    inputs count: their outputs list files as well (claim prints every changed path, others' included), and a session
-    that lists files has not written them."""
-    calls = _tool_calls(transcript, since)
-    if calls is None:
+    not move what others wrote (2026-11-09: such a pass was set aside as the task's own change). Only calls that may
+    write count (attribution.call_effect: a read, a listing, a status poll moved nothing, whatever it names or prints;
+    its output lists others' files too). A call that may write and ran in the window moved:
+      · what it names, or the folder at its top, or the folder it ran in, whenever that changed;
+      · what changed while it ran (the file's change time within its run): a `make` at the root writes output it
+        never names (2026-11-10: left open while only names counted);
+      · anything deleted (a deleted file has no change time; the safe side).
+    A call still running counts until now; so does a process left running by a call made in the window (a background
+    job). One left running from before the window counts by its names only: a dev server started an hour ago would
+    otherwise claim every file another session writes, and send the task back to claim again and again."""
+    found = _tool_runs(transcript, since)
+    if found is None:
         return None
+    runs, start = found
+    import time
+    begin, current = start.timestamp(), time.time()
     root = os.path.realpath(str(root))
-    texts, folders = [], set()
-    for text, cwd in calls:
-        texts.append(text)
-        if cwd:
-            relative = os.path.relpath(os.path.realpath(cwd), root)
+    writers = []
+    for run in runs:
+        if not run['writes']:
+            continue
+        opened = run['start'].timestamp()
+        closed = run['end'].timestamp() if run['end'] else current
+        if run['background'] and opened >= begin - RUN_SLACK:
+            closed = current
+        if closed < begin - RUN_SLACK:
+            continue                                     # it ended before the window began
+        folder = None
+        if run['cwd']:
+            relative = os.path.relpath(os.path.realpath(run['cwd']), root)
             if relative != '.' and not relative.startswith('..'):
-                folders.add(relative.split(os.sep, 1)[0])
+                folder = relative.split(os.sep, 1)[0]
+        writers.append((run, opened, closed, folder))
     named = set()
     for path in moved:
         clean = path.rstrip('/')
         top = clean.split('/', 1)[0]
-        if top in folders or any(_names(text, clean) or _names(text, top) for text in texts):
-            named.add(path)
+        try:
+            changed = os.lstat(os.path.join(root, clean)).st_ctime
+        except OSError:
+            changed = None                               # deleted
+        for run, opened, closed, folder in writers:
+            if (folder == top or _names(run['text'], clean) or _names(run['text'], top) or changed is None
+                    or opened - RUN_SLACK <= changed <= closed + RUN_SLACK):
+                named.add(path)
+                break
     return named
 
 
@@ -203,8 +257,8 @@ def executor_moved(store, task, since, moved=None):
     readable transcript any hook counts, as before (the safe direction for a pass).
 
     `moved`: the paths that changed since `since`, when known. Then a session moved them only if one of its tool
-    calls reaches one of them (paths_named_since), with or without a hook yet; without a readable transcript any hook
-    still counts."""
+    calls that may write reaches one of them (paths_moved_by), with or without a hook yet; without a readable
+    transcript any hook still counts."""
     if not since:
         return True                                      # unknown: assume it did
     sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
@@ -216,7 +270,7 @@ def executor_moved(store, task, since, moved=None):
             if hooked and tool_calls_since(transcript, since) != 0:
                 return True
             continue
-        named = paths_named_since(transcript, since, moved, task['workspace'])
+        named = paths_moved_by(transcript, since, moved, task['workspace'])
         if named or (named is None and hooked):
             return True
     return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
