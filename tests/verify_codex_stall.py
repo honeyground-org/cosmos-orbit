@@ -418,6 +418,136 @@ def run(base, store, engine):
     check('the instruction carries the progress line: D1 evidenced, D2 and D3 nothing yet',
           'PROGRESS' in text and 'D1 ✓' in text and 'D2 ·' in text and 'D3 ·' in text, text[:400])
 
+    print('⑤ a shared folder: what moved is told apart by its paths, not by whether the session called any tool')
+    from harness import development
+
+    def old_fingerprint(folder):                         # the algorithm before snapshot(), copied: trees stay comparable
+        import hashlib
+        names = set(development.git(folder, 'ls-files', '-z').split(b'\0'))
+        names.update(development.git(folder, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0'))
+        digest = hashlib.sha256()
+        for raw in sorted(names - {b''}):
+            item = Path(folder) / os.fsdecode(raw)
+            digest.update(raw + b'\0')
+            if item.is_symlink():
+                digest.update(b'link:' + os.fsencode(os.readlink(item)))
+            elif item.is_file():
+                digest.update(str(item.stat().st_mode).encode())
+                digest.update(item.read_bytes())
+            else:
+                digest.update(b'missing')
+        digest.update(development.git(folder, 'rev-parse', 'HEAD'))
+        return digest.hexdigest()
+    (root / 'gone-link').symlink_to('nowhere')
+    check('the fingerprint is the same value as before (trees recorded earlier stay comparable)',
+          development.fingerprint(root) == old_fingerprint(root))
+    (root / 'gone-link').unlink()
+    if hasattr(development, 'snapshot'):
+        before = development.snapshot(root)
+        other('notes-moved.md')()
+        after = development.snapshot(root)
+        moved = development.moved_entries(before[1], after[1])
+    else:
+        moved = 'no snapshot(): a moved tree cannot tell which paths moved'
+    check('…and the snapshot tells which paths moved', moved == ['notes-moved.md'], moved)
+
+    real_check = development.check
+
+    def then(write):
+        def checks_then_write(*args, **kwargs):
+            done_checks = real_check(*args, **kwargs)
+            write()                                      # lands after the checks recorded the tree, before the review
+            return done_checks
+        return checks_then_write
+
+    print('  incident 2026-11-09 07:31:12Z: refused 0.6 s after its checks, a cache file of another project had moved')
+    tid = claimed(store, root, 'S-P1', 'Build the Lisp export and make it robust')
+    with patch.object(development, 'check', side_effect=then(other('notes-p1.md'))):
+        task = review(engine, tid, verdict('met'))
+    check('another session writes a file between the checks and the review: reviewed and verified '
+          '(was: refused at once, "Verifier requires all current fixed checks to pass", and the user was asked)',
+          task['status'] == 'verified' and (last_of(task).get('changed_before_review') or {}).get('by') == 'other_sessions',
+          (task['status'], task['data'].get('reason_code'), task['data'].get('reason'), last_of(task).get('changed_before_review')))
+    check('…the verdict names what moved', (last_of(task).get('changed_before_review') or {}).get('paths') == ['notes-p1.md'],
+          last_of(task).get('changed_before_review'))
+
+    own_log = base / 'S-P2.jsonl'
+    append(own_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-P2'}})
+    tid = claimed(store, root, 'S-P2', 'Build the Lua export and make it robust')
+    store.preference(verifier.TRANSCRIPT_KEY + 'S-P2', str(own_log))
+
+    def own_write_after_checks():
+        (root / 'export.py').write_text('def export(rows):\n    return tuple(rows)\n')
+        append(own_log, codex_item('tool', 'apply_patch export.py'))
+    with patch.object(development, 'check', side_effect=then(own_write_after_checks)):
+        task = review(engine, tid, verdict('met'))
+    check("control: the task's own session edits a file after the checks: not reviewed, sent back to claim again",
+          task['status'] == 'working' and task['data'].get('reason_code') == 'changed_during_review'
+          and 'before the review began' in (task['data'].get('reason') or ''),
+          (task['status'], task['data'].get('reason_code'), task['data'].get('reason')))
+    check('…no review ran and nothing was asked of the user', not task['data'].get('verdicts') and task['status'] != 'needs_input',
+          (task['status'], len(task['data'].get('verdicts') or [])))
+
+    print('  incident 2026-11-09 turn 11: the session waited for the verdict with a tool, another session wrote a file')
+
+    def waiting_turn(session, goal, calls, writes):
+        log = base / ('%s.jsonl' % session)
+        append(log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': session}},
+               claude_item('tool', 'cosmos-orbit claim %s' % session))
+        tid_ = claimed(store, root, session, goal)
+        wake.note(store, session, 'claude', 'prompt', TERMINAL)
+
+        def during():
+            for write in writes:
+                write()
+            append(log, *[call() for call in calls])
+            stop_hook(session, log)
+        return review(engine, tid_, verdict('met'), during=during)
+
+    def bash(command, cwd=None):
+        def item():
+            event = claude_item('tool', command)
+            if cwd:
+                event['cwd'] = str(cwd)
+            return event
+        return item
+
+    def build(folder):
+        def write():
+            (root / folder).mkdir(exist_ok=True)
+            (root / folder / 'out.txt').write_text('built by make\n')
+        return write
+
+    task = waiting_turn('S-Q1', 'Build the Erlang export and make it robust',
+                        [bash('for i in $(seq 1 90); do cosmos-orbit status S-Q1; sleep 10; done', cwd=root)],
+                        [other('notes-q1.md')])
+    check('the session polls the review with a tool that names none of what moved: verified, filed under other sessions '
+          '(was: superseded as its own change, "claim again")',
+          task['status'] == 'verified' and last_of(task).get('changed_during_review') == 'other_sessions',
+          (task['status'], task['data'].get('reason_code'), last_of(task).get('superseded'), last_of(task).get('changed_during_review')))
+    task = waiting_turn('S-Q2', 'Build the Elixir export and make it robust',
+                        [bash('cp notes-q2.md.bak /tmp/keep')], [other('notes-q2.md')])
+    check('…a longer name that contains the moved one does not name it ("notes-q2.md.bak" is not "notes-q2.md")',
+          task['status'] == 'verified', (task['status'], last_of(task).get('superseded')))
+    task = waiting_turn('S-Q3', 'Build the Haskell export and make it robust',
+                        [bash('cd build-q3 && make')], [build('build-q3')])
+    check('control: a call names the folder at the top of what moved (cd build-q3 && make wrote build-q3/out.txt): '
+          'its own change, the pass is superseded',
+          task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
+          (task['status'], last_of(task).get('superseded'), last_of(task).get('changed_during_review')))
+    task = waiting_turn('S-Q4', 'Build the OCaml export and make it robust',
+                        [bash('make', cwd=root / 'build-q4')], [build('build-q4')])
+    check('control: a call that runs inside the folder that moved (cwd build-q4, "make"): its own change',
+          task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
+          (task['status'], last_of(task).get('superseded'), last_of(task).get('changed_during_review')))
+    task = waiting_turn('S-Q5', 'Build the Scala export and make it robust',
+                        [bash("sed -i '' 's/rows/list(rows)/' %s" % (root / 'export.py'))],
+                        [lambda: (root / 'export.py').write_text('def export(rows):\n    return list(rows)\n'),
+                         other('notes-q5.md')])
+    check('control: a call names the moved file by its absolute path, another session also wrote one: its own change',
+          task['status'] == 'working' and last_of(task).get('superseded') == 'own_files',
+          (task['status'], last_of(task).get('superseded')))
+
 
 if __name__ == '__main__':
     sys.exit(main())

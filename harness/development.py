@@ -19,25 +19,64 @@ def git(root, *args):
     return result.stdout
 
 
-def fingerprint(root):
-    """Hash tracked and visible untracked contents, modes and deletions without running checks."""
+_SNAPSHOTS = {}       # (root, fingerprint) -> {entry: digest}: the last trees this process hashed, to tell what moved
+_SNAPSHOTS_KEPT = 6
+
+
+def snapshot(root):
+    """The fingerprint and, per entry, the digest of what it hashed: (fingerprint, {path: digest}).
+
+    The fingerprint is unchanged (the same bytes in the same order), so trees recorded before stay comparable. The
+    entries say which paths moved between two trees: in a folder other sessions share, a moved tree alone cannot tell
+    this task's change from someone else's (2026-11-09: a review was refused 0.6 s after its checks because another
+    session's test run rewrote a cache file in the same folder)."""
     names = set(git(root, 'ls-files', '-z').split(b'\0'))
     names.update(git(root, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0'))
     result = hashlib.sha256()
+    entries = {}
     for raw in sorted(names - {b''}):
         path = Path(root) / os.fsdecode(raw)
         result.update(raw + b'\0')
+        entry = hashlib.sha256()
         if path.is_symlink():
-            result.update(b'link:' + os.fsencode(os.readlink(path)))
+            data = b'link:' + os.fsencode(os.readlink(path))
+            result.update(data)
+            entry.update(data)
         elif path.is_file():
-            result.update(str(path.stat().st_mode).encode())
+            mode = str(path.stat().st_mode).encode()
+            result.update(mode)
+            entry.update(mode)
             with path.open('rb') as stream:
                 for chunk in iter(lambda: stream.read(65536), b''):
                     result.update(chunk)
+                    entry.update(chunk)
         else:
             result.update(b'missing')
+            entry.update(b'missing')
+        entries[os.fsdecode(raw)] = entry.digest()
     result.update(git(root, 'rev-parse', 'HEAD'))
-    return result.hexdigest()
+    digest = result.hexdigest()
+    key = (str(root), digest)
+    _SNAPSHOTS.pop(key, None)
+    _SNAPSHOTS[key] = entries
+    while len(_SNAPSHOTS) > _SNAPSHOTS_KEPT:
+        _SNAPSHOTS.pop(next(iter(_SNAPSHOTS)))
+    return digest, entries
+
+
+def fingerprint(root):
+    """Hash tracked and visible untracked contents, modes and deletions without running checks."""
+    return snapshot(root)[0]
+
+
+def entries_of(root, tree):
+    """The per-path digests of a tree this process hashed recently, or None (then what moved cannot be told)."""
+    return _SNAPSHOTS.get((str(root), tree))
+
+
+def moved_entries(before, after):
+    """The paths whose content, mode or presence differs between two snapshots' entries, sorted."""
+    return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
 def evidence_current(task):
@@ -181,6 +220,8 @@ def check(store, task, lease_fds=(), simplified=False):
     task['data'].pop('active_check', None)
     task['data']['evidence'] = results
     task['data']['development']['verified_tree'] = fingerprint(task['workspace'])
+    from .store import now
+    task['data']['development']['verified_at'] = now()  # what moved after this, and who moved it, is judged from here
     passed = all(r['passed'] for r in results)
     task['data']['development']['phase'] = 'checking'
     store.save(task, 'checking', 'checks_recorded', {'checks': results, 'passed': passed})
