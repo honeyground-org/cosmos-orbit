@@ -1128,12 +1128,15 @@ def run_verification(engine, task_id, checks_only=False):
                 found = getattr(error, 'verdict', None) or {}
                 sent = [row['id'] + ': ' + row['status'] + ' ' + '; '.join(row['evidence'])
                         for row in found.get('items') or [] if row['status'] != 'met'] + (found.get('missing') or []) + (found.get('fix') or [])
-                if why == 'own_files' and not data.get('requirements_pending'):
-                    # The review passed on the claimed state, but this task's session kept changing files during it.
+                if why in ('own_files', 'own_files_before') and not data.get('requirements_pending'):
+                    # The review passed on the claimed state, but this task's session kept changing files during it;
+                    # or it changed them after the checks, before the review began: no review ran, nothing to ask.
                     if data.get('executor_result'):
                         data['executor_result']['finished'] = False
-                    data.update(reason='The review passed on the state you claimed, but this task\'s session changed files '
-                                       'during it; claim again so the current state is reviewed.', reason_code='changed_during_review')
+                    data.update(reason=('This task\'s session changed files after the checks ran, before the review began; '
+                                        'claim again so the current state is reviewed.') if why == 'own_files_before' else
+                                       ('The review passed on the state you claimed, but this task\'s session changed files '
+                                        'during it; claim again so the current state is reviewed.'), reason_code='changed_during_review')
                     store.save(task, 'working', 'resumed', {'because': 'changed_during_review', 'turn': data.get('turns', 0)})
                     return task
                 if data.get('requirements_pending') or 'changed during verification' in str(error):

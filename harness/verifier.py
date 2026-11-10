@@ -2,6 +2,8 @@
 import copy
 import datetime
 import json
+import os
+import re
 
 from . import context, providers, requirements
 from .evidence import evidence_bundle, native_tool_trace
@@ -116,6 +118,26 @@ def tool_calls_since(path, since):
     2026-11-06 in a real cmux Codex pane: the review started 01:04:21, the claiming turn's last tool call was issued
     01:04:20, its Stop came 01:04:37, and the verdict was filed under the session's own changes while only another
     process had written a file)."""
+    found = _tool_runs(path, since)
+    return None if found is None else sum(1 for run in found[0] if run['start'] >= found[1])
+
+
+CODEX_TOOL_OUTPUTS = ('function_call_output', 'custom_tool_call_output')
+RUN_SLACK = 1.0      # seconds around a call's run in which a file it could write counts as its own
+
+
+def _output_text(value):
+    if isinstance(value, list):
+        return '\n'.join(str(part.get('text', '')) if isinstance(part, dict) else str(part) for part in value)
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _tool_runs(path, since):
+    """(runs, start): every tool call in a session's transcript (Claude Code) or rollout (Codex) tail, each a dict of
+    its start, its end (its result's time; None while it runs), its input as text, the folder it ran in, whether it
+    may write and whether it leaves a process running; start is `since` to the millisecond. None when that cannot be
+    told (no file, no timestamps, or the readable tail starts after `since`)."""
+    from .attribution import call_effect
     from .continuity import tail_lines
     start = _stamp(since)
     if not path or start is None:
@@ -127,7 +149,7 @@ def tool_calls_since(path, since):
         lines = tail_lines(path)
     except OSError:
         return None
-    count, earliest = 0, None
+    runs, by_id, earliest = [], {}, None
     for line in lines:
         try:
             event = json.loads(line)
@@ -137,55 +159,154 @@ def tool_calls_since(path, since):
         if at is None:
             continue
         earliest = at if earliest is None else min(earliest, at)
-        if at < start:
-            continue
         payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        content = (event.get('message') or {}).get('content') if isinstance(event.get('message'), dict) else None
         if event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_ITEMS:
-            count += 1
-        elif event.get('type') == 'assistant':
-            content = (event.get('message') or {}).get('content')
-            if isinstance(content, list):
-                count += sum(1 for part in content if isinstance(part, dict) and part.get('type') == 'tool_use')
+            run = {'start': at, 'end': None, 'provider': 'codex', 'call': payload, 'cwd': None, 'output': ''}
+            runs.append(run)
+            by_id[payload.get('call_id') or id(run)] = run
+        elif event.get('type') == 'response_item' and payload.get('type') in CODEX_TOOL_OUTPUTS:
+            run = by_id.get(payload.get('call_id'))
+            if run:
+                run['end'], run['output'] = at, _output_text(payload.get('output'))
+        elif event.get('type') == 'assistant' and isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'tool_use':
+                    run = {'start': at, 'end': None, 'provider': 'claude', 'call': part, 'cwd': event.get('cwd'), 'output': ''}
+                    runs.append(run)
+                    by_id[part.get('id') or id(run)] = run
+        elif event.get('type') == 'user' and isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get('type') == 'tool_result' and part.get('tool_use_id') in by_id:
+                    by_id[part['tool_use_id']]['end'] = at
     if earliest is None or earliest > start:
         return None                                      # the tail does not reach back to the review's start
-    return count
+    for run in runs:
+        call = run['call']
+        run['writes'], run['background'], workdir = call_effect(run['provider'], call, run['output'])
+        run['cwd'] = run['cwd'] or workdir
+        run['text'] = json.dumps(call.get('input') if run['provider'] == 'claude' else call, ensure_ascii=False)
+    return runs, start
 
 
-def executor_moved(store, task, since):
+def _names(text, path):
+    """Whether `text` names `path` as a path, not as part of a longer name ("notes" is not in "notes-b.md")."""
+    return re.search(r'(?<![\w.-])' + re.escape(path) + r'(?![\w.-])', text) is not None
+
+
+def paths_moved_by(transcript, since, moved, root):
+    """Of `moved` (paths in the workspace `root` that changed since `since`), those a session's own tool calls moved.
+    None when that cannot be told.
+
+    A folder shared by several sessions moves all the time (2026-11-10: two files of another project in 90 s), so a
+    session that merely called a tool during a review — it waited for the verdict with `cosmos-orbit status` — did
+    not move what others wrote (2026-11-09: such a pass was set aside as the task's own change). Only calls that may
+    write count (attribution.call_effect: a read, a listing, a status poll moved nothing, whatever it names or prints;
+    its output lists others' files too). A call that may write and ran in the window moved:
+      · what it names, or the folder at its top, or the folder it ran in, whenever that changed;
+      · what changed while it ran (the file's change time within its run): a `make` at the root writes output it
+        never names (2026-11-10: left open while only names counted);
+      · anything deleted (a deleted file has no change time; the safe side).
+    A call still running counts until now; so does a process left running by a call made in the window (a background
+    job). One left running from before the window counts by its names only: a dev server started an hour ago would
+    otherwise claim every file another session writes, and send the task back to claim again and again."""
+    found = _tool_runs(transcript, since)
+    if found is None:
+        return None
+    runs, start = found
+    import time
+    begin, current = start.timestamp(), time.time()
+    root = os.path.realpath(str(root))
+    writers = []
+    for run in runs:
+        if not run['writes']:
+            continue
+        opened = run['start'].timestamp()
+        closed = run['end'].timestamp() if run['end'] else current
+        if run['background'] and opened >= begin - RUN_SLACK:
+            closed = current
+        if closed < begin - RUN_SLACK:
+            continue                                     # it ended before the window began
+        folder = None
+        if run['cwd']:
+            relative = os.path.relpath(os.path.realpath(run['cwd']), root)
+            if relative != '.' and not relative.startswith('..'):
+                folder = relative.split(os.sep, 1)[0]
+        writers.append((run, opened, closed, folder))
+    named = set()
+    for path in moved:
+        clean = path.rstrip('/')
+        top = clean.split('/', 1)[0]
+        try:
+            changed = os.lstat(os.path.join(root, clean)).st_ctime
+        except OSError:
+            changed = None                               # deleted
+        for run, opened, closed, folder in writers:
+            if (folder == top or _names(run['text'], clean) or _names(run['text'], top) or changed is None
+                    or opened - RUN_SLACK <= changed <= closed + RUN_SLACK):
+                named.add(path)
+                break
+    return named
+
+
+def executor_moved(store, task, since, moved=None):
     """Whether this task's own sessions worked since `since` (the review's start). A review holds the task lock, so
     the records that still get written while it runs are: a hook (a prompt or a Stop means a turn ran), a turn end
     recorded outside the lock, a message waiting in its inbox. A hook alone is not work when the session's
     transcript shows no tool call after `since`: the turn that claimed ends after the review began. Without a
-    readable transcript any hook counts, as before (the safe direction for a pass)."""
+    readable transcript any hook counts, as before (the safe direction for a pass).
+
+    `moved`: the paths that changed since `since`, when known. Then a session moved them only if one of its tool
+    calls that may write reaches one of them (paths_moved_by), with or without a hook yet; without a readable
+    transcript any hook still counts."""
     if not since:
         return True                                      # unknown: assume it did
     sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
     for session in sessions:
         row = store.db.execute('SELECT at FROM terminals WHERE session=?', (session,)).fetchone()
         hooked = bool(row and row['at'] > since) or (store.preference('turn_ended:%s:%s' % (task['id'], session)) or '') > since
-        if hooked and tool_calls_since(store.preference(TRANSCRIPT_KEY + session), since) != 0:
+        transcript = store.preference(TRANSCRIPT_KEY + session)
+        if moved is None:
+            if hooked and tool_calls_since(transcript, since) != 0:
+                return True
+            continue
+        named = paths_moved_by(transcript, since, moved, task['workspace'])
+        if named or (named is None and hooked):
             return True
     return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
 
 
 def evaluate(engine, task, lease_fds=()):
     """Review finished work once. Callers own task/workspace locks and continuation."""
-    from .development import evidence_current, fingerprint
+    from .development import entries_of, moved_entries, snapshot
     store = engine.store
     data = task['data']
     claim = data.get('executor_result', {})
     if not claim.get('finished') or any(value.strip() for value in claim.get('remaining', [])):
         raise ValueError('Only an executor completion claim can trigger the verifier')
-    if not fixed_checks(task) or not evidence_current(task):
+    if not fixed_checks(task):
         raise ValueError('Verifier requires all current fixed checks to pass')
     attached = data.get('mode') == 'attached'
+    dev = data['development']
+    tree, entries = snapshot(task['workspace'])
+    moved_before = []
+    if tree != dev.get('verified_tree'):
+        # The tree moved after the checks recorded it. An attached session shares its folder: observed 2026-11-09, a
+        # review was refused 0.6 s after its checks (another session's test run rewrote a cache file) and the task
+        # stopped to ask the user a question nobody could answer. What other sessions moved does not stop the review;
+        # what this task's own session moved does, and it is sent back to claim again rather than to the user.
+        checked = entries_of(task['workspace'], dev.get('verified_tree'))
+        if not attached or not dev.get('verified_tree') or checked is None:
+            raise ValueError('Verifier requires all current fixed checks to pass')
+        moved_before = moved_entries(checked, entries)
+        if executor_moved(store, task, dev.get('verified_at'), moved_before):
+            raise ChangedDuringReview('own_files_before')
     done = copy.deepcopy(requirements.review_items(data) if attached else data.get('done', []))
     binding = {'goal': data.get('goal', task['prompt']),
                'context': data.get('context_prompts', []),
                'feedback': data.get('feedback', []), 'done': done,
                'done_fixed': data.get('done_fixed'), 'checklist': requirements.checklist_binding(data)}
     binding = copy.deepcopy(binding)
-    tree = fingerprint(task['workspace'])
     payload = dict(binding, observations=evidence_bundle(task),
                    objective=data.get('objective'), objective_history=(data.get('objective_history') or [])[-10:],
                    closed=requirements.review_view(data),
@@ -263,7 +384,9 @@ def evaluate(engine, task, lease_fds=()):
                        'done': requirements.review_items(task['data']) if attached else task['data'].get('done', []),
                        'done_fixed': task['data'].get('done_fixed'),
                        'checklist': requirements.checklist_binding(task['data'])}
-    moved_tree = fingerprint(task['workspace']) != tree
+    after, after_entries = snapshot(task['workspace'])
+    moved_tree = after != tree
+    moved = moved_entries(entries, after_entries) if moved_tree else []
     why = 'request' if current_binding != binding else 'checks' if not fixed_checks(task) else 'files' if moved_tree else None
     if why and task['data'].get('mode') != 'attached':
         raise ValueError('Task or evidence changed during verification; rerun fixed checks')  # a private clone
@@ -302,10 +425,15 @@ def evaluate(engine, task, lease_fds=()):
     # folder — and the executor, told to claim again, did so up to 57 times without a verdict. Files that moved while
     # this task's own sessions did nothing are someone else's: the verdict stands. When its own session worked during
     # the review, a pass does not cover what it changed, but unmet findings still hold.
-    if why == 'files' and executor_moved(store, task, started) and outcome == 'verified':
+    # Who moved them is told by the paths that moved (executor_moved with `moved`), not by any tool call at all.
+    if moved_before:
+        verdict['changed_before_review'] = {'by': 'other_sessions', 'paths': moved_before[:10], 'count': len(moved_before)}
+    own = why == 'files' and executor_moved(store, task, started, moved)
+    if why == 'files' and own and outcome == 'verified':
         why = 'own_files'
     elif why == 'files':
-        verdict['changed_during_review'] = 'own_session' if executor_moved(store, task, started) else 'other_sessions'
+        verdict['changed_during_review'] = 'own_session' if own else 'other_sessions'
+        verdict['moved_paths'] = {'paths': moved[:10], 'count': len(moved)}
         why = None
     task['data'].pop('active_call', None)
     if why:
