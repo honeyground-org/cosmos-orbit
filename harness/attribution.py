@@ -17,7 +17,11 @@ READ_PROGRAMS = frozenset('''
     md5sum shasum sha1sum sha256sum basename dirname realpath readlink tree column fold expand seq uptime hexdump
     xxd od strings netstat ping dig nslookup host man export unset set local read wait jobs kill pkill cd pushd
     popd tput clear nproc sw_vers : sort sed awk gawk find curl git gh cosmos-orbit
+    break continue exit return shift getopts umask ulimit shopt alias unalias hash times
 '''.split())
+# The last line: shell builtins that steer the shell and touch no file (2026-11-10: a session waited for its review
+# with `cosmos-orbit status … | grep -q … || break`; `break` counted as a write, so every file another session wrote
+# while the loop ran was held to the task, twice in one hour). trap, source and . run other commands: not listed.
 WRAPPERS = frozenset('sudo time nice command builtin exec env timeout gtimeout caffeinate stdbuf xargs watch nohup setsid'.split())
 KEYWORDS = frozenset('if then else elif fi do done while until ! { } time'.split())
 HEADERS = frozenset('for select case function'.split())

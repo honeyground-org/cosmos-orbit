@@ -619,7 +619,13 @@ def run(base, store, engine):
         ('make', W), ('cd build && make', W), ('python3 tools/gen.py', W), ('rm -f *.log', W), ('echo hi > out.txt', W),
         ("sed -i '' s/a/b/ f", W), ('find . -name "*.pyc" -delete', W), ('git checkout main', W), ('echo "$(make)"', W),
         ('diff <(make) <(ls)', W), ('bash -lc "make"', W), ('ls\nmake', W), ('timeout 5 make', W), ('xargs -I {} rm {}', W),
-        ('npm run dev &', B), ('nohup make', B)]
+        ('npm run dev &', B), ('nohup make', B),
+        ('for i in $(seq 1 60); do cosmos-orbit status S 2>/dev/null | grep -q -E "^x" || break; sleep 5; done', R),
+        ('while true; do cosmos-orbit status S | grep -q verified && break; sleep 10; done', R),
+        ('for f in *.py; do grep -q x "$f" || continue; echo "$f"; done', R),
+        ('cosmos-orbit status S | grep -q verified || exit 1', R), ('grep -q x f || return 0', R), ('shift', R),
+        ('getopts ab opt', R), ('umask', R), ('ulimit -n', R), ('shopt -s nullglob', R), ('hash -r', R),
+        ("trap 'rm -f out.txt' EXIT", W), ('source ./env.sh', W), ('. ./env.sh', W), ('make || exit 1', W)]
     try:
         from harness import attribution
         wrong = [(line, attribution.shell_effect(line), want) for line, want in table if attribution.shell_effect(line) != want]
@@ -764,6 +770,12 @@ def run(base, store, engine):
              if attribution.call_effect(provider, dict(call, input=call.get('input', {})))[0] != want]
     check('the MCP classifier: a read verb and no write verb reads, a write verb or an unknown name may write '
           '(%d tools, Claude Code and Codex)' % len(mcp), not wrong, wrong)
+    task = timeline('S-R17', 'Build the Fortran 77 export and make it robust',
+                    [('call', 'r17', 'for i in $(seq 1 60); do cosmos-orbit status S-R17 2>/dev/null | grep -q -E '
+                                     '\'^  "status": "(checking|verifying)"\' || break; sleep 5; done', root),
+                     ('write', other('notes-r17.md')), ('result', 'r17')])
+    check('incident 2026-11-10 08:34Z: the session waits for its review in a loop that leaves with `|| break` while '
+          'another session writes a file: verified (was: `break` counted as a write, its own change)', others(task), seen(task))
     check('a Workflow works on after its call returns, like a subagent',
           attribution.call_effect('claude', {'name': 'Workflow', 'input': {}})[:2] == (True, True),
           attribution.call_effect('claude', {'name': 'Workflow', 'input': {}}))
