@@ -11,11 +11,23 @@ def recorder(store, task_id, provider, alias=None):
 def provider_event(event):
     """Only expose tool lifecycle and public messages; never reasoning or tool output."""
     kind = event.get('type')
-    if kind in ('error', 'connection_error') or (event.get('item') or {}).get('type') == 'error':
+    item = event.get('item') or {}
+    # A failed turn (Codex `turn.failed`) and a stream-level `error` are problems. `turn.failed` used to go unread,
+    # so a turn that failed showed nothing in the flow.
+    if kind in ('error', 'turn.failed', 'connection_error'):
         return [('provider_issue', {'layer': 'execution', 'direction': 'in',
                                    'note': 'CLI reported an error; inspect the local provider log',
                                    'terminal': False})]
-    item = event.get('item') or {}
+    # An `error` ★item★ is a notice the CLI prints and then carries on after. Measured 2026-11-11: all 60 of a
+    # week's "CLI reported an error" events were one banner a wrapper adds to every Codex call
+    # (`--dangerously-bypass-hook-trust` is enabled …) and every one of those calls exited 0. A call that does
+    # fail is still caught by its exit code, which the runner records on its own; here the notice is kept, not
+    # dropped, just not shown as a failure.
+    if isinstance(item, dict) and item.get('type') == 'error':
+        if kind != 'item.completed':
+            return []
+        return [('provider_notice', {'layer': 'execution', 'direction': 'in',
+                                    'note': 'CLI notice: ' + str(item.get('message') or '')[:200]})]
     if kind in ('item.started', 'item.completed') and isinstance(item, dict):
         tool = item.get('type')
         if tool in ('command_execution', 'file_change', 'mcp_tool_call', 'web_search'):
