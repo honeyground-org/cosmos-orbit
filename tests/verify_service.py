@@ -303,6 +303,8 @@ try:
     text = (ROOT / 'install.sh').read_text()
     check('install.sh registers with --service and otherwise keeps an existing registration current',
           'service install' in text and 'service install --if-installed' in text, '')
+    check('install.sh says a kept registration was kept, and offers --service only when nothing is registered',
+          'Kept the login service' in text and "*'\"not registered\"'*)" in text, '')
 finally:
     reset()
 

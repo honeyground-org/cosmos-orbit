@@ -56,11 +56,15 @@ if [ "$SERVICE" = 1 ]; then
   "$INSTALL_DIR/venv/bin/cosmos-orbit" service install || echo 'WARNING: the login service was not registered (see above).' >&2
   printf 'No worker or model call was started; the recovery pass runs at the next login.\n'
 else
-  if ! "$INSTALL_DIR/venv/bin/cosmos-orbit" service install --if-installed >/dev/null 2>"$WHEEL_DIR/service.err"; then
+  if KEPT=$("$INSTALL_DIR/venv/bin/cosmos-orbit" service install --if-installed 2>"$WHEEL_DIR/service.err"); then
+    case "$KEPT" in
+      *'"not registered"'*) printf 'No worker or model call was started. To start Orbit again at login: ./install.sh --service\n' ;;
+      *) printf 'No worker or model call was started. Kept the login service on the new code (cosmos-orbit service status).\n' ;;
+    esac
+  else
     echo 'WARNING: the registered login service could not be kept current:' >&2
     cat "$WHEEL_DIR/service.err" >&2
   fi
-  printf 'No worker or model call was started. To start Orbit again at login: ./install.sh --service\n'
 fi
 printf 'Optional, the background handoff in Claude Code: add %s to CLAUDE_CODE_PLUGIN_DIRS (README: Background handoff).\n' "$INSTALL_DIR/claude-mod"
 
