@@ -36,6 +36,8 @@ GROUPS = [
         ('cosmos-orbit start --provider codex --workspace /path/to/repo "Your request"',
          'Fix the goal, execute with the native CLI in an isolated clone, run fixed checks and independently test the completion claim.'),
         ('cosmos-orbit worker --background', 'Continue authorised queued work, pending reviews and interrupted calls after the terminal closes.'),
+        ('cosmos-orbit service install [--port 55050] [--lang ko]   ·   service status   ·   service uninstall',
+         'Start again at login: the dashboard is kept running, and one recovery pass continues work authorised before the shutdown. macOS launchd, Linux systemd --user.'),
         ('cosmos-orbit resume TASK_ID   ·   cosmos-orbit pause TASK_ID', 'Continue after a pause, or stop at a safe boundary. A user pause is never cleared by recovery.')]),
     ('Inspect', [
         ('cosmos-orbit dashboard', 'The same goals, evidence, checks, reviews and stop reasons as the terminal, for both entrances.'),
