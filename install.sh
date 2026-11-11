@@ -2,7 +2,16 @@
 # Install a private virtual environment and a launcher without changing shell configuration.
 set -eu
 LAUNCH=0
-case "${1:-}" in "") ;; --launch) LAUNCH=1 ;; *) echo "Usage: ./install.sh [--launch]" >&2; exit 2 ;; esac
+SERVICE=0
+for ARG in "$@"; do
+  case "$ARG" in
+    --launch) LAUNCH=1 ;;
+    --service) SERVICE=1 ;;
+    *) echo "Usage: ./install.sh [--launch] [--service]" >&2
+       echo '  --service  start Orbit again at login (cosmos-orbit service install)' >&2
+       exit 2 ;;
+  esac
+done
 SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON=${PYTHON:-python3}
 INSTALL_DIR=${HARNESS_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/local-harness-app}
@@ -40,7 +49,19 @@ rm -rf "$INSTALL_DIR/claude-mod"
 cp -R "$SOURCE_DIR/claude-mod" "$INSTALL_DIR/claude-mod"
 printf '\nInstalled Cosmos Orbit. Run: %s/cosmos-orbit\n' "$BIN_DIR"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) printf 'Add this directory to your PATH: %s\n' "$BIN_DIR" ;; esac
-printf 'Next: cosmos-orbit doctor\nNo worker, model call, or background service was started.\n'
+printf 'Next: cosmos-orbit doctor\n'
+# The login service runs installed code: register it on request, and keep an existing registration on the new code.
+# A failure here leaves the installed app intact, so it is reported and the install still succeeds.
+if [ "$SERVICE" = 1 ]; then
+  "$INSTALL_DIR/venv/bin/cosmos-orbit" service install || echo 'WARNING: the login service was not registered (see above).' >&2
+  printf 'No worker or model call was started; the recovery pass runs at the next login.\n'
+else
+  if ! "$INSTALL_DIR/venv/bin/cosmos-orbit" service install --if-installed >/dev/null 2>"$WHEEL_DIR/service.err"; then
+    echo 'WARNING: the registered login service could not be kept current:' >&2
+    cat "$WHEEL_DIR/service.err" >&2
+  fi
+  printf 'No worker or model call was started. To start Orbit again at login: ./install.sh --service\n'
+fi
 printf 'Optional, the background handoff in Claude Code: add %s to CLAUDE_CODE_PLUGIN_DIRS (README: Background handoff).\n' "$INSTALL_DIR/claude-mod"
 
 rm -rf "$WHEEL_DIR"

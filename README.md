@@ -711,6 +711,33 @@ point, checkpoints and session rotations stay visible; a manual handoff retains 
 checklist, corrections and evidence. Native CLI compaction continues normally. Automatic handoff
 rebuilds a fresh session from the ledger; it never calls a model to write the handoff.
 
+## Start again at login
+
+```sh
+cosmos-orbit service install [--port 55050] [--lang ko]    # or: ./install.sh --service
+cosmos-orbit service status
+cosmos-orbit service uninstall
+```
+
+After a restart Orbit comes back without anyone typing a command. Two definitions are registered with the
+platform's own service manager (macOS launchd LaunchAgents in `~/Library/LaunchAgents`, Linux systemd user units in
+`~/.config/systemd/user`):
+
+- **dashboard** — `cosmos-orbit dashboard --no-open` on a fixed port (default 55050), started at login and again
+  whenever it exits. Observation never starts model work.
+- **recovery pass** — `cosmos-orbit worker --idle-exit 120`, once at login. It continues only work that was already
+  authorised before the shutdown (a review a completion claim requested, a call the shutdown interrupted, an
+  unattended task that was running) and exits when quiet. It is not a resident worker: hooks, the dashboard and
+  `start`/`resume` already start one when work appears, and a resident worker would re-read every task every
+  three seconds to wait for it.
+
+Installing never runs the recovery pass, so installing or updating starts no model work; the dashboard starts at
+once. Both definitions keep the store (`--home`), and the `PATH` of the shell that installed them, because a service
+manager starts programs with a bare `PATH` where the provider CLIs are not found. Without `--port`/`--lang`, a
+reinstall keeps the registered values. A port already held by a dashboard started by hand is refused rather than
+fought over. Elsewhere (no launchd and no `systemctl --user`) the command prints the two commands to start at login
+with the system's own tool. Logs: `<home>/service-dashboard.log`, `<home>/service-recover.log`.
+
 ## Observe the same work
 
 ```sh
@@ -773,7 +800,9 @@ without overwriting files. The planner, per-turn manager and artifact execution 
 `cosmos-orbit` is the main command and `harness` remains an alias. Existing `HARNESS_HOME`,
 `HARNESS_INSTALL_DIR`, `HARNESS_BIN_DIR` and private storage paths remain supported. Run `install.sh`
 again to update, or use `pipx install git+https://github.com/honeyground-org/cosmos-orbit.git`.
-The installer starts no service by itself; `--launch` opens the app. Uninstalling the application
+The installer starts no service by itself unless asked: `--launch` opens the app and `--service` registers the
+login service ([Start again at login](#start-again-at-login)); once registered, running `install.sh` again keeps it on
+the new code. Uninstalling the application
 retains private task data. No host auth files, global CLI settings or shell profiles are rewritten
 except by the explicit `hooks install` / `hooks uninstall` commands, which edit only the `hooks`
 entries that carry the `cosmos-orbit hook` marker and keep a backup.

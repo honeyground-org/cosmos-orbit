@@ -101,6 +101,14 @@ def main(argv=None):
     hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the four hooks (SessionStart/UserPromptSubmit/Stop/PreCompact) in Claude Code and Codex')
     hooks_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
     hooks_cmd.add_argument('--host', action='append', choices=('claude', 'codex'))
+    service_cmd = sub.add_parser('service', help='install | uninstall | status: start Orbit again at login (the dashboard, '
+                                                 'kept running, and one recovery pass) with macOS launchd or Linux systemd --user')
+    service_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
+    service_cmd.add_argument('--port', type=int, help='Dashboard port (default: the registered one, else 55050)')
+    service_cmd.add_argument('--lang', choices=('en', 'ja', 'de', 'es', 'fr', 'ko'),
+                             help='Dashboard language (default: the registered one, else en)')
+    service_cmd.add_argument('--if-installed', action='store_true',
+                             help='Install only over an existing registration (install.sh keeps it current)')
     attach_cmd = sub.add_parser('attach', help='Create the ledger for a request in your current checkout (no clone, no model call)')
     attach_cmd.add_argument('prompt', nargs='?')
     attach_cmd.add_argument('--workspace', default='.')
@@ -390,6 +398,16 @@ def main(argv=None):
                 result = {'uninstalled': [uninstall_hooks(host) for host in hosts]}
             else:
                 result = {host: hook_status(host) for host in hosts}
+        elif args.command == 'service':
+            from . import service
+            if args.action == 'install':
+                result = service.install(store.home, args.port, args.lang,
+                                         home_explicit=bool(args.home or os.environ.get('HARNESS_HOME')),
+                                         if_installed=args.if_installed)
+            elif args.action == 'uninstall':
+                result = service.uninstall()
+            else:
+                result = service.status()
         elif args.command == 'attach':
             from .attach import create, brief_text
             from .simple_loop import completion_items
@@ -648,6 +666,10 @@ def main(argv=None):
             if args.background:
                 from .recovery import ensure_worker
                 print(json.dumps({'worker_pid': ensure_worker(store), 'running': True}))
+                return 0
+            if args.idle_exit and store.locked('worker'):
+                # A transient worker (a pending review, the recovery pass at login) exists to make sure one runs.
+                print(json.dumps({'worker': 'already running'}))
                 return 0
             with store.lock('worker'):
                 last_active = time.time()
