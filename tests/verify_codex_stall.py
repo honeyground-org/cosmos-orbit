@@ -625,7 +625,12 @@ def run(base, store, engine):
         ('for f in *.py; do grep -q x "$f" || continue; echo "$f"; done', R),
         ('cosmos-orbit status S | grep -q verified || exit 1', R), ('grep -q x f || return 0', R), ('shift', R),
         ('getopts ab opt', R), ('umask', R), ('ulimit -n', R), ('shopt -s nullglob', R), ('hash -r', R),
-        ("trap 'rm -f out.txt' EXIT", W), ('source ./env.sh', W), ('. ./env.sh', W), ('make || exit 1', W)]
+        ("trap 'rm -f out.txt' EXIT", W), ('source ./env.sh', W), ('. ./env.sh', W), ('make || exit 1', W),
+        # 2026-11-11: jobs the command's own shell waits for with a bare `wait` are not left running
+        ('for t in tests/verify_*.py; do ( python3 $t > $LOG/$(basename $t).log 2>&1; echo "$? $t" ) & done; wait', W),
+        ('make & make test & wait', W), ('sleep 1 & sleep 2 & wait; echo done', R), ('{ make & }; wait', W),
+        ('make & wait $!', B), ('make & wait; npm run dev &', B), ('(make &); wait', B), ('nohup make & wait', B),
+        ('make &', B), ('echo "$(make &)"; wait', B)]
     try:
         from harness import attribution
         wrong = [(line, attribution.shell_effect(line), want) for line, want in table if attribution.shell_effect(line) != want]

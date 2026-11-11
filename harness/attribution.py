@@ -108,11 +108,18 @@ def _substitutions(text):
 
 
 def shell_effect(command, depth=0):
-    """(may it change files, does it leave a process running) for one shell command line."""
+    """(may it change files, does it leave a process running) for one shell command line.
+
+    A job started with `&` by the command's own shell is waited for by a later bare `wait`: the call returns only when
+    every such job has ended, so it leaves nothing running (2026-11-11: `for t in tests/*.py; do (python3 $t ...) &
+    done; wait` ran 60 s, but was held as a job still running, so three passing reviews in a row were set aside for
+    files other sessions wrote hours later). A job a subshell starts (`(make &)`), one started after the `wait`, and
+    `nohup`/`setsid` are not waited for and still count; so does `wait PID`, which waits for one job only."""
     if depth > 4:
         return True, False
     text = _strip_heredocs(str(command))
     writes = background = False
+    jobs, parens = False, 0                                # `&` jobs of this shell · how deep in subshells we are
     for inner in _substitutions(text):
         inner_writes, inner_background = shell_effect(inner, depth + 1)
         writes, background = writes or inner_writes, background or inner_background
@@ -137,13 +144,20 @@ def shell_effect(command, depth=0):
         if not operator:
             segment.append(token)
             continue
-        if BACKGROUND.search(token):
-            background = True
+        for match in BACKGROUND.finditer(token):
+            before = token[:match.start()]
+            if parens + before.count('(') - before.count(')') > 0:
+                background = True                          # a subshell's job outlives it: nobody waits for it
+            else:
+                jobs = True
+        parens = max(0, parens + token.count('(') - token.count(')'))
         if segment:
+            if [word for word in segment if word not in KEYWORDS] == ['wait'] and not parens:
+                jobs = False                               # a bare `wait` waits for every job started so far
             seg_writes, seg_background = _segment_effect(segment, depth)
             writes, background = writes or seg_writes, background or seg_background
         segment = []
-    return writes, background
+    return writes, background or jobs
 
 
 def _segment_effect(words, depth):
