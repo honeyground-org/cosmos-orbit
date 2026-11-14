@@ -70,7 +70,7 @@ Everything else is left to the native CLI, and Orbit judges itself by one thing:
 |---|---|---|
 | **The goal survives** | Your request and every correction are fixed in a ledger and re-presented after compaction and in the next session. | A compacted session no longer forgets what you asked for. |
 | **An independent review** | A completion claim needs evidence per item and passes one read-only review in a fresh context. | The session does not grade its own work. |
-| **Handoff at a measured point** | At 350k tokens (a setting) the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
+| **Handoff at a measured point** | At 300k tokens in Claude Code, 250k in Codex (a setting) the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
 | **Messages wake an idle session** | When another session (Codex or Claude Code) sends a message, **the receiving session is woken by itself** once its input line is empty. **Your own typing is never erased.** | No more typing "check it" into a session to make it read its mail ([details](#messages-between-sessions-an-idle-session-wakes-up-by-itself)). |
 | **Self-evolution in two layers** | **What your use teaches stays on your machine as data; only general fixes can reach the code**, through four gates. | Orbit improves without the code becoming personal ([details](#self-evolution-agent-orbit-improves-itself-without-making-the-code-personal)). |
 | **One view of all of it** | The engine room and `cosmos-orbit watch` show tasks, evidence, reviews, the handoff mode, the panes a message can wake and the self-evolution mode. | What Orbit did is visible, not assumed ([details](#observe-the-same-work)). |
@@ -398,7 +398,7 @@ the model's attention. Orbit measures each session's context from the host's own
 Code) or rollout (Codex) and hands the work over to a fresh session at a measured point:
 
 1. The hooks read the current context size on every event. No model is called.
-2. When a session reaches the **handoff point** (default 350k tokens) and has grown at least 60k
+2. When a session reaches the **handoff point** (Claude Code 300k, Codex 250k by default) and has grown at least 60k
    since it started, the brief says so, and at the end of that turn the Stop hook asks the executor
    once for a short checkpoint: the next concrete step and what the ledger cannot know.
 
@@ -516,10 +516,13 @@ The handoff point follows the same three scopes as the on/off switch:
 | One terminal session | `export ORBIT_HANDOFF_AT=250k` | `export ORBIT_HANDOFF_AT=off` | `cosmos-orbit context` |
 | Who types `/clear` | `cosmos-orbit context auto` (cmux, tmux) | `cosmos-orbit context tell` (default) | `cosmos-orbit context` |
 
-Each host has its own built-in point: **Claude Code 350k, Codex 250k**. Precedence: terminal → project →
+Each host has its own built-in point: **Claude Code 300k, Codex 250k**. Precedence: terminal → project →
 host → every project → the host's built-in point. A Codex session is further capped at 80% of the window
 Codex reports (258,400 → 206,720): Codex compacts by itself at 235–246k (50 compactions measured), so a
-higher point would never be reached. `cosmos-orbit context` shows each host's point and what Codex applies.
+higher point would never be reached. A Claude Code session is capped at 300k for the same reason: its
+transcript carries no window, but Claude Code compacts by itself at 357–375k (13 compactions past 350k,
+2026-11-10..14), and the handoff starts only after a turn ends, so at 350k the host compacted first 13 times
+while Orbit handed off 5. `cosmos-orbit context` shows each host's point and what each host applies.
 
 `cosmos-orbit context on` sets the built-in point explicitly; `cosmos-orbit context reset [--global | --host H]`
 removes a stored point so the next scope applies again. Unattended tasks take the point at creation;

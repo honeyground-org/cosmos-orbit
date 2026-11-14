@@ -128,13 +128,13 @@ def main():
     continuity.clear_threshold(store, global_default=True)
     check('reset --global: the built-in point applies again', continuity.resolve_threshold(store, root) == (350000, 'built-in'))
 
-    # per host: Claude Code 350k and Codex 250k built in, each settable on its own
-    check('built in per host: claude 350k · codex 250k · unknown 350k',
+    # per host: Claude Code 300k and Codex 250k built in, each settable on its own
+    check('built in per host: claude 300k · codex 250k · unknown 350k',
           [continuity.resolve_threshold(store, root, h) for h in ('claude', 'codex', None)]
-          == [(350000, 'built-in'), (250000, 'built-in'), (350000, 'built-in')])
+          == [(300000, 'built-in'), (250000, 'built-in'), (350000, 'built-in')])
     continuity.set_threshold(store, '220k', host='codex')
     check('--host codex changes Codex only', continuity.resolve_threshold(store, root, 'codex') == (220000, 'host')
-          and continuity.resolve_threshold(store, root, 'claude') == (350000, 'built-in'))
+          and continuity.resolve_threshold(store, root, 'claude') == (300000, 'built-in'))
     continuity.set_threshold(store, '300k', global_default=True)
     check('a host point beats the default for every host; the other host takes the default',
           continuity.resolve_threshold(store, root, 'codex') == (220000, 'host')
@@ -435,8 +435,38 @@ def main():
     claude_turn(t2c, 215_000)
     attach.handle(store, 'prompt', dict(pay2c, prompt='continue with the lexer'), 'claude')
     live = attach.current_task(store, root2c)['data']['context_live']
-    check('claude (no window in its transcript): the 350k setting stands, 215k is no handoff (control)',
-          live['limit'] == 350_000 and not attach.current_task(store, root2c)['data'].get('handoff_state'), live)
+    check('claude (no window in its transcript): the 350k setting is capped at 300k, 215k is no handoff (control)',
+          live['limit'] == 300_000 and live['configured_threshold'] == 350_000
+          and not attach.current_task(store, root2c)['data'].get('handoff_state'), live)
+
+    print('⑧-c Claude Code compacts by itself at 357-375k: the point is capped at 300k so the handoff comes first')
+    check('host cap: claude min(setting, 300k), codex by its window, off stays off',
+          continuity.host_cap(350_000, 'claude', None) == 300_000 and continuity.host_cap(250_000, 'claude', None) == 250_000
+          and continuity.host_cap(350_000, 'codex', 258_400) == 206_720 and continuity.host_cap(350_000, 'codex', None) == 350_000
+          and continuity.host_cap(0, 'claude', None) == 0)
+    claude_turn(t2c, 310_000)
+    attach.handle(store, 'prompt', dict(pay2c, prompt='continue with the parser'), 'claude')
+    state = attach.current_task(store, root2c)['data'].get('handoff_state') or {}
+    check('claude 310k under a 350k setting: the handoff is recommended (before: compacted near 360k first)',
+          state.get('state') == 'recommended' and state.get('limit') == 300_000, state)
+    view = continuity.threshold_view(store, root2c, 'claude')
+    check('the view shows what Claude gets after its cap, and why', view['hosts']['claude'].get('applied') == 300_000
+          and 'compacts by itself' in view['hosts']['claude'].get('why', ''), view['hosts']['claude'])
+    attach.handle(store, 'pre-compact', dict(pay2c, trigger='auto'), 'claude')
+    with open(t2c, 'a') as stream:
+        stream.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'compactMetadata': {'trigger': 'auto', 'preTokens': 310_000}}) + '\n')
+    check('after a compact boundary the transcript size is unknown until the next reply',
+          continuity.measure_transcript(t2c) is None)
+    attach.handle(store, 'session-start', dict(pay2c, source='compact'), 'claude')
+    task2c = attach.current_task(store, root2c)
+    check('the old size is never read again as a new handoff (2026-11-14: 361,821 after compacting to 125k)',
+          (task2c['data'].get('handoff_state') or {}).get('state') == 'compacted'
+          and 'handoff_recommended' not in events(store, task2c['id'])[-3:], task2c['data'].get('handoff_state'))
+    claude_turn(t2c, 120_000)
+    attach.handle(store, 'prompt', dict(pay2c, prompt='continue with the printer'), 'claude')
+    live = attach.current_task(store, root2c)['data']['context_live']
+    check('…and the next reply measures the compacted session (control)', live['tokens'] == 120_000
+          and (attach.current_task(store, root2c)['data'].get('handoff_state') or {}).get('state') == 'compacted', live)
 
     print('⑨ unattended loop: the next turn starts a fresh session from a slim ledger packet')
     from harness.development import create
