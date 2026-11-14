@@ -10,9 +10,11 @@ less for a few points of saving. scripts/measure_context_growth.py repeats the c
 
 The point is a setting, not a constant: `<home>/settings.json` holds it (section "handoff"), the
 `cosmos-orbit context` command writes it, a hand edit takes effect at the next hook event, and
-ORBIT_HANDOFF_AT overrides it for one terminal. Each host has its own point (section "hosts": Claude Code 350k,
+ORBIT_HANDOFF_AT overrides it for one terminal. Each host has its own point (section "hosts": Claude Code 300k,
 Codex 250k built in), because the hosts' windows differ: Codex reports a 258,400-token window and compacts by
 itself at 235-246k (50 compactions measured 2026-10-27..11-06), so its point is further capped to 80% of the window.
+Claude Code reports no window but compacts by itself at 357-375k (13 compactions past 350k, 2026-11-10..14), so its
+point is capped at 300k (CLAUDE_POINT_CAP): at 350k it compacted 13 times in those days, Orbit handed off 5.
 
 Nothing here calls a model. A handoff is rebuilt from the ledger plus one short checkpoint the executor
 writes about what the ledger cannot know: the approach in progress and the next concrete step.
@@ -32,7 +34,7 @@ from .store import now
 
 DEFAULT_HANDOFF_AT = 350_000
 HOSTS = ('claude', 'codex')
-HOST_DEFAULTS = {'claude': 350_000, 'codex': 250_000}  # built-in point per host; a host's window still caps it (window_cap)
+HOST_DEFAULTS = {'claude': 300_000, 'codex': 250_000}  # built-in point per host; a host's window still caps it (host_cap)
 MIN_GROWTH = 60_000          # never hand off a session that has not grown this much since it started
 SETTINGS_FILE = 'settings.json'
 LEGACY_GLOBAL_KEY = 'handoff_at'        # before the settings file these lived in the ledger's preferences table
@@ -307,6 +309,12 @@ def threshold_view(store, root, host=None):
             if applied != configured:
                 row['why'] = ('Codex compacts by itself near %dk of its %dk window; the point is capped at 80%% of the '
                               'window so the handoff comes first' % (245, CODEX_WINDOW // 1000))
+        else:
+            applied = host_cap(configured, name, None)
+            if applied != configured:
+                row.update(applied=applied, why=(
+                    'Claude Code compacts by itself near %dk; the point is capped at %dk so the handoff comes first'
+                    % (CLAUDE_COMPACTS_AT // 1000, CLAUDE_POINT_CAP // 1000)))
         hosts[name] = row
     if section.get('mode') is not None and section.get('mode') not in MODES:
         problems.append('handoff.mode = %r is not auto or tell (tell applies)' % (section.get('mode'),))
@@ -338,6 +346,23 @@ def window_cap(threshold, window):
     if not threshold or not isinstance(window, int) or window <= 0:
         return threshold
     return min(threshold, int(window * WINDOW_SHARE))
+
+
+CLAUDE_COMPACTS_AT = 357_000  # the lowest of 13 Claude Code auto-compactions past 350k (357-375k, 2026-11-10..14)
+CLAUDE_POINT_CAP = 300_000    # one long turn (tool output, images, queued prompts) must fit before that
+
+
+def host_cap(threshold, host, window):
+    """The point a session of this host gets: the model window caps it when the host reports one (Codex), and a
+    Claude Code session, whose transcript carries no window, is capped below where Claude Code compacts by itself.
+
+    Measured 2026-11-10..14 at the 350k point: 13 Claude Code compactions past it, 5 automatic handoffs. The
+    handoff starts only after the turn ends (auto_handoff), and the host compacted 7-25k past the point inside
+    that same turn - e.g. recommended at 357,707 while the user queued three prompts, compacted 48 s later."""
+    threshold = window_cap(threshold, window)
+    if threshold and host == 'claude':
+        return min(threshold, CLAUDE_POINT_CAP)
+    return threshold
 
 
 # A handoff this session already finished does not hold its next one. 'adopted' is the case that stuck (2026-11-04/09):
@@ -382,6 +407,16 @@ def measure_transcript(path):
     except OSError:
         return None
     for line in reversed(lines):
+        if '"compact_boundary"' in line:
+            try:
+                boundary = json.loads(line).get('subtype') == 'compact_boundary'
+            except ValueError:
+                boundary = False
+            if boundary:
+                # Claude Code compacted after its last reply: that reply's size describes a context that is gone
+                # (2026-11-14: read again at session start, 361,821 asked for a second handoff of a 125k session)
+                return None
+            continue
         if '"usage"' in line and '"assistant"' in line:
             try:
                 event = json.loads(line)
@@ -469,11 +504,11 @@ def observe(store, task, payload, host, event, source=None):
             if log and log[-1].get('session') == live.get('session'):
                 log[-1]['peak'] = live['peak']
             kind = kind or ('context_measured' if moved else None)
-        capped = window_cap(threshold, live.get('window'))
+        capped = host_cap(threshold, host, live.get('window'))
         live.update(threshold=capped, threshold_source='window' if capped != threshold else threshold_source,
                     configured_threshold=threshold, limit=joined_limit(capped, live))
         state = data.get('handoff_state') or {}
-        if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit']
+        if (live.get('limit') and live.get('tokens') and live['tokens'] >= live['limit'] and not measured_before_compaction(live)
                 and (state.get('session') != live.get('session') or state.get('state') in REOPENED_STATES)
                 and task['status'] not in ('stalled', 'interrupted', 'closed')):
             ready = ready_checkpoint(data, live, state)
@@ -487,6 +522,14 @@ def observe(store, task, payload, host, event, source=None):
         if kind:
             store.save(task, task['status'], kind, dict(payload_out, tokens=live.get('tokens'), session=live.get('session'), layer='context'))
     return task
+
+
+def measured_before_compaction(live):
+    """The size on record was read before the session's last compaction: it describes a context that is gone.
+    2026-11-14: right after Claude Code compacted, the session start read the old 361,821 again and a second handoff
+    was recommended for a session the host had just shrunk to 125k."""
+    compacted = live.get('compacted_at')
+    return bool(compacted and (not live.get('at') or live['at'] < compacted))
 
 
 READY_FRACTION = 0.9  # a checkpoint written this close to the point describes the context the handoff leaves
@@ -1024,7 +1067,7 @@ def rollover_due(store, task, key):
         threshold, _ = resolve_threshold(store, source, task.get('provider'))
     measurement = (data.get('context_measurements') or {}).get(key, {})
     tokens = measurement.get('tokens')
-    threshold = window_cap(threshold, measurement.get('window'))
+    threshold = host_cap(threshold, task.get('provider'), measurement.get('window'))
     if not threshold or not isinstance(tokens, int) or not data.get('sessions', {}).get(key):
         return False
     start = (data.get('context_start') or {}).get(key)

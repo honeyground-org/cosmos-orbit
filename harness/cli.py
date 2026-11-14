@@ -200,7 +200,7 @@ def main(argv=None):
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
     context_cmd.add_argument('--host', choices=('claude', 'codex'), default=None,
-                             help='the point for every session of one host (built in: claude 350k, codex 250k)')
+                             help='the point for every session of one host (built in: claude 300k, codex 250k; Claude Code is capped at 300k, Codex at 80%% of its window)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
     hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
