@@ -195,6 +195,10 @@ def main(argv=None):
     checkpoint_cmd.add_argument('--next', dest='next_step', required=True)
     checkpoint_cmd.add_argument('--notes', default='')
     checkpoint_cmd.add_argument('--file', dest='files', action='append', default=[])
+    checkpoint_cmd.add_argument('--now', dest='now_text', default='', help='Handoff summary: the current goal, what remains, the next step')
+    checkpoint_cmd.add_argument('--keep', action='append', default=[], help='Handoff summary: a decision, rule or constraint that still holds (repeat)')
+    checkpoint_cmd.add_argument('--shift', dest='shifts', action='append', default=[], help='Handoff summary: a subject change — when, from what to what (repeat)')
+    checkpoint_cmd.add_argument('--retire', action='append', default=[], help='Handoff summary: a previous keep item (K2) that no longer holds')
     context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global | --host claude|codex] · '
                                                  'auto | tell (who types /clear) · background on|off (the Claude Code mod) · '
                                                  'stored in <home>/settings.json, editable by hand')
@@ -546,7 +550,9 @@ def main(argv=None):
                 result = wake.wake(store, args.session, args.surface, args.sender, args.when_busy)
         elif args.command == 'checkpoint':
             from .continuity import record_checkpoint
-            result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files),
+            result = {'id': args.id, 'checkpoint': record_checkpoint(store, args.id, args.next_step, args.notes, args.files,
+                                                                     now_text=args.now_text, keep=args.keep, shifts=args.shifts,
+                                                                     retire=args.retire),
                       'handoff_file': str(store.home / 'runs' / args.id / 'handoff.md')}
         elif args.command == 'context':
             from .attach import project_root, current_task
