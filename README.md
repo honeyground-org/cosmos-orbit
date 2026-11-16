@@ -184,6 +184,22 @@ What happens in an attached session:
    when nothing is left to resume, or when the same state has lasted 15 minutes (60 while a review runs);
    the next Stop starts one again if one is needed. Model calls Orbit makes itself (a review, an owned
    executor) run with `ORBIT=off`, so they never show up as user sessions or tasks.
+7. **The round** (`cosmos-orbit patrol`) covers what no Stop can: a session that sits at its input line runs no hook.
+   The dashboard (kept running by the login service) walks every open task once a minute:
+   - **A question waiting for you is told** — at once, again after 30 minutes and 2 hours, and an hour before the
+     12-hour close. Before this, a session's own question (`claim --question`) was shown nowhere (12 of 17 in two
+     weeks) and 15 closed unanswered. The notice goes to the session's terminal (cmux posts a macOS banner with it)
+     and to the desktop (macOS Notification Center, Linux `notify-send`) when the terminal posts none: tmux, an
+     unknown terminal, a pane that is gone. A notice is not activity: the task still closes when it would have.
+     `ORBIT_DESKTOP_NOTIFY=off` keeps notices in the terminal.
+   - **An unfinished session nobody drives is sent back** — when the manager has work to resume (never a
+     question, never a task without completion items), the session's last hook was 5 minutes ago or more, no
+     supervisor holds it and its screen shows an empty input line, the round types the same continuation, under
+     the same rules (`supervision auto`, the hourly wake bound). One idle stretch gets at most two; a session that
+     still does not move, or one in a terminal Orbit cannot type into, is told to you once instead. Measured before:
+     the supervisor left after 15 unchanged minutes 30 times in two weeks and nothing started it again, and about
+     ten unfinished tasks sat until the 12-hour close.
+   `cosmos-orbit patrol --once` runs one round by hand; `ORBIT_PATROL=off` keeps the dashboard from running it.
    When the pane a session's hooks named cannot be read (Codex can run hooks in its app-server daemon,
    which names the pane the first Codex of that home started in), the observer uses the one pane whose
    bottom rows name the task above an empty input line, and shows a decided outcome there; none or two,
@@ -727,7 +743,8 @@ platform's own service manager (macOS launchd LaunchAgents in `~/Library/LaunchA
 `~/.config/systemd/user`):
 
 - **dashboard** — `cosmos-orbit dashboard --no-open` on a fixed port (default 55050), started at login and again
-  whenever it exits. Observation never starts model work.
+  whenever it exits. Observation never starts model work. It also runs Orbit's round once a minute: questions
+  waiting for you are told, and idle sessions with work left are sent back (see the manager, item 7).
 - **recovery pass** — `cosmos-orbit worker --idle-exit 120`, once at login. It continues only work that was already
   authorised before the shutdown (a review a completion claim requested, a call the shutdown interrupted, an
   unattended task that was running) and exits when quiet. It is not a resident worker: hooks, the dashboard and

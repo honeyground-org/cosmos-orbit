@@ -4,7 +4,8 @@ Two definitions, on macOS as launchd LaunchAgents (``~/Library/LaunchAgents``), 
 (``~/.config/systemd/user``). Other platforms are refused with the commands to start at login by hand.
 
 - ``dashboard`` runs ``cosmos-orbit dashboard --no-open`` on a fixed port. It starts at login and again whenever it
-  exits. Observation never starts model work.
+  exits. Observation never starts model work. It also runs Orbit's round every minute (patrol.py): a question waiting
+  for the user is told, an idle session with work left is sent back.
 - ``recover`` runs ``cosmos-orbit worker --idle-exit 120`` once at login. It continues only work that was already
   authorised before the shutdown (a review a completion claim requested, a call the shutdown interrupted, an unattended
   task that was running) and exits when quiet. It is deliberately not a resident worker: Orbit's hooks, dashboard and

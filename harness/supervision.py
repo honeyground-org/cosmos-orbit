@@ -118,25 +118,31 @@ def locate(terminal, task_id, runner, idle=True):
     return found[0] if len(found) == 1 else None
 
 
+def told_mark(task):
+    return '%s:%d:%s' % (task['status'], len(task['data'].get('verdicts') or []), task['data'].get('reason_code') or '')
+
+
+def claim_told(store, task, session):
+    """Claim telling this outcome in this session, in one statement: True for the one process that may show it.
+    The worker's delivery and a supervisor told at the same moment (measured 2026-11-06: one verdict, two notices one
+    second apart, while the pane was being looked for); attention.notice claims the same mark for a question."""
+    with store.db:
+        return bool(store.db.execute('INSERT INTO preferences(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE '
+                                     'SET value=excluded.value WHERE preferences.value IS NOT excluded.value',
+                                     ('told:%s:%s' % (task['id'], session), told_mark(task))).rowcount)
+
+
 def tell(store, task, session, runner=None):
     """Show a decided outcome (verified, or waiting for the user) in the session's terminal, once per outcome."""
     from . import wake
     if task['status'] not in ('verified', 'needs_input') or not session:
         return False
-    key = 'told:%s:%s' % (task['id'], session)
-    mark = '%s:%d:%s' % (task['status'], len(task['data'].get('verdicts') or []), task['data'].get('reason_code') or '')
-    if store.preference(key) == mark:
+    if store.preference('told:%s:%s' % (task['id'], session)) == told_mark(task):
         return False
     terminal, _ = wake.resolve(store, session=session)
     if not terminal:
         return False
-    # Claimed in one statement before anything is shown: the worker's delivery and a supervisor tell at the same
-    # moment (measured 2026-11-06: one verdict, two notices one second apart, while the pane was being looked for).
-    with store.db:
-        claimed = store.db.execute('INSERT INTO preferences(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE '
-                                   'SET value=excluded.value WHERE preferences.value IS NOT excluded.value',
-                                   (key, mark)).rowcount
-    if not claimed:
+    if not claim_told(store, task, session):           # claimed before anything is shown (see claim_told)
         return False
     run = runner or wake._run
     text = outcome_text(task)

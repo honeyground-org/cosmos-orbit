@@ -181,7 +181,9 @@ def main(argv=None):
     evolve_cmd.add_argument('--candidate', help='The candidate key to attempt (default: the most frequent due one)')
     supervision_cmd = sub.add_parser('supervision', help='Show or set unfinished-task terminal continuation: auto | tell; does not change context handoff')
     supervision_cmd.add_argument('value', nargs='?', choices=('auto', 'tell'))
-    wake_cmd = sub.add_parser('wake', help='Another session sent a message: wake the receiving session (types one line when its input is empty)')
+    patrol_cmd = sub.add_parser('patrol', help="Orbit's round: tell questions waiting for you, send idle unfinished sessions back (the dashboard runs it every minute)")
+    patrol_cmd.add_argument('--once', action='store_true', help='One round now, then print what it looked at')
+    wake_cmd =sub.add_parser('wake', help='Another session sent a message: wake the receiving session (types one line when its input is empty)')
     wake_cmd.add_argument('--session', action='append', default=[], help='The receiving session ID (repeatable)')
     wake_cmd.add_argument('--surface', action='append', default=[], help='The receiving cmux surface or tmux pane (repeatable)')
     wake_cmd.add_argument('--from', dest='sender', default='', help='Who sent the message (shown in notifications)')
@@ -520,6 +522,13 @@ def main(argv=None):
         elif args.command == 'supervision':
             from . import supervision
             result = supervision.configure(store, args.value)
+        elif args.command == 'patrol':
+            from . import patrol
+            if not args.once:
+                patrol.run_forever(store.home)
+                return 0
+            result = [{'task': task_id, 'session': session, 'outcome': outcome}
+                      for task_id, session, outcome in patrol.sweep(store)]
         elif args.command == 'wake':
             from . import wake
             if not args.session and not args.surface:
