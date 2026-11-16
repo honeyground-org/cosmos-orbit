@@ -725,6 +725,8 @@ def serve(home, port=0, open_browser=True, lang='en'):
     authority = '127.0.0.1:%d' % server.server_port
     origin = 'http://' + authority
     print(origin, flush=True)
+    from .patrol import start_background
+    start_background(home)  # the round: waiting questions are told, idle unfinished sessions sent back (patrol.py)
     if open_browser:
         webbrowser.open(origin)
     try:

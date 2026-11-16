@@ -15,6 +15,8 @@ GROUPS = [
          'the point, where it came from, the settings file and the live context here.'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
+        ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',
+         "Orbit's round, every minute inside the dashboard: a question waiting for you is told at once (terminal, and the desktop when the terminal posts no banner), again after 30 min and 2 h, and an hour before the 12-hour close; a session idle 5 min with work left and no supervisor is sent back (auto), at most twice per idle stretch, then you are told. ORBIT_PATROL=off stops the round."),
         ('cosmos-orbit wake --session ID [--surface PANE] [--from NAME] [--when-busy wait|skip] [--check]',
          'A sender calls this right after delivering a message: the receiving session is woken when its input line is empty. Your own typing is never erased.'),
         ('cosmos-orbit settings', 'Hook installation, switches, handoff points and what applies in this folder.'),
