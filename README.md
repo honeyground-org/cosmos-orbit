@@ -135,7 +135,8 @@ What happens in an attached session:
 2. At session start, after compaction, and whenever it changed, the hook hands the executor a
    short **brief**: goal, corrections, the completion checklist with evidence counts, the last
    verdict, the stop reason, the latest checkpoint and the exact commands to record evidence and
-   claim. A brief that is already in the session's context is not repeated.
+   claim. After a handoff it leads with the handoff summary (now · keep · subject shifts) instead of
+   replaying old corrections. A brief that is already in the session's context is not repeated.
 3. The executor, your own session, proposes the checklist and records evidence as it works:
 
    ```sh
@@ -420,8 +421,27 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
 
    ```sh
    cosmos-orbit checkpoint TASK_ID --next 'Write tests/test_mod.py for main()' \
-     --notes 'mod.py extracted; app.py still imports nothing' --file mod.py
+     --notes 'mod.py extracted; app.py still imports nothing' --file mod.py \
+     --now 'D3 open: tests for main() next' --keep 'never change the printed output' \
+     --shift '11-14 → test coverage (before: module split → met D1 D2)'
    ```
+
+   Every checkpoint also rewrites the **handoff summary**, so a long task is not replayed from its
+   first prompt at every handoff. The Stop hook shows the previous summary and what is new since
+   (requests, corrections, closed items with their result, verdicts), and the session writes it again
+   in three bounded sections: `--now` (the current goal, what remains, the next step), `--keep` (a
+   decision, rule or constraint that still holds, whatever its age) and `--shift` (where the subject
+   changed, the earlier subject as goal → result). Orbit checks it without a model call: a keep item
+   of the previous summary that the new one left out is carried over and named (`--retire K2` lets it
+   go), a request that shares little with the ones before it is offered as a subject change, and each
+   section has a size limit. A session that writes no summary gets one built from the ledger: open
+   items and the latest request as now, the user's prohibitions (oldest first) as keep, detected
+   subject changes as shifts. The fresh session's brief leads with this summary (`NOW`, `KEEP`,
+   `SHIFTS`) and lists only the corrections made after it; everything else stays in the ledger
+   (`status`, `handoff --write`). When the brief is full, the least important lines give way first
+   (earlier prompts, recent prompts, closed items), never the current focus. Measured on the six
+   longest real tasks (9-10 checkpoints, 25-58 corrections): the user's prohibitions in the brief went
+   from 1 of 6 to 6 of 6, and subject changes are marked in the 4 tasks that had them.
 
 3. The next Stop tells you once. **A hook cannot clear its own session** (neither host offers that),
    so the handoff ends one of three ways:

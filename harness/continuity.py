@@ -560,8 +560,12 @@ def _checkpoint_since(data, stamp):
     return next((row for row in reversed(rows) if row.get('at', '') >= stamp), None)
 
 
-def record_checkpoint(store, task_id, next_step, notes='', files=(), by=None, kind='executor'):
-    """The executor's working-memory snapshot: what the ledger cannot know. Bounded; no file contents."""
+def record_checkpoint(store, task_id, next_step, notes='', files=(), by=None, kind='executor',
+                      now_text='', keep=(), shifts=(), retire=()):
+    """The executor's working-memory snapshot: what the ledger cannot know. Bounded; no file contents.
+
+    Every checkpoint also carries the handoff summary (consolidate): the session's --now/--keep/--shift, checked
+    against the previous summary, or one Orbit builds from the ledger when the session wrote none."""
     next_step = (next_step or '').strip()
     if not next_step:
         raise ValueError('Give the next concrete step with --next')
@@ -585,10 +589,14 @@ def record_checkpoint(store, task_id, next_step, notes='', files=(), by=None, ki
             except (OSError, subprocess.TimeoutExpired):
                 changed = []
         live = data.get('context_live') or {}
+        from .consolidate import write as write_summary
+        summary = write_summary(data, task, now_text, keep, shifts, retire)
         row = {'at': now(), 'by': by or data.get('host') or task['provider'], 'kind': kind,
                'next': next_step[:1200], 'notes': (notes or '').strip()[:2000], 'files': listed,
                'changed': changed, 'tokens': live.get('tokens'), 'session': live.get('session'),
                'turn': data.get('turns', 0)}
+        summary['at'] = row['at']
+        row['summary'] = summary
         rows = data.setdefault('checkpoints', [])
         rows.append(row)
         del rows[:-10]
@@ -597,7 +605,9 @@ def record_checkpoint(store, task_id, next_step, notes='', files=(), by=None, ki
             state['state'] = 'checkpointed'
             state['checkpoint_at'] = row['at']
         store.save(task, task['status'], 'checkpoint_recorded',
-                   {'kind': kind, 'tokens': row['tokens'], 'files': len(listed), 'changed': len(changed), 'layer': 'context'})
+                   {'kind': kind, 'tokens': row['tokens'], 'files': len(listed), 'changed': len(changed), 'layer': 'context',
+                    'summary_by': summary['by'], 'keep': len(summary['keep']), 'shifts': len(summary['shifts']),
+                    'warnings': len(summary['warnings'])})
     try:
         from .attach import write_handoff
         write_handoff(store, store.get(task_id), store.home / 'runs' / task_id / 'handoff.md')
@@ -975,8 +985,9 @@ def handoff_lines(data, prefix, tid, closed=False, digest=False):
     if state.get('session') == current and current:
         if state.get('state') in ('recommended', 'asked'):
             lines.append("CONTEXT %s tokens ≥ handoff point %s. At the next natural boundary record a checkpoint: "
-                         "%s checkpoint %s --next '…' --notes '…' [--file path]. A fresh session then continues from the ledger "
-                         "instead of re-reading this context." % (_k(live.get('tokens')), _k(state.get('limit')), prefix, tid))
+                         "%s checkpoint %s --next '…' --notes '…' --now '…' --keep '…' [--shift '…'] [--file path]. A fresh "
+                         "session then continues from the ledger instead of re-reading this context."
+                         % (_k(live.get('tokens')), _k(state.get('limit')), prefix, tid))
         elif state.get('state') == 'auto_failed':
             lines.append('HANDOFF READY, but the automatic /clear did not take effect: ask the user to type /clear; '
                          'the request they made is carried over to the fresh session.')

@@ -1287,21 +1287,32 @@ def brief_text(store, task, event='prompt', for_digest=False):
     if data.get('verification_pending'):
         head += ' · ' + verification_progress(store, task)['reason']
     objective = (data.get('objective') or {}).get('text')
+    from .consolidate import current as current_summary, brief_lines as summary_lines
+    summary = current_summary(data, task) if task['status'] not in CLOSED else None
     if objective:
         lines = [head, 'GOAL (current, %s): %s · ORIGINAL REQUEST (still binds): %s' % (
             _local((data.get('objective') or {}).get('at'), False), _one_line(objective, 300),
             _one_line(data.get('goal') or task['prompt'], 200))]
     else:
-        lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 400)]
+        # After a handoff NOW carries the current focus; the first request keeps its opening (the rest is in the ledger).
+        lines = [head, 'GOAL: ' + _one_line(data.get('goal') or task['prompt'], 200 if summary else 400)]
     if data.get('draft') and task['status'] not in CLOSED:
         lines.append("DRAFT: Orbit is unsure this prompt asks for work. If it does, define the completion (that confirms "
                      "the task): %s done %s 'D1 …'. If it is only a question, just answer — the draft closes by itself "
                      "when the turn ends and nothing changed." % (prefix, tid))
+    lines.extend(summary_lines(data, task, summary))
     if data.get('context_prompts'):
         lines.append('CONTEXT (the user\'s earlier prompts in this session): '
                      + ' · '.join('"' + _one_line(c, 160) + '"' for c in data['context_prompts']))
     feedback = data.get('feedback') or []
-    if feedback:
+    if summary:
+        # The summary already folded what lasts (KEEP) and what is current (NOW); only newer corrections are listed.
+        newer = [f for f in feedback if f.get('at', '') > (summary.get('at') or '')]
+        if newer:
+            lines.append('CORRECTIONS since the summary (%d of %d; all of them: %s status %s): ' % (
+                len(newer), len(feedback), prefix, tid) + ' · '.join(
+                _local(f.get('at'), False) + ' "' + _one_line(f['text'], 160) + '"' for f in newer[-4:]))
+    elif feedback:
         lines.append('CORRECTIONS (%d): ' % len(feedback) + ' · '.join(
             _local(f.get('at'), False) + ' "' + _one_line(f['text'], 160) + '"' for f in feedback[-4:]))
     done = data.get('done') or []
@@ -1401,7 +1412,9 @@ def brief_text(store, task, event='prompt', for_digest=False):
         tail.append('Orbit never commits or pushes. Evidence must come from commands actually run; a claim without evidence is returned unmet.')
     if for_digest:
         # The user's own words are already in the session; they must not re-send the whole brief on every prompt.
-        lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED', 'LIST ('))]
+        # The summary is written by this session or at its own checkpoint: a new one must not re-send the brief.
+        lines = [line for line in lines if not line.startswith(('CORRECTIONS', 'REQUIREMENTS CHANGED', 'LIST (',
+                                                                'NOW (', 'KEEP (', 'SHIFTS ('))]
     return _fit(lines, tail, BRIEF_LIMIT)
 
 
@@ -1422,22 +1435,51 @@ def _closed_line(data):
     return ' · '.join(parts)
 
 
+# How much each brief line matters when the brief is full: (prefix, rank, own cap). The least important line gives way
+# first; a line's length decides nothing. Before 2026-11-16 the longest line was cut first, which on a long task kept
+# the oldest line (the first request) and cut the current one. More specific prefixes come first.
+# The handoff summary (NOW, KEEP, SHIFTS) outranks what it was written from: the checklist's text, checkpoint notes,
+# verdict details, the work the last claim left (in NOW too) and the recent prompts.
+LINE_RANKS = (
+    ('CARRIED OVER', 100, 1200), ('HELD REQUEST', 100, 1200),
+    ('WAITING FOR THE USER', 95, 500), ('FIXED CHECK FAILED', 95, 600), ('UNMET', 95, 600),
+    ('HANDOFF READY', 95, 400), ('CONTEXT (', 25, 300), ('CONTEXT ', 95, 600),
+    ('NOW (', 92, 600), ('DRAFT:', 90, 600), ('CONTINUED', 88, 300), ('REOPENED', 88, 400),
+    ('REQUIREMENTS CHANGED', 88, 600), ('CHECKPOINT (', 87, 500), ('KEEP (', 84, 800), ('SHIFTS (', 82, 600),
+    ('CORRECTIONS', 80, 500), ('DONE', 78, 600), ('LIST (', 76, 300), ('LAST VERDICT', 65, 400), ('REMAINING', 60, 300),
+    ('MANAGER', 55, 300), ('OPEN:', 45, 300), ('CLOSED', 40, 250), ('RECENT PROMPTS', 30, 300))
+KEPT_RANK = 90  # lines at or above this are only shortened, never dropped
+
+
+def _rank(line):
+    return next(((rank, cap) for prefix, rank, cap in LINE_RANKS if line.startswith(prefix)), (50, 400))
+
+
 def _fit(lines, tail, limit):
-    """Keep the header and the action lines whole; shorten the middle (longest lines first) to fit."""
+    """Keep the header and the action lines whole. When the rest does not fit: shorten lines to their own cap, least
+    important first; then drop lines, least important first (the last one dropped is only shortened when that is
+    enough); the most important lines are shortened last and never dropped."""
     head, middle = lines[:2], list(lines[2:])
     def size():
-        return len('\n'.join(head + middle + tail))
-    while size() > limit and middle:
-        longest = max(range(len(middle)), key=lambda i: len(middle[i]))
+        return len('\n'.join(head + [m for m in middle if m] + tail))
+    order = sorted(range(len(middle)), key=lambda i: (_rank(middle[i])[0], -i))
+    for i in order:
+        if size() <= limit:
+            break
+        cap = _rank(middle[i])[1]
+        if len(middle[i]) > cap:
+            middle[i] = middle[i][:cap - 1] + '…'
+    for i in order:
+        if size() <= limit:
+            break
         overflow = size() - limit
-        if len(middle[longest]) - overflow >= 120:
-            middle[longest] = middle[longest][:len(middle[longest]) - overflow - 1] + '…'
+        if len(middle[i]) - overflow >= 120:
+            middle[i] = middle[i][:len(middle[i]) - overflow - 1] + '…'
+        elif _rank(middle[i])[0] < KEPT_RANK:
+            middle[i] = ''
         else:
-            middle[longest] = middle[longest][:119] + '…' if len(middle[longest]) > 120 else ''
-            middle = [m for m in middle if m]
-            if size() > limit and all(len(m) <= 120 for m in middle):
-                middle.pop(0)
-    text = '\n'.join(head + middle + tail)
+            middle[i] = middle[i][:119] + '…' if len(middle[i]) > 120 else middle[i]
+    text = '\n'.join(head + [m for m in middle if m] + tail)
     return text if len(text) <= limit else text[:limit - 1] + '…'
 
 
@@ -1955,12 +1997,13 @@ def context_decision(store, task, settle=False, message_only=False):
     prefix = orbit_command(store)
     closed = task['status'] in CLOSED or settle
     if state.get('state') == 'recommended' and not closed:
+        from .consolidate import request_text
         reply = {'decision': 'block', 'reason': (
             "Orbit: this session's context is %s tokens (handoff point %s). Record a checkpoint now so a fresh session can "
             "continue without re-reading it: %s checkpoint %s --next '<the next concrete step>' --notes '<approach, decisions "
-            "and anything the ledger does not already hold>' [--file <file in progress>]. Keep it short; goal, corrections, "
-            "evidence and verdicts are already in the ledger. Then end the turn."
-            % (_k(live.get('tokens')), _k(state.get('limit')), prefix, task['id']))}
+            "and anything the ledger does not already hold>' [--file <file in progress>] plus the handoff summary below. "
+            "Keep it short; goal, corrections, evidence and verdicts are already in the ledger. Then end the turn.\n"
+            % (_k(live.get('tokens')), _k(state.get('limit')), prefix, task['id'])) + request_text(data, task, prefix, task['id'])}
         new_state = 'asked'
     elif state.get('state') in ('checkpointed',) or (state.get('state') == 'recommended' and closed):
         checkpointed = state.get('state') == 'checkpointed'
@@ -2085,6 +2128,15 @@ def handoff_markdown(store, task):
     lines += ['', '## Changed files since attach (%d)' % len(changed), '']
     lines += ['- `%s`' % p for p in changed[:60]] or ['- not measured yet (measured at each claim)']
     checkpoints = data.get('checkpoints') or []
+    from .consolidate import current as current_summary
+    summary = current_summary(data, task)
+    if summary:
+        lines += ['', '## Handoff summary', '', '- %s · by %s' % (_local(summary.get('at')), summary.get('by')),
+                  '- **Now:** ' + summary['now']]
+        lines += ['- **Keep K%d:** %s%s' % (i + 1, k['text'], ' _(carried over: the last summary left it out)_'
+                                            if k.get('by') == 'carried' else '') for i, k in enumerate(summary['keep'])]
+        lines += ['- **Shift:** ' + s['text'] for s in summary['shifts']]
+        lines += ['- Orbit: ' + w for w in summary.get('warnings') or []]
     if checkpoints:
         lines += ['', '## Latest checkpoint', '']
         row = checkpoints[-1]
