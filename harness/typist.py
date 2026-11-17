@@ -191,8 +191,18 @@ def carry_steps(settle=2.0, wait=60.0):
     return [('wait', settle), ('deliver', wait)]
 
 
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True                                       # it exists but is not ours to signal
+    return True
+
+
 def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None, screen=None,
-        find=None, claim=None):
+        find=None, claim=None, alive=alive):
     """Perform the steps; returns the argv list that ran. Stops at the first failure.
 
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
@@ -238,6 +248,16 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
             done.extend(typed)
             if outcome != 'woken':
                 raise RuntimeError('the carry line was not delivered (%s)' % outcome)
+            continue
+        if kind == 'gone':
+            pid, wait = value                             # the host quit by /exit: type into the shell only after
+            deadline = clock() + wait
+            while pid and alive(pid):
+                if clock() >= deadline:
+                    raise RuntimeError('the session in the pane did not quit within %ds; nothing more was typed' % wait)
+                sleep(0.25)
+            if not pid:
+                sleep(3.0)                                # its pid was not found: give it time to quit
             continue
         if kind == 'adopted':
             deadline = clock() + value

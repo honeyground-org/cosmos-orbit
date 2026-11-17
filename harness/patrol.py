@@ -91,6 +91,10 @@ def nudge(store, task, session, runner=None, at=None, desktop=None):
     idle = _age(phase['at'], at)
     if idle is None or idle < IDLE_BEFORE:
         return 'recent'
+    from .routes import session_limited
+    if session_limited(store, session, task['data'].get('host') or task.get('provider'), at):
+        return 'limited'                                 # stopped at a usage limit: a continuation would only fail;
+        # the user was told at the stop (StopFailure) and picks a route at their next prompt
     key = '%s%s:%s' % (KEY, tid, session)
     state = _state(store, key, phase['at'])
     terminal, reason = wake.resolve(store, session=session)
