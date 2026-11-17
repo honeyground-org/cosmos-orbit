@@ -6,7 +6,7 @@ from html import escape
 
 GROUPS = [
     ('Your own session (hooks)', [
-        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, and SessionEnd for Claude Code) once. Inert until something is switched on.'),
+        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, and SessionEnd and StopFailure for Claude Code) once. Inert until something is switched on. Run it again after an update that adds a hook.'),
         ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
          'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
         ('cosmos-orbit context [350k | on | off | reset] [--global]   ·   export ORBIT_HANDOFF_AT=250k',
@@ -19,6 +19,10 @@ GROUPS = [
          "Orbit's round, every minute inside the dashboard: a question waiting for you is told at once (terminal, and the desktop when the terminal posts no banner), again after 30 min and 2 h, and an hour before the 12-hour close; a session idle 5 min with work left and no supervisor is sent back (auto), at most twice per idle stretch, then you are told. ORBIT_PATROL=off stops the round."),
         ('cosmos-orbit wake --session ID [--surface PANE] [--from NAME] [--when-busy wait|skip] [--check]',
          'A sender calls this right after delivering a message: the receiving session is woken when its input line is empty. Your own typing is never erased.'),
+        ('cosmos-orbit route list   ·   cosmos-orbit route add NAME --base-url URL --model MODEL --key env:VAR|keychain:SERVICE [--until YYYY-MM-DD] [--label \'…\']',
+         'Where a session can run when the one in use hits its usage limit: claude and codex on your accounts, plus routes you add (Claude Code on an Anthropic-compatible endpoint, e.g. a model on Ollama\'s cloud). The key is read only when a route starts, never stored; past --until a route is not offered.'),
+        ('cosmos-orbit route run NAME [--carry] [-- ARGS]',
+         'Start that route in this terminal. A session stopped at its limit offers the usable routes at your next prompt, numbered: type a number or a name and Orbit quits it and runs this in the same pane, carrying your request over.'),
         ('cosmos-orbit settings', 'Hook installation, switches, handoff points and what applies in this folder.'),
         ('claude --dangerously-skip-permissions   ·   codex',
          'Your normal command. The first substantial prompt becomes the goal; every prompt, correction, evidence and verdict lands in the ledger; the brief returns after compaction and at the next session.')]),

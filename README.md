@@ -584,6 +584,48 @@ JSON is never overwritten: the hooks fall back to the built-in point and the com
 it. Points stored by an earlier version (in the ledger database) move into the file once, by
 themselves.
 
+## When a session hits its usage limit: routes
+
+A session that hits its usage limit can do nothing until the reset. Claude Code writes a line for it into its
+transcript (`error: rate_limit`, status 429, "You've hit your 5-hour limit · resets 2:50pm (Asia/Seoul)", the reset
+time in `quotaLimits.resetsAt`); Codex reports `rate_limit_reached_type` in its token counts. Orbit reads that, and the
+next prompt you type there is not sent — it would only fail — but answered with the routes usable right now:
+
+```
+Orbit: Claude Code on your Anthropic account stopped at its 5-hour limit · resets 22:47 (in 1h 29m).
+Switch in this pane — type a number or a name as your next prompt; the request you just typed is carried over:
+  1  codex      Codex on your OpenAI account
+  2  kimi       Kimi K3.1 Pro on Ollama cloud · until 2026-12-16 (29 days left)
+  (or quit and run: cosmos-orbit route run NAME --carry)
+  -  trial      ended 2026-11-16
+Or wait until 22:47 and type again. Add a route: cosmos-orbit route add NAME …
+```
+
+Type `2` and Orbit quits the session (`/exit`), waits until it is gone, and starts the route in the same pane (cmux or
+tmux; elsewhere it shows the two commands to run). The new session takes the task over and runs the request you typed
+before the switch, as after a handoff. Orbit never switches by itself, and a limit with no known reset (out of
+credits) is shown once, then you may simply try again. When the route you left resets, the session on the other route
+mentions it once, and typing that route's name switches back. A round never types a continuation into a session
+stopped at its limit, and Claude Code's `StopFailure` hook announces the limit in the task's panes when it happens
+(run `cosmos-orbit hooks install` again after updating, to add that hook).
+
+A route is `claude` or `codex` on the account your shell already has, or one you add: Claude Code against an
+Anthropic-compatible endpoint, for example a model on Ollama's cloud.
+
+```
+cosmos-orbit route add kimi --base-url https://ollama.com --model kimi-k3.1-pro \
+    --key keychain:cosmos-orbit-ollama --until 2026-12-16 --label 'Kimi K3.1 Pro on Ollama cloud'
+security add-generic-password -a "$USER" -s cosmos-orbit-ollama -w     # macOS asks for the key; or --key env:OLLAMA_API_KEY
+cosmos-orbit route list
+```
+
+The key is read from the environment or the keychain only when the route starts, and passed to the host in its
+environment (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, the route's model for every model Claude Code asks for): it
+is never stored, typed into a pane or printed. `--until` is the last day a route is offered (a free period, say); after
+it the offer lists it as ended and `route run` refuses it without `--force`. On an added route Claude Code's claude.ai
+connectors are off (another sign-in takes precedence); local MCP servers and Orbit's hooks run as usual.
+`tests/verify_routes.py` checks it end to end with the real `claude` against a local stand-in endpoint.
+
 ## Messages between sessions: an idle session wakes up by itself
 
 Sessions can talk to each other: Codex to Claude Code, Claude Code to Claude Code, through a mailbox

@@ -208,13 +208,27 @@ def main(argv=None):
     context_cmd.add_argument('--host', choices=('claude', 'codex'), default=None,
                              help='the point for every session of one host (built in: claude 300k, codex 250k; Claude Code is capped at 300k, Codex at 80%% of its window)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
-    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end'))
+    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end', 'stop-failure'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
     result = sub.add_parser('result')
     result.add_argument('id')
     result.add_argument('--file')
     result.add_argument('--title')
     result.add_argument('--summary')
+    route_cmd = sub.add_parser('route', help='list | add | remove | run: where a session can run when the one in use '
+                                             'hits its usage limit (a model on an Anthropic-compatible endpoint, say)')
+    route_cmd.add_argument('action', choices=('list', 'add', 'remove', 'run'))
+    route_cmd.add_argument('name', nargs='?')
+    route_cmd.add_argument('--base-url', help='add: the Anthropic-compatible endpoint, e.g. https://ollama.com')
+    route_cmd.add_argument('--model', help='add: the model the endpoint serves, e.g. kimi-k3.1-pro')
+    route_cmd.add_argument('--key', help='add: where the key is read when the route starts: env:VARIABLE or '
+                                         'keychain:SERVICE (several, comma separated). Never stored.')
+    route_cmd.add_argument('--label', help='add: how the offer names it')
+    route_cmd.add_argument('--until', help='add: the last day it is offered (YYYY-MM-DD), e.g. the end of a free period')
+    route_cmd.add_argument('--carry', action='store_true', help='run: continue the task this pane handed over')
+    route_cmd.add_argument('--from', dest='came_from', help='run: the route left, offered back once its limit resets')
+    route_cmd.add_argument('--force', action='store_true', help='run: start a route past its last day anyway')
+    route_cmd.add_argument('--json', action='store_true', help='list: as JSON')
     switch = sub.add_parser('switch')
     switch.add_argument('id')
     switch.add_argument('--provider', required=True, choices=('codex', 'claude'))
@@ -242,6 +256,11 @@ def main(argv=None):
     recover = sub.add_parser('recover', help='Preserve files and abandon a historical pending file proposal')
     recover.add_argument('id')
     recover.add_argument('--keep-current-files', required=True, action='store_true')
+    argv = list(sys.argv[1:] if argv is None else argv)
+    passthrough = []
+    if 'route' in argv and '--' in argv:   # `route run NAME -- ARGS`: ARGS go to the host program as they are
+        cut = argv.index('--')
+        argv, passthrough = argv[:cut], argv[cut + 1:]
     try:
         args, extra = parser.parse_known_args(argv)
         if extra:
@@ -609,6 +628,28 @@ def main(argv=None):
         elif args.command == 'pause':
             store.set_paused(args.id, True)
             result = {'id': args.id, 'pause_requested': True}
+        elif args.command == 'route':
+            from . import routes
+            if args.action == 'list':
+                if args.json:
+                    result = {'routes': routes.describe(store)}
+                else:
+                    print(routes.list_text(store))
+                    return 0
+            elif not args.name:
+                raise SystemExit('route %s needs a NAME' % args.action)
+            elif args.action == 'add':
+                result = routes.add(store, args.name, args.base_url, args.model, args.key, args.label, args.until)
+            elif args.action == 'remove':
+                result = routes.remove(store, args.name)
+            else:
+                try:
+                    routes.run(store, args.name, carry=args.carry, extra=passthrough, force=args.force,
+                               came_from=args.came_from)
+                except ValueError as error:
+                    print('Orbit: ' + str(error), file=sys.stderr)
+                    return 2
+                return 0
         elif args.command == 'switch':
             result = {'queued': store.route(args.id, args.provider, args.model)}
         elif args.command == 'handoff':

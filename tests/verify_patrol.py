@@ -25,7 +25,8 @@ for name in ('ORBIT', 'COSMOS_ORBIT', 'TMUX', 'TMUX_PANE', 'CMUX_PANEL_ID', 'CMU
              'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'):
     os.environ.pop(name, None)                  # never a real terminal: every terminal below is a fake one
 
-from harness import attach, attention, lifecycle, manager, patrol, supervision, wake  # noqa: E402
+import json  # noqa: E402
+from harness import attach, attention, lifecycle, manager, patrol, supervision, verifier, wake  # noqa: E402
 from harness.store import Store  # noqa: E402
 from verify_living_checklist import check, FAILED, make_repo  # noqa: E402
 
@@ -177,6 +178,26 @@ def run(base, store):
     wake.note(store, 'S-W', 'claude', 'stop', TMUX)          # the session moved: a turn ran and stopped again
     out = mine(patrol.sweep(store, pane, at=time.time() + LATER, desktop=False), tid)
     check('a new idle stretch (the session ran a turn since): continued again', out == ['continued'], out)
+
+    print('③b a session that stopped at its usage limit: nothing is typed until the reset')
+    tid = open_task(store, root, 'S-L', 'Make the ORC export robust for empty input')
+    transcript = base / 'limited.jsonl'
+    store.preference(verifier.TRANSCRIPT_KEY + 'S-L', str(transcript))
+
+    def stopped_at_limit(resets):
+        transcript.write_text(json.dumps({
+            'type': 'assistant', 'uuid': 'l1', 'timestamp': '2026-11-17T12:00:00Z', 'isApiErrorMessage': True,
+            'error': 'rate_limit', 'apiErrorStatus': 429, 'quotaLimits': {'status': 'rejected', 'resetsAt': resets},
+            'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': "You've hit your 5-hour limit"}]}}) + '\n')
+    later = time.time() + LATER
+    stopped_at_limit(later + 3600)
+    pane = Pane(EMPTY)
+    out = mine(patrol.sweep(store, pane, at=later, desktop=False), tid)
+    check('the limit holds: the round types nothing (a continuation would only fail)', out == ['limited'] and not pane.typed(),
+          (out, pane.sent))
+    stopped_at_limit(later - 60)
+    out = mine(patrol.sweep(store, pane, at=later, desktop=False), tid)
+    check('…once it has reset, the round sends it back as before (control)', out == ['continued'], (out, pane.sent))
 
     print('④ the incident shape: the supervisor typed for this stop, then left; nothing started it again')
     tid = open_task(store, root, 'S-I', 'Make the Avro export robust for empty input')

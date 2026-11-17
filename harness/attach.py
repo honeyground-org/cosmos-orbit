@@ -22,7 +22,10 @@ PROJECT_PREFIX = 'project:'     # preference per project root: 'on' | 'off'
 HOOK_MARK = 'cosmos-orbit hook'  # identifies Orbit entries inside host hook files
 HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600),
                ('PreCompact', 'pre-compact', 30))
-HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10),), 'codex': HOOK_EVENTS}
+# StopFailure: a turn ended on an API error (a usage limit among them); Codex has no such event, its limit is read
+# from its transcript at the next prompt.
+HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10)),
+               'codex': HOOK_EVENTS}
 CLOSED = ('verified', 'stalled', 'interrupted', 'closed')  # closed: untouched for 12 h, or continued elsewhere (lifecycle)
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 # The claim words, negated in the same clause: '완료로 주장하지 않습니다', '완료로 기록한 건 없어요', 'not done yet'.
@@ -1557,7 +1560,14 @@ def hook_log(store, message):
 def handle(store, event, payload, host):
     """Return the JSON object the host expects, or None for silence. Never raises."""
     try:
-        return _handle(store, event, payload, host)
+        output = _handle(store, event, payload, host)
+        if event == 'prompt' and not (output or {}).get('decision'):
+            from .routes import prompt_note
+            note = prompt_note(store, payload, host)   # this session runs on a route: its way back, or its end day
+            if note:
+                context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')
+                output = _context('UserPromptSubmit', note + ('\n' + context if context else ''))
+        return output
     except Exception as error:  # a hook must not break the user's session
         import traceback
         frames = [f for f in traceback.extract_tb(error.__traceback__) if os.sep + 'harness' + os.sep in f.filename]
@@ -1682,6 +1692,14 @@ def _handle(store, event, payload, host):
         if session:
             store.end_session(session)  # the event that frees its task for the next session
         return None
+    if event == 'stop-failure':
+        from .routes import on_stop_failure
+        bound = store.session_task(session) if session else None
+        try:
+            task = store.get(bound['task_id']) if bound and bound['task_id'] and bound['task_id'] != NO_TASK else None
+        except ValueError:
+            task = None
+        return on_stop_failure(store, payload, host, task)
     task = resolve_task(store, root, session, payload.get('source'), payload.get('transcript_path'))
     from . import continuity
 
@@ -1741,6 +1759,10 @@ def _handle(store, event, payload, host):
         from .requirements import classify
         if classify(text) == 'system':
             return None  # background-task and monitor notifications never create or change a task
+        from .routes import on_prompt
+        reply = on_prompt(store, payload, host, task)  # stopped at a usage limit: the routes to switch to, or the switch
+        if reply:
+            return reply
         from .supervision import RESUME_LINE
         if text == RESUME_LINE:
             note = '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n'
