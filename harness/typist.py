@@ -289,7 +289,9 @@ def spawn(terminal, steps, log_path, home=None, task=None):
 
 
 def _main(request):
-    store = adopted = None
+    # A route switch from a session with no task types with neither (2026-11-17: `claim` was left unbound there, and
+    # the detached typist died before /exit, so the pane never switched).
+    store = adopted = claim = None
     if request.get('home') and request.get('task'):
         from .store import Store
         store = Store(request['home'])

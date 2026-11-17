@@ -1561,12 +1561,17 @@ def handle(store, event, payload, host):
     """Return the JSON object the host expects, or None for silence. Never raises."""
     try:
         output = _handle(store, event, payload, host)
-        if event == 'prompt' and not (output or {}).get('decision'):
-            from .routes import prompt_note
-            note = prompt_note(store, payload, host)   # this session runs on a route: its way back, or its end day
-            if note:
+        if event in ('session-start', 'prompt') and not (output or {}).get('decision'):
+            from .routes import capsule_note, prompt_note
+            # A session a route switch started: where the session it replaces was, once, task or not, any host.
+            notes = [capsule_note(store, payload.get('session_id'))]
+            if event == 'prompt':
+                notes.append(prompt_note(store, payload, host))   # its route: the way back, or its end day
+            notes = [n for n in notes if n]
+            if notes:
                 context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')
-                output = _context('UserPromptSubmit', note + ('\n' + context if context else ''))
+                output = _context('SessionStart' if event == 'session-start' else 'UserPromptSubmit',
+                                  '\n'.join(notes) + ('\n' + context if context else ''))
         return output
     except Exception as error:  # a hook must not break the user's session
         import traceback
@@ -1759,10 +1764,22 @@ def _handle(store, event, payload, host):
         from .requirements import classify
         if classify(text) == 'system':
             return None  # background-task and monitor notifications never create or change a task
-        from .routes import on_prompt
-        reply = on_prompt(store, payload, host, task)  # stopped at a usage limit: the routes to switch to, or the switch
-        if reply:
+        def refused(reply):
+            """A prompt Orbit blocks runs no turn, so no Stop hook closes the turn it opened (measured 2026-11-05 in
+            Codex: the next request was then taken for one typed during a turn and its handoff deferred)."""
+            if task and not during_turn:
+                try:
+                    from .supervision import reset_turn
+                    reset_turn(store, task['id'], session)
+                except (RuntimeError, ValueError) as error:
+                    hook_log(store, 'blocked prompt turn not closed: ' + repr(error)[:200])
             return reply
+
+        from .routes import on_prompt
+        # Stopped at a usage limit, or the user asked to switch: the routes to switch to, or the switch picked.
+        reply = on_prompt(store, payload, host, task)
+        if reply:
+            return refused(reply)
         from .supervision import RESUME_LINE
         if text == RESUME_LINE:
             note = '[orbit] This continuation was sent by Orbit, not the user. Continue the existing authorised goal; honour any pause or input requirement.\n'
@@ -1781,17 +1798,6 @@ def _handle(store, event, payload, host):
                     "user's instruction: fold what is relevant into the task and reply only if a reply is needed.")
             brief = serve_brief(store, watched(task), 'prompt', session) if task else ''
             return _context('UserPromptSubmit', note + ('\n' + brief if brief else ''))
-        def refused(reply):
-            """A prompt Orbit blocks runs no turn, so no Stop hook closes the turn it opened (measured 2026-11-05 in
-            Codex: the next request was then taken for one typed during a turn and its handoff deferred)."""
-            if task and not during_turn:
-                try:
-                    from .supervision import reset_turn
-                    reset_turn(store, task['id'], session)
-                except (RuntimeError, ValueError) as error:
-                    hook_log(store, 'blocked prompt turn not closed: ' + repr(error)[:200])
-            return reply
-
         if task is not None:
             from . import followup
             answer = followup.intercept(store, task, text)

@@ -16,6 +16,12 @@ their macOS keychain (`route key NAME` puts it there), read only when the route 
 Orbit's, typed into a pane or printed. A route may end (`until`, a free period, say): after that day it is not
 offered. Everything is a switch: `route off` turns the whole offer off (a limited session is then left alone, as
 before routes existed), `route off NAME` keeps one route (built-in or added) out of it, `route on` undoes either.
+
+The same offer comes when the user asks for it: a short prompt that asks to change the model or to use a route or a
+model by name ("kimi로 바꿔줘", "올라마 모델 쓰고 싶어", "switch to codex") is answered by the numbered routes instead
+of a turn; the same words sent again go to the session as they are. Every switch carries the session's context: a
+capsule of where it was (its last turns, the files it changed, the request held, the task) is kept in the store and
+handed to the new session at its start, whichever host each runs on and whether or not an Orbit task is attached.
 """
 import datetime
 import json
@@ -55,7 +61,23 @@ AUTHS = ('bearer', 'x-api-key')    # how a Claude Code route sends its key: Auth
 PROVIDER = 'orbit-'                # + route: the model provider a Codex route defines for its run
 CONTINUE_TEXT = ('Continue the unfinished task on this route. The previous session stopped at its usage limit and '
                  'the user chose this route; they asked nothing new.')
+ASKED_TEXT = ('Continue the unfinished task on this route. The user switched to it by choice; the context of the session '
+              'they left is in this session\'s brief. They asked nothing new.')
 MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
+CAPSULE_ENV = 'COSMOS_ORBIT_CAPSULE'  # set by `route run --capsule ID`: the context the session it starts receives
+CAPSULE_KEY = 'route-capsule:'     # + id: where the session left was (JSON), served once to the session started
+ASKED_TTL = 1800                   # an offer the user asked for is answered by the next prompt, within this time
+ASK_LENGTH = 120                   # a prompt longer than this, or of several lines, is work, never a switch request
+TURNS, TURN_CHARS, FILES = 8, 700, 20   # a capsule keeps this many last turns, each this long at most, and files
+# A switch request names no route: "다른 모델로", "모델 바꿔줘", "switch models".
+ASK_ANY = re.compile(r'((다른|딴)\s?(ai\s?)?모델|모델\s?(을|를|좀)?\s?(좀\s?)?(바꾸|바꿔|바꿀|변경|전환|교체|스위치)'
+                     r'|\b(other|another|different)\s+(ai\s+)?models?\b|\b(switch|change)\s+(the\s+)?models?\b)', re.I)
+# Work that mentions a model or a route is not a request to switch: "Organization 모델 변경", "모델 전환 기능 개발".
+ASK_NOT = re.compile(r'(기능|개발|구현|코드|함수|클래스|스키마|필드|컬럼|마이그레이션|테이블|버그|테스트|리팩|커밋'
+                     r'|\b(feature|implement\w*|develop\w*|code|function|class|schema|field|migration|commit|bug|tests?|'
+                     r'refactor\w*)\b|[`/\\{}<>=]|::|\.(py|php|ts|tsx|js|go|rb|json|md)\b)', re.I)
+ASK_CLASS = re.compile(r'\b[A-Z][a-z]+[A-Z]\w*\b|\b[A-Z][a-z]{2,}\s?모델')   # a class: "UserProfile", "Organization 모델"
+ALIASES = {'클로드': 'claude', '코덱스': 'codex', '키미': 'kimi', '올라마': 'ollama'}
 
 
 # ---------------------------------------------------------------- the routes
@@ -531,8 +553,8 @@ def guidance(store, label, limit, usable, unusable, at, held):
     when = (' · resets ' + _clock(limit['resets_at'], at)) if limit.get('resets_at') else ''
     lines = ['Orbit: %s stopped at its %s limit%s.' % (label, limit.get('kind') or 'usage', when)]
     if usable:
-        lines.append('Switch in this pane — type a number or a name as your next prompt%s:' % (
-            '; the request you just typed is carried over' if held else ''))
+        lines.append('Switch in this pane — type a number or a name and press Enter (after the words put back in the '
+                     'input is fine)%s:' % ('; the request you just typed is carried over' if held else ''))
         for number, (pick, route, model) in enumerate(offer_rows(usable), 1):
             if pick == route['name']:
                 many = len(models(route)) > 1
@@ -560,8 +582,14 @@ def _orbit(store):
 _shell_word = shlex.quote
 
 
-def _pick(text, offer):
-    word = (text or '').strip().strip('`"\'').strip().lower()
+def _pick(text, offer, blocked=None):
+    """The pick a prompt makes from the offer, or None. Claude Code puts a blocked prompt back into its input, so
+    what arrives is often those words with the pick typed after them ("stubo로 바꿔줘1", seen 2026-11-17 in a real
+    pane): the words the hook blocked, then a number or a name, count as that pick."""
+    text = (text or '').strip()
+    if blocked and text != blocked.strip() and text.startswith(blocked.strip()):
+        text = text[len(blocked.strip()):]
+    word = text.strip().strip('`"\'').strip().lower()
     if word.isdigit() and 1 <= int(word) <= len(offer):
         return offer[int(word) - 1]
     return next((pick for pick in offer if pick.lower() == word), None)   # a model name may have capitals
@@ -580,6 +608,229 @@ def _label(store, route_name, host):
     return route['label'] if route else route_name or host
 
 
+# ---------------------------------------------------------------- a switch the user asks for
+
+def targets(store):
+    """The words that name a route or a model: route names, the models they serve and each model's stem ('kimi' of
+    'kimi-k3.1-pro'), the Korean spellings of the hosts and of Ollama."""
+    words = {'ollama', '올라마'}
+    for name, route in all_routes(store).items():
+        words.add(name.lower())
+        for model in models(route):
+            words.add(model.lower())
+            stem = re.split(r'[-:/_.\s]', model.lower())[0]
+            if len(stem) >= 3:
+                words.add(stem)
+    words |= {korean for korean, english in ALIASES.items() if english in words}
+    return sorted(words, key=len, reverse=True)       # the longest first: 'kimi-k3.1-pro' before 'kimi'
+
+
+def asks_switch(store, text):
+    """Whether a prompt asks to change the model or to run on a route or model it names. Deterministic and narrow:
+    one short line; a request for work that mentions a model ("Organization 모델 변경", "모델 전환 기능 개발") is not
+    one. Returns the words named ([] for "다른 모델로"), or None when the prompt is not a switch request."""
+    text = (text or '').strip()
+    if not text or len(text) > ASK_LENGTH or '\n' in text or _orbit_line(text):
+        return None
+    words = targets(store)
+    named = [w for w in words if re.search(r'(?<![a-z0-9])' + re.escape(w) + r'(?![a-z])', text, re.I)]
+    bare = text
+    for word in named:
+        bare = re.sub(re.escape(word), ' ', bare, flags=re.I)
+    if ASK_NOT.search(bare) or ASK_CLASS.search(bare):
+        return None
+    if ASK_ANY.search(text):
+        return named
+    for word in named:
+        target = re.escape(word) + r'[a-z0-9._:-]{0,24}\s*(?:모델\s*)?'
+        if re.search(target + r'(?:으로|로|쪽으로)\s*(?:좀\s*)?(?:바꾸|바꿔|바꿀|변경|전환|교체|스위치|갈아타|넘어가|옮겨|'
+                              r'가자|가줘|하자|해\s?줘|할래|돌아가|실행|시작|진행|계속)', text, re.I) \
+                or re.search(target + r'(?:을|를)?\s*(?:좀\s*)?(?:쓰고\s?싶|쓸래|쓰자|써\s?줘|써\s?봐|써\s?보|사용하고\s?싶|'
+                                      r'사용할래|사용하자|사용해)', text, re.I) \
+                or re.search(r'\b(?:(?:switch|change|move|go)\s+(?:back\s+)?to|use|try|run\s+on)\s+(?:the\s+)?'
+                             + re.escape(word), text, re.I):
+            return named
+    return None
+
+
+def ask_guidance(store, label, usable, unusable, at, named):
+    orbit = _orbit(store)
+    rows = offer_rows(usable)
+    lines = ['Orbit: you asked to switch. This session runs on %s.' % label]
+    if rows:
+        lines.append('Switch in this pane — type a number or a name and press Enter (after the words put back in the '
+                     'input is fine); this conversation\'s context goes with it to the new session:')
+        for number, (pick, route, model) in enumerate(rows, 1):
+            if pick == route['name']:
+                many = len(models(route)) > 1
+                lines.append('  %d  %-10s %s%s%s' % (number, pick, route['label'], ' · model ' + model if many else '',
+                                                    _until_note(route, at)))
+            else:
+                lines.append('  %d  %-10s the same route on model %s' % (number, pick, model))
+        meant = [str(n) for n, (pick, route, model) in enumerate(rows, 1)
+                 if any(w in (pick.lower(), (model or '').lower(), route['name']) or ALIASES.get(w) == route['name']
+                        or (model and w in model.lower().split('-')) for w in named)]
+        if meant:
+            lines.append('  (what you named: %s)' % ', '.join(meant))
+    else:
+        lines.append('No other route is usable right now.')
+    for route, why in unusable:
+        lines.append('  -  %-10s %s' % (route['name'], why))
+    lines.append('Not a switch? Send the same words again and they go to this session. Routes: %s route list · add one: '
+                 '%s route add NAME --base-url URL --model MODEL[,MODEL…] [--api anthropic|openai] · this offer off: '
+                 '%s route off' % (orbit, orbit, orbit))
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------- the context a switch carries
+
+def _cut(text, size=TURN_CHARS):
+    text = re.sub(r'\s+\n', '\n', (text or '').strip())
+    return text if len(text) <= size else text[:size // 2].rstrip() + ' … ' + text[-(size // 2):].lstrip()
+
+
+def _texts(content):
+    """The text of a message's content; '' for a tool result (it is the host's, not a turn)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list) or any(isinstance(p, dict) and p.get('type') == 'tool_result' for p in content):
+        return ''
+    return '\n'.join(p.get('text') or '' for p in content
+                     if isinstance(p, dict) and p.get('type') in ('text', 'Text', 'input_text', 'output_text')).strip()
+
+
+def conversation(path, host, turns=TURNS):
+    """(turns, files) of a session from its own transcript: the last `turns` messages [[role, text]] the user and the
+    model exchanged (oldest first, consecutive ones of one side joined) and the files the session changed."""
+    from .requirements import classify
+    said, files = [], []
+
+    def say(role, text):
+        text = (text or '').strip()
+        if not text or (role == 'user' and (classify(text) == 'system' or _orbit_line(text))):
+            return
+        if said and said[-1][0] == role:
+            said[-1][1] = said[-1][1] + '\n' + text
+        else:
+            said.append([role, text])
+
+    def touched(path_):
+        if path_ and isinstance(path_, str):
+            path_ = path_[7:] if path_.startswith('file://') else path_
+            if path_ in files:
+                files.remove(path_)
+            files.append(path_)
+
+    lines = _tail(path, 4_000_000)       # a long turn's tool output alone can fill a megabyte
+    items = host == 'codex' and any('"item_completed"' in line for line in lines[-400:])
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get('isSidechain') or record.get('isMeta'):
+            continue
+        kind = record.get('type')
+        attached = record.get('attachment') if isinstance(record.get('attachment'), dict) else {}
+        if kind == 'attachment' and attached.get('type') == 'queued_command':
+            say('user', _texts(attached.get('prompt')))             # Claude Code: a prompt typed during a turn
+            continue
+        if kind in ('user', 'assistant'):                           # Claude Code
+            content = (record.get('message') or {}).get('content')
+            if kind == 'user':
+                say('user', _texts(content))
+                continue
+            if record.get('isApiErrorMessage'):
+                continue
+            say('assistant', _texts(content))
+            for part in content if isinstance(content, list) else ():
+                if isinstance(part, dict) and part.get('type') == 'tool_use' and part.get('name') in (
+                        'Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+                    touched((part.get('input') or {}).get('file_path') or (part.get('input') or {}).get('notebook_path'))
+            continue
+        payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+        if items:                                                   # Codex 0.16x: completed items
+            item = payload.get('item') if payload.get('type') == 'item_completed' else None
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') == 'UserMessage':
+                say('user', _texts(item.get('content')))
+            elif item.get('type') == 'AgentMessage':
+                say('assistant', _texts(item.get('content')))
+            elif item.get('type') == 'FileChange' and isinstance(item.get('changes'), dict):
+                for changed in item['changes']:
+                    touched(changed)
+        elif kind == 'event_msg' and payload.get('type') in ('user_message', 'agent_message'):   # earlier Codex
+            say('user' if payload['type'] == 'user_message' else 'assistant', payload.get('message'))
+        elif kind == 'response_item' and payload.get('name') == 'apply_patch':
+            for changed in re.findall(r'^\*\*\* (?:Add|Update|Delete) File: (.+)$',
+                                      str(payload.get('input') or payload.get('arguments') or ''), re.M):
+                touched(changed.strip())
+    return [[role, _cut(text)] for role, text in said[-turns:]], files[-FILES:]
+
+
+def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None):
+    """Keep where the session left was, for the session the switch starts: its own words, never a summary by a model."""
+    import uuid
+    from .attach import CLOSED
+    turns, files = conversation(transcript, host) if transcript else ([], [])
+    held, asked = state.get('held'), state.get('asked')
+    if turns and turns[-1][0] == 'user' and turns[-1][1].strip() in {(held or '').strip(), (asked or '').strip()}:
+        turns = turns[:-1]
+    capsule = {'id': uuid.uuid4().hex[:12], 'at': now(), 'reason': 'asked' if asked else 'limit',
+               'asked': asked, 'held': held, 'from_route': state.get('route') or host, 'from_host': host,
+               'from_session': session, 'to_route': to_route, 'model': model, 'cwd': cwd,
+               'task': task['id'] if task and task.get('status') not in CLOSED else None, 'turns': turns, 'files': files, 'served_to': None}
+    store.preference(CAPSULE_KEY + capsule['id'], json.dumps(capsule, ensure_ascii=False))
+    return capsule
+
+
+def capsule_text(store, capsule):
+    to = all_routes(store).get(capsule['to_route']) or {'host': '?', 'label': capsule['to_route']}
+    stamp = _stamp(capsule.get('at'))
+    when = datetime.datetime.fromtimestamp(stamp).strftime('%m-%d %H:%M') if stamp else '?'
+    why = ('the user chose to switch (they typed "%s")' % capsule['asked']) if capsule.get('reason') == 'asked' else \
+        'the previous session stopped at its usage limit and the user chose this route'
+    lines = ['[orbit] Carried over by a route switch at %s: the previous session ran on route %s (%s); this one runs on '
+             'route %s (%s%s). Why: %s.' % (when, capsule['from_route'], capsule['from_host'], capsule['to_route'],
+                                            to['label'], (' · model ' + capsule['model']) if capsule.get('model') else '',
+                                            why),
+             'Folder: %s · Orbit task: %s' % (capsule.get('cwd') or '?', (capsule['task'] + ' (its brief has the goal, '
+                                              'corrections and checkpoint)') if capsule.get('task') else 'none')]
+    if capsule.get('held'):
+        lines.append('The user\'s request carried over (it was blocked by the limit, never run): "%s"' % _cut(capsule['held'], 4000))
+    if capsule.get('turns'):
+        lines.append('Where the previous session was — its last turns, oldest first, in its own words:')
+        lines += ['  [%s] %s' % (role, text.replace('\n', '\n    ')) for role, text in capsule['turns']]
+    else:
+        lines.append('The previous session\'s transcript had no turns to carry.')
+    if capsule.get('files'):
+        lines.append('Files it changed: ' + ', '.join(capsule['files']))
+    if capsule.get('held'):
+        lines.append('Now: run the request carried over, with this context.')
+    elif capsule.get('task'):
+        lines.append('Now: continue the task from where the previous session was.')
+    else:
+        lines.append('Now: if the last request above was still being worked on, continue it; if it was already '
+                     'answered, tell the user in one line that this session has the previous context, and wait.')
+    return '\n'.join(lines)
+
+
+def capsule_note(store, session, environ=None):
+    """The context a switch carried, for the session `route run --capsule` started: once, to its first session (a
+    /clear later in that process does not get it again)."""
+    environ = os.environ if environ is None else environ
+    capsule_id = environ.get(CAPSULE_ENV)
+    if not capsule_id or not session:
+        return None
+    capsule = _json(store, CAPSULE_KEY + capsule_id)
+    if not capsule or capsule.get('served_to'):
+        return None
+    store.preference(CAPSULE_KEY + capsule_id, json.dumps(dict(capsule, served_to=session, served_at=now()),
+                                                          ensure_ascii=False))
+    return capsule_text(store, capsule)
+
+
 def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, spawn=None, pid=None,
               which=None, runner=None):
     """The prompt hook's part: a block reply (the offer, or the switch it started), or None to let the prompt on."""
@@ -590,15 +841,30 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
     text = (payload.get('prompt') or '').strip()
     state = _json(store, SESSION_KEY + session)
     offer = state.get('offer') or []
-    if offer and (_stamp(state.get('at')) or 0) + OFFER_TTL > at:
-        chosen = _pick(text, offer)
+    live = offer and (_stamp(state.get('at')) or 0) + (ASKED_TTL if state.get('asked') else OFFER_TTL) > at
+    if live:
+        chosen = _pick(text, offer, state.get('blocked_text'))
         if chosen:
             return switch(store, session, host, task, chosen, state, text, environ=environ, at=at, terminal=terminal,
-                          spawn=spawn, pid=pid, which=which, runner=runner)
+                          spawn=spawn, pid=pid, which=which, runner=runner, transcript=payload.get('transcript_path'),
+                          cwd=payload.get('cwd'))
     limit = read_limit(payload.get('transcript_path'), host)
-    if not active(limit, at):
-        return None
     on = current_route(host, environ)
+    if not active(limit, at):
+        if state.get('asked') and offer:
+            # An offer the user asked for ends at the next prompt that picks nothing: that prompt is theirs to send,
+            # and the very words that asked, sent again, were meant for the session.
+            store.preference(SESSION_KEY + session, json.dumps(dict(state, offer=[]), ensure_ascii=False))
+            if text == state['asked'] and live:
+                return None
+        named = asks_switch(store, text)
+        if named is None:
+            return None
+        usable, unusable = choices(store, on, at, environ, runner, which)
+        picks = [pick for pick, _, _ in offer_rows(usable)]
+        state = dict(state, offer=picks, at=now(), asked=text, route=on, host=host, held=None, blocked_text=text)
+        store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
+        return {'decision': 'block', 'reason': ask_guidance(store, _label(store, on, host), usable, unusable, at, named)}
     record_limit(store, on, limit)
     if not limit.get('resets_at') and state.get('blocked') == limit['id']:
         return None                       # no reset time known: shown once, then the user may simply try again
@@ -606,7 +872,7 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
     picks = [pick for pick, _, _ in offer_rows(usable)]
     held = text if text and not _orbit_line(text) and not _pick(text, picks) else state.get('held')
     state = {'offer': picks, 'at': now(), 'blocked': limit['id'], 'route': on, 'host': host,
-             'held': held, 'limit': limit}
+             'held': held, 'limit': limit, 'blocked_text': text}
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     return {'decision': 'block', 'reason': guidance(store, _label(store, on, host), limit, usable, unusable, at, bool(held))}
 
@@ -638,14 +904,17 @@ def switch_steps(host, presses, pid, run_line):
     steps = [('wait', 0.8)]
     if host == 'claude':                  # Claude Code puts a blocked prompt back into its input: empty it first
         steps += [('key', 'ctrl+u')] * presses
-    steps += [('text', '/exit'), ('key', 'enter'), ('gone', [pid, 30.0]), ('wait', 1.0), ('text', run_line),
-              ('key', 'enter')]
+    steps += [('text', '/exit')]
+    if host == 'codex':                   # Codex takes an Enter right behind typed text as part of a paste: a newline,
+        steps += [('wait', 1.2)]          # so /exit stayed in its input (seen 2026-11-17 in a real pane)
+    steps += [('key', 'enter'), ('gone', [pid, 30.0]), ('wait', 1.0), ('text', run_line), ('key', 'enter')]
     return steps
 
 
 def switch(store, session, host, task, name, state, text, environ=None, at=None, terminal=None, spawn=None, pid=None,
-           which=None, runner=None):
-    """Start route `name` in this session's pane, carrying the held request (or a continuation) to the task."""
+           which=None, runner=None, transcript=None, cwd=None):
+    """Start route `name` in this session's pane with this session's context (a capsule), carrying the held request
+    (or a continuation) to the task when one is attached."""
     from . import typist
     from .attach import CLOSED
     at = time.time() if at is None else at
@@ -660,8 +929,9 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
         with store.lock('task:' + task['id'], timeout=5.0):
             current = store.get(task['id'])
             data = current['data']
-            data['carried_prompt'] = {'text': (state.get('held') or CONTINUE_TEXT)[:4000], 'at': now(),
-                                      'from_session': session, 'by': 'route:' + name}
+            data['carried_prompt'] = {'text': (state.get('held') or (ASKED_TEXT if state.get('asked') else
+                                                                      CONTINUE_TEXT))[:4000],
+                                      'at': now(), 'from_session': session, 'by': 'route:' + name}
             handoff = dict(data.get('handoff_state') or {})
             for stale in ('claimed_by', 'claimed_at', 'adopted_by', 'adopted_at'):
                 handoff.pop(stale, None)
@@ -671,26 +941,33 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
             store.save(current, current['status'], 'route_switch',
                        {'route': name, 'from': state.get('route') or host, 'session': session, 'layer': 'context',
                         'terminal': (terminal or {}).get('kind')})
-    state = dict(state, offer=[], switched=name, switched_at=now())
+    capsule = make_capsule(store, session, host, name, model, state, task if carry else None,
+                           transcript or store.preference(_transcript_key() + session), cwd, at)
+    state = dict(state, offer=[], switched=name, switched_at=now(), capsule=capsule['id'])
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     left_route = state.get('route') or host
-    run_line = '%s route run %s%s%s%s' % (_orbit(store), name, (' --model ' + _shell_word(model)) if model else '',
-                                          ' --carry' if carry else '',
-                                          ' --from ' + left_route if left_route != name else '')
+    run_line = '%s route run %s%s --carry --capsule %s%s' % (
+        _orbit(store), name, (' --model ' + _shell_word(model)) if model else '', capsule['id'],
+        ' --from ' + left_route if left_route != name else '')
     note = (' · model ' + model if model else '') + _until_note(route, at)
+    carried = ('The new session takes the task over with this conversation\'s context%s.' % (
+        ' and runs your request; nothing to retype' if state.get('held') else '')) if carry else \
+        ('The new session gets this conversation\'s context%s.' % (
+            ' and your request; nothing to retype' if state.get('held') else ''))
     if not terminal:
         return {'decision': 'block', 'reason': (
-            'Orbit: to continue on %s (%s%s), quit this session with /exit and run:\n  %s%s' % (
-                name, route['label'], note, run_line,
-                '\nThe new session takes the task over and finds your request in its brief.' if carry else
-                '\nThis session has no task, so retype your request there.'))}
+            'Orbit: to continue on %s (%s%s), quit this session with /exit and run:\n  %s\n%s' % (
+                name, route['label'], note, run_line, carried))}
     steps = switch_steps(host, typist.clear_presses(text), pid or host_pid(host), run_line)
     (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'] if carry else None)
     return {'decision': 'block', 'reason': (
-        'Orbit: switching this pane to %s (%s%s): quitting this session, then `%s`.%s' % (
-            name, route['label'], note, run_line,
-            ' The new session takes the task over and runs your request; nothing to retype.' if carry else
-            ' This session has no task: retype your request there.'))}
+        'Orbit: switching this pane to %s (%s%s): quitting this session, then `%s`. %s' % (
+            name, route['label'], note, run_line, carried))}
+
+
+def _transcript_key():
+    from .verifier import TRANSCRIPT_KEY
+    return TRANSCRIPT_KEY
 
 
 def prompt_note(store, payload, host, environ=None, at=None):
@@ -706,6 +983,7 @@ def prompt_note(store, payload, host, environ=None, at=None):
     notes, changed = [], False
     home_limit = route_limit(store, home)
     if home_limit and not active(home_limit, at) and state.get('back_told') != home_limit.get('id'):
+        state.pop('asked', None)          # this offer is the way back, not one the user asked for
         state.update(back_told=home_limit.get('id'), offer=[home], at=now(), route=on, host=host)
         changed = True
         notes.append('route %s is usable again (its %s limit has reset). Typing `%s` as the next prompt switches this '
@@ -796,9 +1074,10 @@ def _toml(value):
 
 
 def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, force=False, at=None,
-        which=None, out=sys.stderr, came_from=None, model=None):
+        which=None, out=sys.stderr, came_from=None, model=None, capsule=None):
     """Start route `name` in this terminal: the host program with the route's endpoint, key and model (the
-    route's default, or `model`: any model its service serves, listed or not)."""
+    route's default, or `model`: any model its service serves, listed or not). `capsule`: the context a switch
+    carried, handed to the new session at its start."""
     from .typist import CARRY_LINE
     environ = dict(os.environ if environ is None else environ)
     at = time.time() if at is None else at
@@ -821,8 +1100,14 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
             environ.pop(var, None)
     environ[ROUTE_ENV] = name
     environ.pop(FROM_ENV, None)
+    environ.pop(CAPSULE_ENV, None)        # a capsule belongs to the one session a switch started, never to a later one
     if came_from and came_from != name:
         environ[FROM_ENV] = came_from
+    if capsule:
+        if not re.match(r'^[0-9a-f]{12}$', capsule) or not _json(store, CAPSULE_KEY + capsule):
+            print('Orbit: no carried context %r here: starting without it' % capsule, file=out, flush=True)
+        else:
+            environ[CAPSULE_ENV] = capsule
     argv = [route['host']]
     if name in BUILTIN:
         if model:                         # the host's own account, on a model the user picked

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """A local stand-in for an OpenAI Responses-compatible endpoint, for checking a Codex route end to end.
 
-    python3 tests/stub_openai.py PORT LOG TOKEN
+    python3 tests/stub_openai.py PORT LOG TOKEN [MARKER,MARKER…]
 
 Answers POST …/responses (streamed) with one fixed text and appends one JSON line per request to LOG: the method,
-the path, the model asked for and whether the bearer token was the one expected (the token itself is never
-written). GET …/models answers an empty list; anything else answers 404. It serves until killed.
+the path, the model asked for, whether the bearer token was the one expected (the token itself is never
+written) and which MARKERs the request carries. GET …/models answers an empty list; anything else answers 404. It serves until killed.
 """
 import json
 import sys
@@ -23,7 +23,9 @@ class Handler(BaseHTTPRequestHandler):
         expected = 'Bearer ' + (self.server.expected_token or '')
         with open(self.server.log, 'a', encoding='utf-8') as handle:
             handle.write(json.dumps({'method': method, 'path': self.path, 'model': body.get('model'),
-                                     'token_ok': bool(self.server.expected_token) and auth == expected}) + '\n')
+                                     'token_ok': bool(self.server.expected_token) and auth == expected,
+                                     'markers': [m for m in self.server.markers if m in json.dumps(body, ensure_ascii=False)]})
+                         + '\n')
 
     def _json(self, status, payload):
         data = json.dumps(payload).encode()
@@ -80,6 +82,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.log = log
     server.expected_token = sys.argv[3] if len(sys.argv) > 3 else None
+    server.markers = [m for m in (sys.argv[4] if len(sys.argv) > 4 else '').split(',') if m]   # words to look for in each request
     server.serve_forever()
 
 

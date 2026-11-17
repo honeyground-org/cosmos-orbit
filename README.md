@@ -626,6 +626,18 @@ it the offer lists it as ended and `route run` refuses it without `--force`. On 
 connectors are off (another sign-in takes precedence); local MCP servers and Orbit's hooks run as usual.
 `tests/verify_routes.py` checks it end to end with the real `claude` against a local stand-in endpoint.
 
+**You can ask for the offer at any time, not only at a limit.** A short prompt that asks to change the model or to run
+on a route or model by name — `kimi로 바꿔줘`, `올라마 모델 쓰고 싶어`, `다른 모델로`, `switch to codex`, `use glm-5` —
+is answered by the same numbered list instead of a turn. Type a number or a name (in Claude Code, after the words it
+puts back in the input is fine) and the pane switches; send the same words again, or anything else, and they go to the
+session as usual. A request for work that mentions a model ("Organization 모델 변경", "모델 전환 기능 개발") or several
+lines is never taken for one.
+
+**Every switch carries the conversation.** Orbit keeps where the session was — its last turns in its own words, the
+files it changed, the request held at a limit, the task — and hands it to the new session when it starts, once, in the
+same form whichever host each runs on (Claude Code → Codex, Codex → Claude Code) and whether or not an Orbit task is
+attached; a task is also taken over as after a handoff. Nothing is summarised by a model on the way.
+
 ## Messages between sessions: an idle session wakes up by itself
 
 Sessions can talk to each other: Codex to Claude Code, Claude Code to Claude Code, through a mailbox

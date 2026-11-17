@@ -250,7 +250,9 @@ def main(argv=None):
     route_cmd.add_argument('--remove', action='store_true', help='key: delete the key from your keychain')
     route_cmd.add_argument('--label', help='add: how the offer names it')
     route_cmd.add_argument('--until', help='add: the last day it is offered (YYYY-MM-DD), e.g. the end of a free period')
-    route_cmd.add_argument('--carry', action='store_true', help='run: continue the task this pane handed over')
+    route_cmd.add_argument('--carry', action='store_true', help='run: start on the carry line: the new session '
+                                                                'continues the task or the context handed over')
+    route_cmd.add_argument('--capsule', help='run: the context a switch carried (its id), given to the new session')
     route_cmd.add_argument('--from', dest='came_from', help='run: the route left, offered back once its limit resets')
     route_cmd.add_argument('--force', action='store_true', help='run: start a route past its last day anyway')
     route_cmd.add_argument('--json', action='store_true', help='list: as JSON')
@@ -682,7 +684,7 @@ def main(argv=None):
             else:
                 try:
                     routes.run(store, args.name, carry=args.carry, extra=passthrough, force=args.force,
-                               came_from=args.came_from, model=args.model)
+                               came_from=args.came_from, model=args.model, capsule=args.capsule)
                 except ValueError as error:
                     print('Orbit: ' + str(error), file=sys.stderr)
                     return 2
