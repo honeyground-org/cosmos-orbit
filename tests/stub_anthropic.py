@@ -24,7 +24,11 @@ class Handler(BaseHTTPRequestHandler):
         with open(self.server.log, 'a', encoding='utf-8') as handle:
             handle.write(json.dumps({'path': self.path, 'model': body.get('model'), 'stream': bool(body.get('stream')),
                                      'token_ok': bool(self.server.expected_token) and auth == expected,
-                                     'x_api_key_sent': bool(self.headers.get('x-api-key'))}) + '\n')
+                                     'x_api_key_sent': bool(self.headers.get('x-api-key')),
+                                     'authorization_kind': (auth.split(' ')[0] if auth else None),
+                                     'authorization_is_expected': auth == expected,
+                                     'x_api_key_ok': bool(self.server.expected_token)
+                                     and self.headers.get('x-api-key') == self.server.expected_token}) + '\n')
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length') or 0)

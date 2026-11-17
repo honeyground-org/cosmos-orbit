@@ -8,15 +8,21 @@ commands. Typing a route's number or name as the next prompt starts that route i
 blocked request over. Orbit never switches by itself: the user picks.
 
 A route is a host program (claude or codex). The two built in run on the account the shell already has; a route the
-user adds runs Claude Code against an Anthropic-compatible endpoint (Ollama's cloud, say) with its base URL, model
-and key. The key is read from the environment or the macOS keychain only when the route starts: never written to a
-file, typed into a pane or printed. A route may end (`until`, a free period, say): after that day it is not offered.
+user adds points one of them at any service that speaks its protocol: Claude Code at an Anthropic-compatible
+endpoint (`--api anthropic`: Ollama's cloud, a local Ollama, a gateway), Codex at an OpenAI Responses-compatible
+one (`--api openai`). A route may serve several models; the first is its default and the others are offered beside
+it. Each user's routes and keys are their own: routes.json in their Orbit home, the key in their environment or
+their macOS keychain (`route key NAME` puts it there), read only when the route starts: never written to a file of
+Orbit's, typed into a pane or printed. A route may end (`until`, a free period, say): after that day it is not
+offered. Everything is a switch: `route off` turns the whole offer off (a limited session is then left alone, as
+before routes existed), `route off NAME` keeps one route (built-in or added) out of it, `route on` undoes either.
 """
 import datetime
 import json
 import os
 import re
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,7 +48,11 @@ NAME = re.compile(r'^[a-z][a-z0-9-]{0,23}$')
 # serves the route's model, every one of them is that model.
 MODEL_VARS = ('ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
               'CLAUDE_CODE_SUBAGENT_MODEL')
-ENDPOINT_VARS = ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY') + MODEL_VARS
+KEY_ENV = 'COSMOS_ORBIT_ROUTE_KEY'  # a Codex route: the variable Codex's provider reads its key from (env_key)
+ENDPOINT_VARS = ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', KEY_ENV) + MODEL_VARS
+APIS = {'anthropic': 'claude', 'openai': 'codex'}   # the protocol an added route's service speaks -> the host for it
+AUTHS = ('bearer', 'x-api-key')    # how a Claude Code route sends its key: Authorization: Bearer, or x-api-key
+PROVIDER = 'orbit-'                # + route: the model provider a Codex route defines for its run
 CONTINUE_TEXT = ('Continue the unfinished task on this route. The previous session stopped at its usage limit and '
                  'the user chose this route; they asked nothing new.')
 MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
@@ -54,31 +64,88 @@ def _path(store):
     return Path(store.home) / 'routes.json'
 
 
-def load(store):
-    """The routes the user added: {name: route}."""
+def _data(store):
+    """The whole routes.json: {'enabled': bool, 'builtin': {name: {'enabled': bool}}, 'routes': {name: route}}."""
     try:
         with _path(store).open(encoding='utf-8') as handle:
             data = json.load(handle)
     except (OSError, ValueError):
         return {}
-    routes = data.get('routes') if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def load(store):
+    """The routes the user added: {name: route}."""
+    routes = _data(store).get('routes')
     return {name: dict(route, name=name) for name, route in (routes or {}).items() if isinstance(route, dict)}
 
 
-def _write(store, routes):
+def _save(store, data):
     path = _path(store)
     temporary = path.with_name(path.name + '.tmp')
     with temporary.open('w', encoding='utf-8') as handle:
-        json.dump({'routes': routes}, handle, indent=2, ensure_ascii=False)
+        json.dump(data, handle, indent=2, ensure_ascii=False)
         handle.write('\n')
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 
 
+def _write(store, routes):
+    data = _data(store)
+    data['routes'] = {k: {f: v for f, v in r.items() if f != 'name'} for k, r in routes.items()}
+    _save(store, data)
+
+
 def all_routes(store):
-    routes = {name: dict(route) for name, route in BUILTIN.items()}
+    data = _data(store)
+    overrides = data.get('builtin') if isinstance(data.get('builtin'), dict) else {}
+    routes = {}
+    for name, route in BUILTIN.items():
+        routes[name] = dict(route)
+        if isinstance(overrides.get(name), dict) and overrides[name].get('enabled') is False:
+            routes[name]['enabled'] = False
     routes.update(load(store))
     return routes
+
+
+def enabled(store):
+    """Whether a session stopped at its limit is offered routes at all (on unless the user turned it off)."""
+    return _data(store).get('enabled') is not False
+
+
+def route_on(route):
+    return route.get('enabled') is not False
+
+
+def set_enabled(store, value, name=None):
+    """`route on|off` (the whole offer) or `route on|off NAME` (one route, built-in or added)."""
+    data = _data(store)
+    if not name:
+        data['enabled'] = bool(value)
+        _save(store, data)
+        return {'routes': 'on' if value else 'off'}
+    if name in BUILTIN:
+        builtin = data.get('builtin') if isinstance(data.get('builtin'), dict) else {}
+        builtin[name] = dict(builtin.get(name) or {}, enabled=bool(value))
+        data['builtin'] = builtin
+    elif name in (data.get('routes') or {}):
+        data['routes'][name]['enabled'] = bool(value)
+    else:
+        raise ValueError('no route named %r (cosmos-orbit route list)' % name)
+    _save(store, data)
+    return {'route': name, 'enabled': bool(value)}
+
+
+def models(route):
+    """The models a route serves, its default first ([] for a built-in route: the host's own choice)."""
+    listed = route.get('models') if isinstance(route.get('models'), list) else []
+    first = route.get('model')
+    return ([first] if first else []) + [m for m in listed if m and m != first]
+
+
+def default_key(name):
+    """Where an added route reads its key unless told otherwise: the user's own environment, then keychain."""
+    return 'env:COSMOS_ORBIT_%s_KEY,keychain:cosmos-orbit-%s' % (name.upper().replace('-', '_'), name)
 
 
 def key_sources(spec):
@@ -101,34 +168,96 @@ def _day(value):
         raise ValueError('--until is a day, YYYY-MM-DD: %r' % value)
 
 
-def add(store, name, base_url, model, key, label=None, until=None, host='claude'):
+def add(store, name, base_url, model, key=None, label=None, until=None, api=None, auth=None):
+    """Add (or replace) a route: `model` is one model or several, comma separated, the first the default."""
     if not NAME.match(name or '') or name in BUILTIN:
         raise ValueError('a route name is lowercase letters, digits and dashes (not claude or codex): %r' % name)
-    if host != 'claude':
-        raise ValueError('an added route runs Claude Code against an Anthropic-compatible endpoint (host claude)')
+    api = (api or 'anthropic').strip().lower()
+    if api not in APIS:
+        raise ValueError('--api is anthropic (Claude Code, an Anthropic-compatible endpoint) or openai (Codex, an '
+                         'OpenAI Responses-compatible endpoint): %r' % api)
+    auth = (auth or 'bearer').strip().lower()
+    if auth not in AUTHS:
+        raise ValueError('--auth is bearer or x-api-key: %r' % auth)
+    if auth != 'bearer' and api != 'anthropic':
+        raise ValueError('--auth x-api-key is for an Anthropic-compatible route; Codex sends its key as a bearer token')
     if not re.match(r'^https?://[^\s]+$', base_url or ''):
         raise ValueError('--base-url must be an http(s) URL: %r' % base_url)
-    if not (model or '').strip():
-        raise ValueError('--model is required')
+    served = [m.strip() for m in (model or '').split(',') if m.strip()]
+    if not served:
+        raise ValueError('--model is required (one, or several comma separated: the first is the default)')
+    key = key or default_key(name)
     key_sources(key)
     if until:
         _day(until)
     routes = load(store)
     routes.pop(name, None)
-    routes[name] = {'host': host, 'base_url': base_url.rstrip('/'), 'model': model.strip(), 'key': key,
-                    'label': (label or '%s at %s' % (model.strip(), base_url)).strip(), 'until': until or None,
-                    'added': now()}
-    _write(store, {k: {f: v for f, v in r.items() if f != 'name'} for k, r in routes.items()})
+    routes[name] = {'host': APIS[api], 'api': api, 'auth': auth, 'base_url': base_url.rstrip('/'), 'model': served[0],
+                    'models': served, 'key': key,
+                    'label': (label or '%s at %s' % (served[0], base_url)).strip(), 'until': until or None,
+                    'enabled': True, 'added': now()}
+    _write(store, routes)
     return dict(routes[name], name=name)
 
 
 def remove(store, name):
     routes = load(store)
     if name not in routes:
-        raise ValueError('no added route named %r (built-in routes cannot be removed)' % name)
+        raise ValueError('no added route named %r (built-in routes cannot be removed: route off %s)' % (name, name))
     routes.pop(name)
-    _write(store, {k: {f: v for f, v in r.items() if f != 'name'} for k, r in routes.items()})
-    return {'removed': name}
+    _write(store, routes)
+    return {'removed': name, 'note': 'a key you put in your keychain stays there: route key %s --remove first to '
+                                     'delete it' % name}
+
+
+def _keychain_service(route):
+    services = [value for kind, value in key_sources(route.get('key')) if kind == 'keychain']
+    if not services or sys.platform != 'darwin':
+        envs = [value for kind, value in key_sources(route.get('key')) if kind == 'env']
+        raise ValueError('route %s reads its key from %s: put it in your shell profile (export %s=…)' % (
+            route['name'], ', '.join('env:' + e for e in envs) or route.get('key'), envs[0] if envs else 'VARIABLE')
+                         if envs else 'route %s has no keychain source (its key: %s)' % (route['name'], route.get('key')))
+    return services[0]
+
+
+def _security_line(*args):
+    """One command line for `security -i`, which reads its commands from stdin: the key never reaches argv."""
+    return ' '.join('"%s"' % str(a).replace('\\', '\\\\').replace('"', '\\"') for a in args) + '\n'
+
+
+def set_key(store, name, value, runner=None):
+    """`route key NAME`: put this user's key for the route into their keychain. The value is never printed."""
+    route = load(store).get(name)
+    if not route:
+        raise ValueError('no added route named %r (built-in routes use your own claude or codex login)' % name)
+    value = (value or '').strip()
+    if not value or len(value) < 8 or any(c.isspace() for c in value):
+        raise ValueError('that is not a key (empty, too short, or it has spaces or line breaks)')
+    service = _keychain_service(route)
+    import getpass
+    line = _security_line('add-generic-password', '-U', '-s', service, '-a', getpass.getuser(),
+                          '-l', 'cosmos-orbit route %s' % name, '-w', value)
+    done = (runner or subprocess.run)(['security', '-i'], input=line, capture_output=True, text=True, timeout=20)
+    if done.returncode != 0 or 'error' in (done.stderr or '').lower():
+        raise ValueError('the keychain did not take the key (%s)' % ((done.stderr or '').strip()[:200] or done.returncode))
+    if read_key(dict(route, key='keychain:' + service), environ={}) != value:
+        raise ValueError('the key was written but does not read back from keychain:%s' % service)
+    sources = key_sources(route.get('key'))
+    before = sources[:sources.index(('keychain', service))]
+    shadow = [v for kind, v in before if kind == 'env' and os.environ.get(v)]
+    return {'route': name, 'stored': 'keychain:' + service, 'characters': len(value),
+            'note': ('env:%s is set in this shell and is read before the keychain' % shadow[0]) if shadow else ''}
+
+
+def delete_key(store, name, runner=None):
+    route = load(store).get(name)
+    if not route:
+        raise ValueError('no added route named %r' % name)
+    service = _keychain_service(route)
+    done = (runner or subprocess.run)(['security', 'delete-generic-password', '-s', service], capture_output=True,
+                                      text=True, timeout=20)
+    return {'route': name, 'removed': 'keychain:' + service if done.returncode == 0 else None,
+            'note': '' if done.returncode == 0 else 'no key was there'}
 
 
 def _quiet(argv):
@@ -345,6 +474,8 @@ def _limited_text(limit, at):
 def availability(store, route, at=None, environ=None, runner=None, which=None):
     """(usable, why not) for one route right now."""
     at = time.time() if at is None else at
+    if not route_on(route):
+        return False, 'off (route on %s)' % route['name']
     if not (which or shutil.which)(route['host']):
         return False, '%s is not installed' % route['host']
     left = days_left(route, at)
@@ -379,6 +510,22 @@ def choices(store, exclude, at=None, environ=None, runner=None, which=None):
     return usable, unusable
 
 
+def offer_rows(usable):
+    """[(pick, route, model)]: each usable route on its default model, then each other model it serves as
+    NAME:MODEL. A pick is what the user types (or its number); a route name never has a colon, so it splits."""
+    rows = []
+    for route in usable:
+        served = models(route)
+        rows.append((route['name'], route, served[0] if served else None))
+        rows += [('%s:%s' % (route['name'], m), route, m) for m in served[1:]]
+    return rows
+
+
+def split_pick(pick):
+    name, _, model = (pick or '').partition(':')
+    return name, (model or None)
+
+
 def guidance(store, label, limit, usable, unusable, at, held):
     orbit = _orbit(store)
     when = (' · resets ' + _clock(limit['resets_at'], at)) if limit.get('resets_at') else ''
@@ -386,16 +533,22 @@ def guidance(store, label, limit, usable, unusable, at, held):
     if usable:
         lines.append('Switch in this pane — type a number or a name as your next prompt%s:' % (
             '; the request you just typed is carried over' if held else ''))
-        for number, route in enumerate(usable, 1):
-            lines.append('  %d  %-10s %s%s' % (number, route['name'], route['label'], _until_note(route, at)))
-        lines.append('  (or quit and run: %s route run NAME --carry)' % orbit)
+        for number, (pick, route, model) in enumerate(offer_rows(usable), 1):
+            if pick == route['name']:
+                many = len(models(route)) > 1
+                lines.append('  %d  %-10s %s%s%s' % (number, pick, route['label'], ' · model ' + model if many else '',
+                                                    _until_note(route, at)))
+            else:
+                lines.append('  %d  %-10s the same route on model %s' % (number, pick, model))
+        lines.append('  (or quit and run: %s route run NAME [--model MODEL] --carry)' % orbit)
     else:
         lines.append('No other route is usable right now.')
     for route, why in unusable:
         lines.append('  -  %-10s %s' % (route['name'], why))
-    lines.append('Or wait%s and type again. Add a route: %s route add NAME --base-url URL --model MODEL '
-                 '--key env:VAR|keychain:SERVICE [--until YYYY-MM-DD]' % (
-                     ' until ' + _clock(limit['resets_at'], at).split(' (')[0] if limit.get('resets_at') else '', orbit))
+    lines.append('Or wait%s and type again. Routes: %s route list · add one: %s route add NAME --base-url URL --model '
+                 'MODEL[,MODEL…] [--api anthropic|openai] · this offer off: %s route off' % (
+                     ' until ' + _clock(limit['resets_at'], at).split(' (')[0] if limit.get('resets_at') else '',
+                     orbit, orbit, orbit))
     return '\n'.join(lines)
 
 
@@ -404,11 +557,14 @@ def _orbit(store):
     return orbit_command(store)
 
 
+_shell_word = shlex.quote
+
+
 def _pick(text, offer):
     word = (text or '').strip().strip('`"\'').strip().lower()
     if word.isdigit() and 1 <= int(word) <= len(offer):
         return offer[int(word) - 1]
-    return word if word in offer else None
+    return next((pick for pick in offer if pick.lower() == word), None)   # a model name may have capitals
 
 
 def _orbit_line(text):
@@ -428,8 +584,8 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
               which=None, runner=None):
     """The prompt hook's part: a block reply (the offer, or the switch it started), or None to let the prompt on."""
     session = payload.get('session_id')
-    if not session:
-        return None
+    if not session or not enabled(store):
+        return None                       # routes off: a limited session is left alone, as before routes existed
     at = time.time() if at is None else at
     text = (payload.get('prompt') or '').strip()
     state = _json(store, SESSION_KEY + session)
@@ -447,8 +603,9 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
     if not limit.get('resets_at') and state.get('blocked') == limit['id']:
         return None                       # no reset time known: shown once, then the user may simply try again
     usable, unusable = choices(store, on, at, environ, runner, which)
-    held = text if text and not _orbit_line(text) and not _pick(text, [r['name'] for r in usable]) else state.get('held')
-    state = {'offer': [r['name'] for r in usable], 'at': now(), 'blocked': limit['id'], 'route': on, 'host': host,
+    picks = [pick for pick, _, _ in offer_rows(usable)]
+    held = text if text and not _orbit_line(text) and not _pick(text, picks) else state.get('held')
+    state = {'offer': picks, 'at': now(), 'blocked': limit['id'], 'route': on, 'host': host,
              'held': held, 'limit': limit}
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     return {'decision': 'block', 'reason': guidance(store, _label(store, on, host), limit, usable, unusable, at, bool(held))}
@@ -492,6 +649,7 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
     from . import typist
     from .attach import CLOSED
     at = time.time() if at is None else at
+    name, model = split_pick(name)
     route = all_routes(store).get(name)
     ok, why = availability(store, route, at, environ, runner, which) if route else (False, 'no such route')
     if not ok:
@@ -516,9 +674,10 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
     state = dict(state, offer=[], switched=name, switched_at=now())
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     left_route = state.get('route') or host
-    run_line = '%s route run %s%s%s' % (_orbit(store), name, ' --carry' if carry else '',
-                                        ' --from ' + left_route if left_route != name else '')
-    note = _until_note(route, at)
+    run_line = '%s route run %s%s%s%s' % (_orbit(store), name, (' --model ' + _shell_word(model)) if model else '',
+                                          ' --carry' if carry else '',
+                                          ' --from ' + left_route if left_route != name else '')
+    note = (' · model ' + model if model else '') + _until_note(route, at)
     if not terminal:
         return {'decision': 'block', 'reason': (
             'Orbit: to continue on %s (%s%s), quit this session with /exit and run:\n  %s%s' % (
@@ -540,7 +699,7 @@ def prompt_note(store, payload, host, environ=None, at=None):
     session = payload.get('session_id')
     on = current_route(host, environ)
     home = environ.get(FROM_ENV) or (host if on != host else None)   # the route this session was switched away from
-    if not session or not home or home == on:
+    if not session or not home or home == on or not enabled(store):
         return None
     at = time.time() if at is None else at
     state = _json(store, SESSION_KEY + session)
@@ -569,6 +728,8 @@ def prompt_note(store, payload, host, environ=None, at=None):
 def on_stop_failure(store, payload, host, task, environ=None, deliver=None):
     """Claude Code's StopFailure: a turn ended on an API error. A limit is recorded and announced in the task's
     panes (the host shows nothing a hook returns here); the user's next prompt there gets the offer."""
+    if not enabled(store):
+        return None
     limit = read_limit(payload.get('transcript_path'), host)
     if not limit and str(payload.get('error') or payload.get('error_type') or '') in LIMIT_ERRORS:
         text = str(payload.get('error_message') or payload.get('message') or payload.get('last_assistant_message') or '')
@@ -602,33 +763,53 @@ def describe(store, at=None, environ=None, runner=None, which=None):
     for name in sorted(routes, key=lambda n: (n not in BUILTIN, n)):
         route = routes[name]
         ok, why = availability(store, route, at, environ, runner, which)
-        rows.append({'name': name, 'host': route['host'], 'label': route['label'], 'model': route.get('model'),
-                     'base_url': route.get('base_url'), 'key': route.get('key'), 'until': route.get('until'),
-                     'days_left': days_left(route, at), 'usable': ok, 'why': why})
+        rows.append({'name': name, 'host': route['host'], 'api': route.get('api') or ('anthropic' if name not in BUILTIN else None),
+                     'auth': route.get('auth') or ('bearer' if name not in BUILTIN else None), 'label': route['label'],
+                     'model': route.get('model'), 'models': models(route), 'base_url': route.get('base_url'),
+                     'key': route.get('key'), 'until': route.get('until'), 'days_left': days_left(route, at),
+                     'enabled': route_on(route), 'usable': ok, 'why': why})
     return rows
 
 
 def list_text(store, at=None, environ=None):
     at = time.time() if at is None else at
-    lines = ['ROUTES (a session that hits its limit offers the usable ones; `route run NAME` starts one here)']
+    orbit = _orbit(store)
+    if enabled(store):
+        head = 'ROUTES: on — a session that hits its limit offers the usable ones (all off: %s route off)' % orbit
+    else:
+        head = 'ROUTES: off — a session that hits its limit is left alone (on again: %s route on)' % orbit
+    lines = [head]
     routes = all_routes(store)
     for row in describe(store, at, environ):
-        lines.append('  %-10s %-6s %s%s%s' % (row['name'], 'ok' if row['usable'] else '-', row['label'],
-                                            _until_note(routes[row['name']], at),
-                                            '' if row['usable'] else ' · ' + row['why']))
+        state = 'ok' if row['usable'] else ('off' if not row['enabled'] else '-')
+        lines.append('  %-10s %-4s %s%s%s%s' % (
+            row['name'], state, row['label'],
+            (' · models ' + ', '.join(row['models'])) if len(row['models']) > 1 else '',
+            _until_note(routes[row['name']], at), '' if row['usable'] else ' · ' + row['why']))
+    lines.append('`route run NAME [--model MODEL]` starts one here · `route on|off NAME` · `route key NAME` stores '
+                 'your key · `route add NAME --base-url URL --model M[,M…] [--api anthropic|openai]`')
     return '\n'.join(lines)
 
 
+def _toml(value):
+    return json.dumps(str(value), ensure_ascii=False)   # a JSON string is a TOML basic string
+
+
 def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, force=False, at=None,
-        which=None, out=sys.stderr, came_from=None):
-    """Start route `name` in this terminal: the host program with the route's endpoint, key and model."""
+        which=None, out=sys.stderr, came_from=None, model=None):
+    """Start route `name` in this terminal: the host program with the route's endpoint, key and model (the
+    route's default, or `model`: any model its service serves, listed or not)."""
     from .typist import CARRY_LINE
     environ = dict(os.environ if environ is None else environ)
     at = time.time() if at is None else at
     routes = all_routes(store)
+    name, picked = split_pick(name)
+    model = (model or picked or '').strip() or None
     route = routes.get(name)
     if not route:
         raise ValueError('no route named %r (cosmos-orbit route list)' % name)
+    if not route_on(route):
+        raise ValueError('route %s is off (cosmos-orbit route on %s)' % (name, name))
     if not (which or shutil.which)(route['host']):
         raise ValueError('%s is not installed' % route['host'])
     left = days_left(route, at)
@@ -643,20 +824,43 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
     if came_from and came_from != name:
         environ[FROM_ENV] = came_from
     argv = [route['host']]
-    if name not in BUILTIN:
+    if name in BUILTIN:
+        if model:                         # the host's own account, on a model the user picked
+            argv += ['--model', model] if route['host'] == 'claude' else ['-c', 'model=' + _toml(model)]
+    else:
         key = read_key(route, environ)
         if not key:
-            raise ValueError('route %s has no key: set %s' % (name, route['key']))
-        environ.update(ANTHROPIC_BASE_URL=route['base_url'], ANTHROPIC_AUTH_TOKEN=key, ANTHROPIC_API_KEY='')
-        for var in MODEL_VARS:
-            environ[var] = route['model']
-        argv += ['--model', route['model']]
+            raise ValueError('route %s has no key: cosmos-orbit route key %s (or set %s)' % (name, name, route['key']))
+        model = model or route['model']
+        if (route.get('api') or 'anthropic') == 'openai':
+            provider = PROVIDER + name    # Codex: a model provider defined for this run only, its key in the env
+            environ[KEY_ENV] = key
+            for field, value in (('name', name), ('base_url', route['base_url']), ('env_key', KEY_ENV),
+                                 ('wire_api', 'responses')):
+                argv += ['-c', 'model_providers.%s.%s=%s' % (provider, field, _toml(value))]
+            argv += ['-c', 'model_provider=' + _toml(provider), '-c', 'model=' + _toml(model)]
+        else:
+            environ['ANTHROPIC_BASE_URL'] = route['base_url']
+            if route.get('auth') == 'x-api-key':
+                # Not ANTHROPIC_API_KEY: Claude Code drops a key it has not been asked to approve and falls back to
+                # the user's claude.ai login, whose token would then go to this endpoint (seen 2026-11-17). An
+                # apiKeyHelper is used as given and sent as both x-api-key and bearer; it prints the key from the
+                # environment, so the key stays out of argv.
+                environ[KEY_ENV] = key
+                environ.pop('ANTHROPIC_AUTH_TOKEN', None)
+                environ.pop('ANTHROPIC_API_KEY', None)
+                argv += ['--settings', json.dumps({'apiKeyHelper': 'printenv ' + KEY_ENV})]
+            else:
+                environ.update(ANTHROPIC_AUTH_TOKEN=key, ANTHROPIC_API_KEY='')
+            for var in MODEL_VARS:
+                environ[var] = model
+            argv += ['--model', model]
     argv += list(extra)
     if carry:
         argv.append(CARRY_LINE)
     limit = route_limit(store, name)
-    print('Orbit: starting %s on route %s (%s%s)%s' % (
-        route['host'], name, route['label'], _until_note(route, at),
+    print('Orbit: starting %s on route %s (%s%s%s)%s' % (
+        route['host'], name, route['label'], (' · model ' + model) if model else '', _until_note(route, at),
         (' — note: ' + _limited_text(limit, at)) if active(limit, at) else ''), file=out, flush=True)
     if hasattr(store, 'close'):
         store.close()                     # the host replaces this process: nothing of the ledger stays open in it
