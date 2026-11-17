@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """A local stand-in for an Anthropic-compatible endpoint (Ollama's cloud, say), for checking a route end to end.
 
-    python3 tests/stub_anthropic.py PORT LOG
+    python3 tests/stub_anthropic.py PORT LOG [TOKEN [MARKER,MARKER…]]
 
 Answers POST /v1/messages (streamed or not) with one fixed text and appends one JSON line per request to LOG: the
-path, the model asked for and whether the bearer token was the one expected (the token itself is never written).
+path, the model asked for, whether the bearer token was the one expected (the token itself is never written) and
+which MARKERs the request carries.
 Anything else answers 404. It serves until killed.
 """
 import json
@@ -28,7 +29,9 @@ class Handler(BaseHTTPRequestHandler):
                                      'authorization_kind': (auth.split(' ')[0] if auth else None),
                                      'authorization_is_expected': auth == expected,
                                      'x_api_key_ok': bool(self.server.expected_token)
-                                     and self.headers.get('x-api-key') == self.server.expected_token}) + '\n')
+                                     and self.headers.get('x-api-key') == self.server.expected_token,
+                                     'markers': [m for m in self.server.markers if m in json.dumps(body, ensure_ascii=False)]})
+                         + '\n')
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length') or 0)
@@ -75,6 +78,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     server.log = log
     server.expected_token = sys.argv[3] if len(sys.argv) > 3 else None
+    server.markers = [m for m in (sys.argv[4] if len(sys.argv) > 4 else '').split(',') if m]   # words to look for in each request
     server.serve_forever()
 
 

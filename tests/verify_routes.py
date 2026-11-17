@@ -25,6 +25,7 @@ Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -196,7 +197,7 @@ steps = spawned[0][1] if spawned else []
 texts = [value for kind, value in steps if kind == 'text']
 check('typed: the input emptied, /exit, then the route started once the host is gone',
       ('key', 'ctrl+u') in steps and texts[0] == '/exit' and ('gone', [4242, 30.0]) in steps
-      and texts[-1] == 'cosmos-orbit route run kimi --carry --from claude'
+      and re.fullmatch(r'cosmos-orbit route run kimi --carry --capsule [0-9a-f]{12} --from claude', texts[-1] or '')
       and steps.index(('gone', [4242, 30.0])) < steps.index(('text', texts[-1])), steps)
 check('nothing typed holds the key', all('secret-test-key-value' not in str(value) for _, value in steps))
 check('the offer is used up: typing 2 again is an ordinary prompt', not (routes._json(store, routes.SESSION_KEY + session).get('offer')))
@@ -493,7 +494,8 @@ with patch.object(typist, 'detect', return_value=terminal), \
     picked10 = routes.on_prompt(s10, {'session_id': 's10', 'prompt': 'ollama:glm-5', 'transcript_path': str(limited)}, 'claude', None)
 texts10 = [v for k, v in (spawned10[0] if spawned10 else []) if k == 'text']
 check('typing ollama:glm-5 (any case) picks that model: the pane runs route run ollama --model GLM-5',
-      texts10 and texts10[-1] == 'cosmos-orbit route run ollama --model GLM-5 --from claude'
+      texts10 and re.fullmatch(r'cosmos-orbit route run ollama --model GLM-5 --carry --capsule [0-9a-f]{12} --from claude',
+                               texts10[-1])
       and 'model GLM-5' in ((picked10 or {}).get('reason') or ''), (texts10, picked10))
 run_fresh(base / 'home-models', 'ollama', model='GLM-5', environ={'ROUTES_TEST_KEY': 'k10-value'})
 _, argv10, env10 = ran[-1]
@@ -591,6 +593,194 @@ if claude:
               messages and all(r['authorization_kind'] is None or r['authorization_is_expected'] for r in messages), seen)
     finally:
         server.kill()
+
+
+def said(at, text):
+    return {'type': 'user', 'uuid': 'u-%s' % at, 'timestamp': iso(at), 'isSidechain': False,
+            'message': {'role': 'user', 'content': text}}
+
+
+def edited(at, path):
+    return {'type': 'assistant', 'uuid': 'e-%s' % at, 'timestamp': iso(at), 'isSidechain': False,
+            'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't%s' % at, 'name': 'Edit',
+                                                          'input': {'file_path': path, 'old_string': 'a', 'new_string': 'b'}}]}}
+
+
+def tool_result(at):
+    return {'type': 'user', 'uuid': 'r-%s' % at, 'timestamp': iso(at), 'isSidechain': False,
+            'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 't', 'content': 'ok'}]}}
+
+
+def codex_item(at, item):
+    return {'timestamp': iso(at), 'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': item}}
+
+
+print('⑫ asked, not limited: a prompt that asks to switch gets the offer; every other prompt goes on')
+s12 = Store(base / 'home-ask')
+repo12 = make_repo(base, 'ask-repo')
+attach.set_switch(s12, 'on', repo12)
+routes.add(s12, 'kimi', 'https://ollama.com', 'kimi-k3.1-pro,glm-5', 'env:ROUTES_TEST_KEY', 'Kimi K3.1 Pro on Ollama cloud')
+ASKS = ['kimi로 바꿔줘', '모델 바꾸고 싶어', '올라마 모델 사용하고 싶어', '다른 모델로 전환해줘', 'Kimi 모델로 바꿔',
+        'glm-5 써줘', 'codex로 전환해줘', 'switch to kimi', 'use the kimi model', 'change model', '다른 모델 있어?']
+WORK = ['리밋에 걸렸을 경우 말고도 그냥 사용을 하다가도 모델을 변경하고 싶다거나 올라마 모델 사용하고 싶다고 구체적으로 말하거나 '
+        '했을때 제안을 해줘야해. 이 추가 모델 기능으로 변경하는 것을 제안을 주고 스위칭이 될 수 있어야 해.',
+        'Organization 모델을 변경해줘', 'UserProfile 모델 변경', '모델 변경 기능을 개발하자', 'claude 설정 바꿔줘',
+        'kimi 경로 테스트 결과 알려줘', '올라마 무료야?', 'codex 리뷰 받아줘', 'switch the branch to main', 'use the new schema',
+        'kimi로 바꿔줘\n그리고 테스트도 돌려줘', '변경사항을 모두 커밋 후 푸시 해.']
+t12 = base / 'ask.jsonl'
+write(t12, [said(NOW - 900, 'add a parser for the config file'), edited(NOW - 890, str(repo12 / 'parser.py')),
+            tool_result(NOW - 889), answer(NOW - 880, 'The parser reads PELICAN-7 keys now; empty input keeps the old behaviour.')])
+offered = {t: routes.on_prompt(s12, {'session_id': 'm-%d' % i, 'prompt': t, 'transcript_path': str(t12)}, 'claude', None)
+           for i, t in enumerate(ASKS)}
+check('each way of asking gets the offer (Korean, English, a route, a model, a model\'s stem, Ollama, "another model")',
+      all((r or {}).get('decision') == 'block' and 'you asked to switch' in r['reason'] for r in offered.values()),
+      {t: (r or {}).get('reason', '')[:80] for t, r in offered.items()})
+passed = {t: routes.on_prompt(s12, {'session_id': 'w-%d' % i, 'prompt': t, 'transcript_path': str(t12)}, 'claude', None)
+          for i, t in enumerate(WORK)}
+check('work that mentions a model or a route goes on: a class\'s model, a feature to build, a question, several lines',
+      all(r is None for r in passed.values()), {t[:40]: r for t, r in passed.items() if r})
+reason12 = offered['kimi로 바꿔줘']['reason']
+print('\n'.join('      | ' + line for line in reason12.splitlines()))
+check('the offer numbers every usable route and model, and points at the one named',
+      '  1  codex' in reason12 and '  2  kimi' in reason12 and '  3  kimi:glm-5' in reason12
+      and '(what you named: 2, 3)' in reason12 and '  claude' not in reason12, reason12)
+check('the same words sent again go to the session', routes.on_prompt(
+    s12, {'session_id': 'm-0', 'prompt': 'kimi로 바꿔줘', 'transcript_path': str(t12)}, 'claude', None) is None)
+check('… and the offer is gone: 2 is an ordinary prompt now', routes.on_prompt(
+    s12, {'session_id': 'm-0', 'prompt': '2', 'transcript_path': str(t12)}, 'claude', None) is None)
+check('another prompt after the offer goes on, and ends it', routes.on_prompt(
+    s12, {'session_id': 'm-1', 'prompt': 'add a test for the parser', 'transcript_path': str(t12)}, 'claude', None) is None
+      and not routes._json(s12, routes.SESSION_KEY + 'm-1').get('offer'))
+spawned_back = []
+with patch.object(typist, 'detect', return_value=terminal), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned_back.append(steps) or 1), \
+        patch.object(routes, 'host_pid', return_value=4242):
+    back12 = routes.on_prompt(s12, {'session_id': 'm-6', 'prompt': 'codex로 전환해줘1', 'transcript_path': str(t12)}, 'claude', None)
+texts_back = [v for k, v in (spawned_back[0] if spawned_back else []) if k == 'text']
+check('Claude Code puts the blocked words back in its input: those words with 1 typed after them pick 1 (seen live)',
+      texts_back and ' route run codex --carry --capsule ' in texts_back[-1], (texts_back, back12))
+stale = dict(routes._json(s12, routes.SESSION_KEY + 'm-2'), at=iso(NOW - routes.ASKED_TTL - 60))
+s12.preference(routes.SESSION_KEY + 'm-2', json.dumps(stale))
+check('an offer left unanswered past its time picks nothing: 1 goes to the session', routes.on_prompt(
+    s12, {'session_id': 'm-2', 'prompt': '1', 'transcript_path': str(t12)}, 'claude', None) is None)
+routes.set_enabled(s12, False)
+check('route off: asking changes nothing', routes.on_prompt(
+    s12, {'session_id': 'm-off', 'prompt': 'kimi로 바꿔줘', 'transcript_path': str(t12)}, 'claude', None) is None)
+routes.set_enabled(s12, True)
+routes.set_enabled(s12, False, 'kimi')
+off12 = routes.on_prompt(s12, {'session_id': 'm-k', 'prompt': '다른 모델로', 'transcript_path': str(t12)}, 'claude', None)
+check('route off kimi: it is listed as off, not offered', '  -  kimi' in off12['reason'] and '  2  kimi' not in off12['reason'],
+      off12['reason'])
+routes.set_enabled(s12, True, 'kimi')
+
+first12 = attach.handle(s12, 'prompt', {'cwd': str(repo12), 'session_id': 's12', 'prompt': 'add a parser for the config file',
+                                        'transcript_path': str(t12)}, 'claude')
+task12 = attach.current_task(s12, repo12)
+asked12 = attach.handle(s12, 'prompt', {'cwd': str(repo12), 'session_id': 's12', 'prompt': 'kimi로 바꿔줘',
+                                        'transcript_path': str(t12)}, 'claude')
+check('in a session with a task, through the hook: the offer, and the request is not recorded on the task',
+      (asked12 or {}).get('decision') == 'block' and 'kimi로 바꿔줘' not in json.dumps(s12.get(task12['id'])['data'],
+                                                                                  ensure_ascii=False), asked12)
+spawned12 = []
+with patch.object(typist, 'detect', return_value=terminal), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned12.append(steps) or 1), \
+        patch.object(routes, 'host_pid', return_value=4242):
+    picked12 = attach.handle(s12, 'prompt', {'cwd': str(repo12), 'session_id': 's12', 'prompt': '2',
+                                             'transcript_path': str(t12)}, 'claude')
+texts12 = [v for k, v in (spawned12[0] if spawned12 else []) if k == 'text']
+run12 = re.fullmatch(r'cosmos-orbit route run kimi --carry --capsule ([0-9a-f]{12}) --from claude', texts12[-1] if texts12 else '')
+check('2 switches this pane to kimi, carrying a capsule of this conversation', bool(run12) and texts12[0] == '/exit'
+      and 'context' in (picked12 or {}).get('reason', ''), (texts12, picked12))
+data12 = s12.get(task12['id'])['data']
+check('the task is handed over with a continuation that says the user chose it (not the limit\'s)',
+      (data12.get('carried_prompt') or {}).get('text') == routes.ASKED_TEXT, data12.get('carried_prompt'))
+
+print('⑬ the context goes with the switch: to the new session, once, task or not, from either host to either')
+cid = run12[1] if run12 else ''
+capsule = routes._json(s12, routes.CAPSULE_KEY + cid)
+check('the capsule holds the last turns, the files changed, the request that asked and the task',
+      capsule.get('reason') == 'asked' and capsule.get('asked') == 'kimi로 바꿔줘' and capsule.get('task') == task12['id']
+      and any('PELICAN-7' in text for _, text in capsule.get('turns') or ()) and capsule.get('files') == [str(repo12 / 'parser.py')]
+      and capsule.get('turns')[0] == ['user', 'add a parser for the config file'], capsule)
+ran.clear()
+routes.run(s12, 'kimi', carry=True, capsule=cid, environ={'ROUTES_TEST_KEY': 'k13', routes.CAPSULE_ENV: 'aaaaaaaaaaaa'},
+           execvpe=exec_capture, out=open(os.devnull, 'w'))
+_, argv13, env13 = ran[-1]
+s12 = Store(base / 'home-ask')          # route run closes the store before the host replaces its process
+check('route run --capsule hands the capsule to the new session, and starts it on the carry line',
+      env13.get(routes.CAPSULE_ENV) == cid and argv13[-1] == typist.CARRY_LINE, (argv13, env13.get(routes.CAPSULE_ENV)))
+routes.run(s12, 'kimi', environ={'ROUTES_TEST_KEY': 'k13', routes.CAPSULE_ENV: cid}, execvpe=exec_capture,
+           out=open(os.devnull, 'w'))
+s12 = Store(base / 'home-ask')
+check('a route started from inside that session without --capsule does not inherit it', routes.CAPSULE_ENV not in ran[-1][2])
+with patch.dict(os.environ, {routes.CAPSULE_ENV: cid}), patch.object(typist, 'detect', return_value=terminal):
+    start13 = attach.handle(s12, 'session-start', {'cwd': str(repo12), 'session_id': 'fresh12', 'source': 'startup',
+                                                   'transcript_path': str(base / 'fresh12.jsonl')}, 'claude')
+    carry13 = attach.handle(s12, 'prompt', {'cwd': str(repo12), 'session_id': 'fresh12', 'prompt': typist.CARRY_LINE,
+                                            'transcript_path': str(base / 'fresh12.jsonl')}, 'claude')
+    cleared13 = attach.handle(s12, 'session-start', {'cwd': str(repo12), 'session_id': 'fresh12-b', 'source': 'clear',
+                                                     'transcript_path': str(base / 'fresh12b.jsonl')}, 'claude')
+context13 = ((start13 or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
+print('\n'.join('      | ' + line for line in context13.split('\n[orbit] task')[0].splitlines()[:14]))
+check('the new session starts with the capsule: the switch, its words, the turns, the files, and the task\'s brief',
+      'Carried over by a route switch' in context13 and 'kimi로 바꿔줘' in context13 and 'PELICAN-7' in context13
+      and str(repo12 / 'parser.py') in context13 and task12['id'] in context13 and routes.ASKED_TEXT in context13
+      and (s12.session_task('fresh12') or {'task_id': None})['task_id'] == task12['id'], context13[:3000])
+carried13 = json.dumps(carry13 or {}, ensure_ascii=False)
+check('its first prompt (the carry line) is not blocked, and the capsule is not given twice',
+      not (carry13 or {}).get('decision') and 'Carried over by a route switch' not in carried13, carried13[:800])
+check('a /clear later in that process does not get it again',
+      'Carried over by a route switch' not in json.dumps(cleared13 or {}, ensure_ascii=False))
+
+repo13 = make_repo(base, 'plain-repo')
+attach.set_switch(s12, 'on', repo13)
+rollout = base / 'rollout-13.jsonl'
+write(rollout, [{'timestamp': iso(NOW - 700), 'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+                    {'type': 'input_text', 'text': '# AGENTS.md instructions for the repo'}]}},
+                codex_item(NOW - 690, {'type': 'UserMessage', 'content': [{'type': 'text', 'text': 'make the README say OSPREY-3'}]}),
+                codex_item(NOW - 680, {'type': 'FileChange', 'changes': {str(repo13 / 'README.md'): {'type': 'update'}}}),
+                codex_item(NOW - 670, {'type': 'AgentMessage', 'content': [{'type': 'Text', 'text': 'The README now says OSPREY-3.'}]})])
+asked13 = attach.handle(s12, 'prompt', {'cwd': str(repo13), 'session_id': 'cx13', 'prompt': 'kimi로 바꿔줘',
+                                        'transcript_path': str(rollout)}, 'codex')
+check('Codex, no task: asking gets the offer (codex itself not offered) and starts no task',
+      (asked13 or {}).get('decision') == 'block' and '  1  claude' in asked13['reason'] and '  codex' not in asked13['reason']
+      and attach.current_task(s12, repo13) is None, asked13)
+spawned13 = []
+with patch.object(typist, 'detect', return_value=terminal), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned13.append((steps, task)) or 1), \
+        patch.object(routes, 'host_pid', return_value=4343):
+    picked13 = attach.handle(s12, 'prompt', {'cwd': str(repo13), 'session_id': 'cx13', 'prompt': 'kimi',
+                                             'transcript_path': str(rollout)}, 'codex')
+steps13 = spawned13[0][0] if spawned13 else []
+texts13 = [v for k, v in steps13 if k == 'text']
+run13 = re.fullmatch(r'cosmos-orbit route run kimi --carry --capsule ([0-9a-f]{12}) --from codex', texts13[-1] if texts13 else '')
+check('Codex → kimi (Claude Code): /exit, a pause before its Enter (Codex reads a quick one as part of a paste), then '
+      'the route with the capsule; nothing to empty first in Codex',
+      bool(run13) and texts13[0] == '/exit' and ('key', 'ctrl+u') not in steps13
+      and steps13[steps13.index(('text', '/exit')) + 1] == ('wait', 1.2)
+      and 'gets this conversation\'s context' in (picked13 or {}).get('reason', ''), (steps13, picked13))
+with patch.dict(os.environ, {routes.CAPSULE_ENV: run13[1] if run13 else ''}):
+    start13b = attach.handle(s12, 'session-start', {'cwd': str(repo13), 'session_id': 'cl13', 'source': 'startup',
+                                                    'transcript_path': str(base / 'cl13.jsonl')}, 'claude')
+    first13b = attach.handle(s12, 'prompt', {'cwd': str(repo13), 'session_id': 'cl13', 'prompt': typist.CARRY_LINE,
+                                             'transcript_path': str(base / 'cl13.jsonl')}, 'claude')
+context13b = ((start13b or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
+check('the Claude Code session gets the Codex session\'s turns and files in the same form, with no task to brief',
+      'route codex (codex)' in context13b and 'OSPREY-3' in context13b and str(repo13 / 'README.md') in context13b
+      and 'AGENTS.md' not in context13b and 'Orbit task: none' in context13b and 'tell the user in one line' in context13b,
+      context13b)
+check('… and its first prompt starts no task and is not blocked', not (first13b or {}).get('decision')
+      and attach.current_task(s12, repo13) is None, first13b)
+typed13 = []
+with patch.object(typist, 'run', side_effect=lambda term, steps, **kw: typed13.append((steps, kw)) or []):
+    exit13 = typist._main({'terminal': terminal, 'steps': [['text', '/exit'], ['key', 'enter']], 'home': str(base / 'home-ask'),
+                           'task': None})
+check('the detached typist of a switch with no task types the steps (it died on an unbound name before /exit, seen live)',
+      exit13 == 0 and typed13 and typed13[0][1].get('claim') is None, (exit13, typed13))
+s3 = Store(base / 'home')
+held3 = routes._json(s3, routes.CAPSULE_KEY + (routes._json(s3, routes.SESSION_KEY + 's-limited').get('capsule') or ''))
+check('the limit\'s switch carries its capsule too: the blocked request, to be run', held3.get('reason') == 'limit'
+      and held3.get('held') == REQUEST and 'Now: run the request carried over' in routes.capsule_text(s3, held3), held3)
 
 tmp.cleanup()
 print('\n%s' % ('PASS' if not FAILED else 'FAIL: ' + ', '.join(FAILED)))
