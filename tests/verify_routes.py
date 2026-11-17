@@ -11,7 +11,16 @@ session's next prompt failed again, and switching the model meant quitting and r
 session: blocked with the usable routes numbered, ③ a number picks a route: the pane is switched and the request is
 carried to the task (with controls: a session with no limit, a limit already reset), ④ `route run` starts the host
 with the route's endpoint and key (never in argv), ⑤ the way back and the end day, ⑥ hooks and the CLI, ⑦ end to end:
-the real `claude` through a route to a local stand-in endpoint. Exit 0 = pass. Fails on code without routes.
+the real `claude` through a route to a local stand-in endpoint.
+
+Then what the user asked of it on 2026-11-17 ("사용자마다 각자의 키를 넣을 수 있어야해 … 사용 안할 수도 있고 사용할 수도
+있고 사용시 다양한 모델을 고를수도 … 다른 서비스를 사용할 수도" · "범용으로 호환성이 있도록 … 모든 온오프등은 컨트롤이
+되도록"): ⑧ the switches, the whole offer and each route, built-in or added (and a first-version routes.json still
+works), ⑨ each user's own key put into their keychain by `route key`, never printed and never in argv, ⑩ a route with
+several models, each offered and any one picked, ⑪ any service: an OpenAI Responses-compatible route runs Codex, an
+Anthropic-compatible one may send its key as x-api-key — end to end with the real `codex` and `claude`, and no request
+carries any credential but the route's (with ANTHROPIC_API_KEY alone Claude Code sent the user's own login instead).
+Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of routes.
 """
 import datetime
 import json
@@ -338,6 +347,248 @@ else:
         check('every request went to the route\'s endpoint, for the route\'s model, with its key',
               messages and all(r['model'] == 'stub-model' and r['token_ok'] for r in messages), seen)
         check('the key is in none of the output', token not in result.stdout + result.stderr)
+    finally:
+        server.kill()
+
+print('⑧ the switches: the whole offer, and each route (built-in or added), on and off')
+s8 = Store(base / 'home-switch')
+routes.add(s8, 'kimi', 'https://ollama.com', 'kimi-k3.1-pro', 'env:ROUTES_TEST_KEY', 'Kimi on Ollama cloud')
+limited = base / 'limited8.jsonl'
+write(limited, [limit_line(NOW - 60, "You've hit your 5-hour limit · resets 2:50pm (Asia/Seoul)", NOW + 5400)])
+
+
+def offer8(sid, prompt='go on'):
+    return routes.on_prompt(s8, {'session_id': sid, 'prompt': prompt, 'transcript_path': str(limited)}, 'claude', None)
+
+
+on = offer8('s8-on')
+check('control: on by default, a limited session gets the offer', routes.enabled(s8) and (on or {}).get('decision') == 'block', on)
+routes.set_enabled(s8, False)
+s8.preference(routes.LIMIT_KEY + 'claude', '')
+check('route off: a limited session is left alone (no block, no offer)', offer8('s8-off') is None)
+check('… the way-back note is off too', routes.prompt_note(s8, {'session_id': 's8-k'}, 'claude',
+                                                          environ={routes.ROUTE_ENV: 'kimi', routes.FROM_ENV: 'claude'}) is None)
+check('… StopFailure records and announces nothing', routes.on_stop_failure(
+    s8, {'session_id': 's8-off', 'transcript_path': str(limited)}, 'claude', None) is None
+      and routes.route_limit(s8, 'claude') is None)
+routes.set_enabled(s8, True)
+check('route on: the offer is back', (offer8('s8-back') or {}).get('decision') == 'block')
+routes.set_enabled(s8, False, 'codex')
+reason8 = (offer8('s8-nocodex') or {}).get('reason') or ''
+check('route off codex: a built-in route leaves the offer, and says how to turn it on',
+      '1  kimi' in reason8 and '  -  codex      off (route on codex)' in reason8, reason8)
+try:
+    routes.run(s8, 'codex', execvpe=exec_capture, environ={}, out=open(os.devnull, 'w'))
+    refused = False
+except ValueError as error:
+    refused = 'off' in str(error)
+check('… and route run refuses it while it is off', refused)
+routes.set_enabled(s8, True, 'codex')
+routes.set_enabled(s8, False, 'kimi')
+reason8 = (offer8('s8-nokimi') or {}).get('reason') or ''
+check('route off kimi: an added route leaves the offer, its settings kept', '1  codex' in reason8 and 'kimi       off' in reason8
+      and routes.load(s8)['kimi']['model'] == 'kimi-k3.1-pro', reason8)
+routes.set_enabled(s8, True, 'kimi')
+try:
+    routes.set_enabled(s8, False, 'nosuch')
+    unknown = False
+except ValueError:
+    unknown = True
+check('a switch for a route that does not exist is refused', unknown)
+home8 = base / 'cli-switch'
+cli8 = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(home8)]
+subprocess.run(cli8 + ['route', 'off'], capture_output=True, timeout=60)
+off_list = subprocess.run(cli8 + ['route', 'list'], capture_output=True, text=True, timeout=60).stdout
+subprocess.run(cli8 + ['route', 'on'], capture_output=True, timeout=60)
+subprocess.run(cli8 + ['route', 'off', 'codex'], capture_output=True, timeout=60)
+on_list = subprocess.run(cli8 + ['route', 'list'], capture_output=True, text=True, timeout=60).stdout
+check('the CLI: route off / on / off NAME, and route list shows each switch', off_list.startswith('ROUTES: off')
+      and on_list.startswith('ROUTES: on') and any(l.split()[:2] == ['codex', 'off'] for l in on_list.splitlines()),
+      off_list + on_list)
+old = base / 'home-old'
+old.mkdir()
+(old / 'routes.json').write_text(json.dumps({'routes': {'legacy': {
+    'host': 'claude', 'base_url': 'https://ollama.com', 'model': 'kimi-k3.1-pro', 'key': 'env:ROUTES_TEST_KEY',
+    'label': 'written by the first version', 'until': None}}}))
+s_old = Store(old)
+routes.run(s_old, 'legacy', execvpe=exec_capture, environ={'ROUTES_TEST_KEY': 'k-legacy-value'}, out=open(os.devnull, 'w'))
+_, argv_old, env_old = ran[-1]
+check('a routes.json from the first version still works: on, one model, Claude Code with bearer',
+      routes.enabled(s_old) and routes.route_on(routes.all_routes(s_old)['legacy']) and argv_old == ['claude', '--model', 'kimi-k3.1-pro']
+      and env_old.get('ANTHROPIC_AUTH_TOKEN') == 'k-legacy-value', (argv_old, sorted(env_old)))
+
+print('⑨ each user\'s own key: route key puts it in their keychain, never printed')
+s9 = Store(base / 'home-key')
+added9 = routes.add(s9, 'envonly', 'https://ollama.com', 'm', 'env:ROUTES_TEST_MISSING')
+mine = 'ktest-%d' % (os.getpid() % 100000)
+added9 = routes.add(s9, mine, 'https://ollama.com', 'kimi-k3.1-pro')
+check('a route added without --key reads the user\'s own env var, then their keychain',
+      added9['key'] == 'env:COSMOS_ORBIT_%s_KEY,keychain:cosmos-orbit-%s' % (mine.upper().replace('-', '_'), mine), added9['key'])
+try:
+    routes.set_key(s9, 'envonly', 'abcdefgh12345')
+    env_refused = ''
+except ValueError as error:
+    env_refused = str(error)
+check('a route that reads only an env var says to export it (nothing written)', 'export ROUTES_TEST_MISSING=' in env_refused, env_refused)
+try:
+    routes.set_key(s9, mine, 'has a space in it')
+    bad_refused = False
+except ValueError:
+    bad_refused = True
+check('something that is not a key (spaces) is refused', bad_refused)
+if sys.platform != 'darwin':
+    print('  skip the keychain checks (not macOS)')
+else:
+    service = 'cosmos-orbit-' + mine
+    secret = 'orbit-test-key.%d-AbC_xyz' % os.getpid()
+    home9 = base / 'home-key'
+    cli9 = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(home9)]
+    try:
+        stored = subprocess.run(cli9 + ['route', 'key', mine], input=secret + '\n', capture_output=True, text=True, timeout=60)
+        back = subprocess.run(['security', 'find-generic-password', '-s', service, '-w'], capture_output=True, text=True).stdout.strip()
+        check('route key NAME (piped): stored in the keychain, the value nowhere in the output',
+              stored.returncode == 0 and back == secret and secret not in stored.stdout + stored.stderr
+              and 'keychain:' + service in stored.stdout, (stored.returncode, stored.stdout[-300:], stored.stderr[-300:]))
+        calls9 = []
+
+        def recording(argv, **kw):
+            calls9.append((argv, kw.get('input') or ''))
+            return subprocess.run(argv, **kw)
+        routes.set_key(s9, mine, secret, runner=recording)
+        check('the key never reaches argv: security -i reads it from stdin', calls9 and calls9[0][0] == ['security', '-i']
+              and all(secret not in ' '.join(argv) for argv, _ in calls9) and secret in calls9[0][1], [c[0] for c in calls9])
+        listed9 = subprocess.run(cli9 + ['route', 'list'], capture_output=True, text=True, timeout=60).stdout
+        check('route list: the route is usable now that the key is there', any(l.split()[:2] == [mine, 'ok'] for l in listed9.splitlines()), listed9)
+        routes.run(s9, mine, execvpe=exec_capture, environ={'PATH': '/bin'}, out=open(os.devnull, 'w'))
+        _, argv9, env9 = ran[-1]
+        check('route run reads it from the keychain into the environment, not argv',
+              env9.get('ANTHROPIC_AUTH_TOKEN') == secret and secret not in ' '.join(argv9))
+        removed = subprocess.run(cli9 + ['route', 'key', mine, '--remove'], capture_output=True, text=True, timeout=60)
+        gone = subprocess.run(['security', 'find-generic-password', '-s', service], capture_output=True).returncode != 0
+        ok9, why9 = routes.availability(s9, routes.all_routes(s9)[mine])
+        check('route key NAME --remove deletes it; the route then says no key', removed.returncode == 0 and gone and not ok9
+              and 'no key' in why9, (removed.stdout, removed.stderr, why9))
+    finally:
+        subprocess.run(['security', 'delete-generic-password', '-s', service], capture_output=True)
+
+def run_fresh(home, name, **kw):
+    """route run replaces the process and closes the ledger first: each call here opens it again."""
+    routes.run(Store(home), name, execvpe=exec_capture, out=open(os.devnull, 'w'), **kw)
+    return ran[-1]
+
+
+print('⑩ a route with several models: each offered, any one picked')
+s10 = Store(base / 'home-models')
+routes.add(s10, 'ollama', 'https://ollama.com', 'kimi-k3.1-pro, GLM-5', 'env:ROUTES_TEST_KEY', 'Ollama cloud')
+check('the first model is the default, the rest kept in order', routes.models(routes.load(s10)['ollama']) == ['kimi-k3.1-pro', 'GLM-5'])
+first10 = routes.on_prompt(s10, {'session_id': 's10', 'prompt': 'go on', 'transcript_path': str(limited)}, 'claude', None)
+reason10 = (first10 or {}).get('reason') or ''
+print('\n'.join('      | ' + line for line in reason10.splitlines()))
+check('the offer lists the route on its default model, then each other model as NAME:MODEL',
+      '2  ollama     Ollama cloud · model kimi-k3.1-pro' in reason10 and '3  ollama:GLM-5 the same route on model GLM-5' in reason10, reason10)
+spawned10 = []
+with patch.object(typist, 'detect', return_value=terminal), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned10.append(steps) or 1), \
+        patch.object(routes, 'host_pid', return_value=4242):
+    picked10 = routes.on_prompt(s10, {'session_id': 's10', 'prompt': 'ollama:glm-5', 'transcript_path': str(limited)}, 'claude', None)
+texts10 = [v for k, v in (spawned10[0] if spawned10 else []) if k == 'text']
+check('typing ollama:glm-5 (any case) picks that model: the pane runs route run ollama --model GLM-5',
+      texts10 and texts10[-1] == 'cosmos-orbit route run ollama --model GLM-5 --from claude'
+      and 'model GLM-5' in ((picked10 or {}).get('reason') or ''), (texts10, picked10))
+run_fresh(base / 'home-models', 'ollama', model='GLM-5', environ={'ROUTES_TEST_KEY': 'k10-value'})
+_, argv10, env10 = ran[-1]
+check('route run --model: that model for the session and every model Claude Code asks for',
+      argv10 == ['claude', '--model', 'GLM-5'] and all(env10.get(v) == 'GLM-5' for v in routes.MODEL_VARS), argv10)
+run_fresh(base / 'home-models', 'ollama', model='qwen3-coder:480b', environ={'ROUTES_TEST_KEY': 'k10-value'})
+check('a model the route does not list is still started (the service decides what it serves)', ran[-1][1] == ['claude', '--model', 'qwen3-coder:480b'])
+run_fresh(base / 'home-models', 'claude', model='opus', environ={})
+claude_argv = ran[-1][1]
+run_fresh(base / 'home-models', 'codex', model='gpt-6.1-sol', environ={})
+codex_argv = ran[-1][1]
+check('the built-in routes take a model too (claude --model, codex -c model=)', claude_argv == ['claude', '--model', 'opus']
+      and codex_argv == ['codex', '-c', 'model="gpt-6.1-sol"'], (claude_argv, codex_argv))
+
+print('⑪ any service: OpenAI Responses-compatible routes run Codex; x-api-key for Anthropic-compatible ones')
+s11 = Store(base / 'home-api')
+for bad_args in (dict(api='gemini'), dict(api='openai', auth='x-api-key'), dict(auth='basic')):
+    try:
+        routes.add(s11, 'bad', 'https://x.test', 'm', 'env:X', **bad_args)
+        bad_ok = False
+    except ValueError:
+        bad_ok = True
+    check('refused: %s' % bad_args, bad_ok)
+routes.add(s11, 'oai', 'https://api.example.test/v1', 'model-one,model-two', 'env:ROUTES_TEST_KEY', 'a Responses API', api='openai')
+check('an openai route runs on Codex', routes.load(s11)['oai']['host'] == 'codex')
+run_fresh(base / 'home-api', 'oai', model='model-two', carry=True, environ={'ROUTES_TEST_KEY': 'k11-value', 'PATH': '/bin'})
+_, argv11, env11 = ran[-1]
+expected11 = ['codex', '-c', 'model_providers.orbit-oai.name="oai"', '-c', 'model_providers.orbit-oai.base_url="https://api.example.test/v1"',
+              '-c', 'model_providers.orbit-oai.env_key="%s"' % routes.KEY_ENV, '-c', 'model_providers.orbit-oai.wire_api="responses"',
+              '-c', 'model_provider="orbit-oai"', '-c', 'model="model-two"', typist.CARRY_LINE]
+check('codex with a provider defined for this run, the picked model, the carry line last', argv11 == expected11, argv11)
+check('its key in the environment Codex reads (env_key), never in argv, no Anthropic endpoint',
+      env11.get(routes.KEY_ENV) == 'k11-value' and 'k11-value' not in ' '.join(argv11) and 'ANTHROPIC_BASE_URL' not in env11)
+run_fresh(base / 'home-api', 'claude', environ=dict(env11, **{routes.ROUTE_ENV: 'oai'}))
+check('back to claude from inside it: its key does not leak', routes.KEY_ENV not in ran[-1][2])
+routes.add(s11, 'xk', 'https://api.example.test', 'm', 'env:ROUTES_TEST_KEY', auth='x-api-key')
+run_fresh(base / 'home-api', 'xk', environ={'ROUTES_TEST_KEY': 'k-xk-value', 'ANTHROPIC_AUTH_TOKEN': 'stale'})
+_, argv_xk, env_xk = ran[-1]
+check('--auth x-api-key: an apiKeyHelper that prints the key from the environment; neither Anthropic key variable set',
+      env_xk.get(routes.KEY_ENV) == 'k-xk-value' and 'ANTHROPIC_AUTH_TOKEN' not in env_xk and 'ANTHROPIC_API_KEY' not in env_xk
+      and argv_xk == ['claude', '--settings', json.dumps({'apiKeyHelper': 'printenv ' + routes.KEY_ENV}), '--model', 'm']
+      and 'k-xk-value' not in ' '.join(argv_xk), (argv_xk, sorted(k for k in env_xk if 'ANTHROPIC' in k)))
+codex_bin = __import__('shutil').which('codex')
+if not codex_bin:
+    print('  skip the Codex end to end (codex is not installed)')
+else:
+    import socket
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    log11 = base / 'stub-openai.log'
+    token11 = 'stub-openai-token-%d' % os.getpid()
+    server = subprocess.Popen([sys.executable, str(ROOT / 'tests' / 'stub_openai.py'), str(port), str(log11), token11])
+    codex_home = base / 'codex-home'     # Codex on its own: none of this user's Codex config or hooks
+    codex_home.mkdir()
+    work = make_repo(base, 'codex-work')
+    try:
+        time.sleep(1.0)
+        subprocess.run(cli + ['route', 'add', 'stubo', '--api', 'openai', '--base-url', 'http://127.0.0.1:%d/v1' % port,
+                              '--model', 'stub-model-a,stub-model-b', '--key', 'env:ROUTES_STUB_KEY'], capture_output=True, timeout=60)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'COSMOS_ORBIT_', 'OPENAI_', 'CODEX_'))}
+        env.update(ROUTES_STUB_KEY=token11, CODEX_HOME=str(codex_home))
+        result = subprocess.run(cli + ['route', 'run', 'stubo', '--model', 'stub-model-b', '--', 'exec', '--skip-git-repo-check',
+                                       'Reply with anything.'], capture_output=True, text=True, timeout=180, env=env, cwd=str(work),
+                                stdin=subprocess.DEVNULL)   # codex exec reads a piped stdin as more prompt: closed here
+        seen = [json.loads(line) for line in log11.read_text().splitlines()] if log11.exists() else []
+        posts = [r for r in seen if r['method'] == 'POST']
+        check('codex answered with the stand-in\'s text', 'ROUTE-STUB-ANSWER' in result.stdout, (result.returncode, result.stdout[-200:], result.stderr[-400:]))
+        check('every request went to the route\'s /v1/responses, for the picked model, with its key',
+              posts and all(r['path'] == '/v1/responses' and r['model'] == 'stub-model-b' and r['token_ok'] for r in posts), seen)
+        check('the key is in none of the output', token11 not in result.stdout + result.stderr)
+    finally:
+        server.kill()
+if claude:
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    log_xk = base / 'stub-xk.log'
+    token_xk = 'stub-xk-token-%d' % os.getpid()
+    server = subprocess.Popen([sys.executable, str(ROOT / 'tests' / 'stub_anthropic.py'), str(port), str(log_xk), token_xk])
+    try:
+        time.sleep(1.0)
+        subprocess.run(cli + ['route', 'add', 'stubx', '--base-url', 'http://127.0.0.1:%d' % port, '--model', 'stub-model',
+                              '--key', 'env:ROUTES_STUB_KEY', '--auth', 'x-api-key'], capture_output=True, timeout=60)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'COSMOS_ORBIT_ROUTE'))}
+        env['ROUTES_STUB_KEY'] = token_xk
+        result = subprocess.run(cli + ['route', 'run', 'stubx', '--', '-p', 'Reply with anything.', '--setting-sources', '',
+                                       '--strict-mcp-config'], capture_output=True, text=True, timeout=180, env=env, cwd=str(base))
+        seen = [json.loads(line) for line in log_xk.read_text().splitlines()] if log_xk.exists() else []
+        messages = [r for r in seen if r['path'].startswith('/v1/messages')]
+        check('x-api-key end to end: claude answered, and every request sent the route\'s key as x-api-key',
+              'ROUTE-STUB-ANSWER' in result.stdout and messages and all(r['x_api_key_ok'] for r in messages),
+              (result.returncode, result.stdout[-200:], result.stderr[-300:], seen))
+        check('… and no other credential: any Authorization header holds the route\'s key, never the user\'s login',
+              messages and all(r['authorization_kind'] is None or r['authorization_is_expected'] for r in messages), seen)
     finally:
         server.kill()
 

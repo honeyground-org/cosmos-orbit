@@ -45,6 +45,20 @@ def show(task):
 
 
 
+def _read_route_key(name, clipboard=False):
+    """The key for `route key NAME`: from the clipboard, a pipe, or typed without echo. Never printed."""
+    import subprocess
+    if clipboard:
+        try:
+            return subprocess.run(['pbpaste'], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError('the clipboard cannot be read here (pbpaste); pipe the key in or type it')
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    import getpass
+    return getpass.getpass('Key for route %s (not shown): ' % name)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='cosmos-orbit', description='Keep a native CLI task on goal, recover interruptions and verify its conclusion')
     parser.add_argument('--home', help='Private task store')
@@ -215,14 +229,25 @@ def main(argv=None):
     result.add_argument('--file')
     result.add_argument('--title')
     result.add_argument('--summary')
-    route_cmd = sub.add_parser('route', help='list | add | remove | run: where a session can run when the one in use '
-                                             'hits its usage limit (a model on an Anthropic-compatible endpoint, say)')
-    route_cmd.add_argument('action', choices=('list', 'add', 'remove', 'run'))
+    route_cmd = sub.add_parser('route', help='list | add | remove | run | on | off | key: where a session can run when '
+                                             'the one in use hits its usage limit (any Anthropic- or OpenAI-compatible '
+                                             'service, on your own key), and the switches for all of it')
+    route_cmd.add_argument('action', choices=('list', 'add', 'remove', 'run', 'on', 'off', 'key'))
     route_cmd.add_argument('name', nargs='?')
-    route_cmd.add_argument('--base-url', help='add: the Anthropic-compatible endpoint, e.g. https://ollama.com')
-    route_cmd.add_argument('--model', help='add: the model the endpoint serves, e.g. kimi-k3.1-pro')
+    route_cmd.add_argument('--base-url', help='add: the endpoint, e.g. https://ollama.com (anthropic) or '
+                                              'https://ollama.com/v1 (openai)')
+    route_cmd.add_argument('--model', help='add: the model(s) the endpoint serves, comma separated, the first the '
+                                           'default; run: the model to start on (any the service serves)')
+    route_cmd.add_argument('--api', choices=('anthropic', 'openai'),
+                           help='add: the protocol the service speaks: anthropic (runs Claude Code, the default) or '
+                                'openai (runs Codex on an OpenAI Responses-compatible endpoint)')
+    route_cmd.add_argument('--auth', choices=('bearer', 'x-api-key'),
+                           help='add, anthropic: how the key is sent (bearer, the default, or x-api-key)')
     route_cmd.add_argument('--key', help='add: where the key is read when the route starts: env:VARIABLE or '
-                                         'keychain:SERVICE (several, comma separated). Never stored.')
+                                         'keychain:SERVICE (several, comma separated; default env:COSMOS_ORBIT_<NAME>_KEY,'
+                                         'keychain:cosmos-orbit-<name>). Never stored by Orbit.')
+    route_cmd.add_argument('--clipboard', action='store_true', help='key: take the key from the clipboard')
+    route_cmd.add_argument('--remove', action='store_true', help='key: delete the key from your keychain')
     route_cmd.add_argument('--label', help='add: how the offer names it')
     route_cmd.add_argument('--until', help='add: the last day it is offered (YYYY-MM-DD), e.g. the end of a free period')
     route_cmd.add_argument('--carry', action='store_true', help='run: continue the task this pane handed over')
@@ -636,16 +661,28 @@ def main(argv=None):
                 else:
                     print(routes.list_text(store))
                     return 0
+            elif args.action in ('on', 'off'):
+                result = routes.set_enabled(store, args.action == 'on', args.name)
             elif not args.name:
                 raise SystemExit('route %s needs a NAME' % args.action)
             elif args.action == 'add':
-                result = routes.add(store, args.name, args.base_url, args.model, args.key, args.label, args.until)
+                result = routes.add(store, args.name, args.base_url, args.model, args.key, args.label, args.until,
+                                    api=args.api, auth=args.auth)
             elif args.action == 'remove':
                 result = routes.remove(store, args.name)
+            elif args.action == 'key':
+                try:
+                    if args.remove:
+                        result = routes.delete_key(store, args.name)
+                    else:
+                        result = routes.set_key(store, args.name, _read_route_key(args.name, args.clipboard))
+                except ValueError as error:
+                    print('Orbit: ' + str(error), file=sys.stderr)
+                    return 2
             else:
                 try:
                     routes.run(store, args.name, carry=args.carry, extra=passthrough, force=args.force,
-                               came_from=args.came_from)
+                               came_from=args.came_from, model=args.model)
                 except ValueError as error:
                     print('Orbit: ' + str(error), file=sys.stderr)
                     return 2
