@@ -1376,6 +1376,50 @@ check('hooks call the installed Orbit only when every module is this code: one w
       '(it was, seen live: the hooks ran the installed routes without this change)',
       same14 and not attach._same_code(str(fake / 'bin' / 'cosmos-orbit')), same14)
 
+print('successful native login invalidates old account limits, never a new refusal or an endpoint key')
+login_store = Store(base / 'home-login')
+login_path = base / 'login-session.jsonl'
+old_path = base / 'old-account-session.jsonl'
+old_limit = limit_line(NOW - 90, "You've hit your 5-hour limit", NOW + 7200)
+command = {'type':'user', 'userType':'external', 'uuid':'login-command', 'timestamp':iso(NOW-30),
+           'message':{'content':'<command-name>/login</command-name>\n<command-message>login</command-message>\n<command-args></command-args>'}}
+success = {'type':'user', 'userType':'external', 'uuid':'login-result', 'parentUuid':'login-command',
+           'timestamp':iso(NOW-30), 'message':{'content':'<local-command-stdout>Login successful</local-command-stdout>'}}
+write(login_path, [old_limit])
+write(old_path, [old_limit])
+def login_prompt(session, text, path=login_path, env=None):
+    return routes.on_prompt(login_store, {'session_id':session, 'prompt':text, 'transcript_path':str(path)},
+                            'claude', None, environ=env or {}, at=NOW)
+first_login = login_prompt('login-session', 'continue my work')
+check('before login the known limit offers a switch', first_login and first_login['decision']=='block')
+for label, output in (
+        ('failed', dict(success, message={'content':'<local-command-stdout>Login failed</local-command-stdout>'})),
+        ('unpaired', dict(success, parentUuid='unrelated-command')),
+        ('sidechain', dict(success, isSidechain=True))):
+    write(login_path, [old_limit, command, output])
+    check('control: '+label+' login does not clear the limit', routes.claude_limit(login_path) is not None)
+write(login_path, [old_limit, command, success])
+check('a parent-linked successful login supersedes the earlier transcript limit', routes.claude_limit(login_path) is None)
+check('continue reaches the host after login instead of repeating the old limit offer', login_prompt('login-session','continue my work') is None)
+check('old numbered offer is cleared after login retry', not routes._json(login_store, routes.SESSION_KEY+'login-session').get('offer'))
+check('cached old account limit no longer hides Claude as a route', routes.route_limit(login_store,'claude') is None)
+check('another session on the old account can retry after the observed login', login_prompt('old-session','continue',old_path) is None)
+routes.record_limit(login_store, 'claude', routes.read_limit(old_path,'claude'))
+check('a delayed old refusal cannot restore the stale account limit', routes.route_limit(login_store,'claude') is None)
+write(login_path, [old_limit, command, success, limit_line(NOW-5, "You've hit your 5-hour limit",NOW+7200)])
+fresh = login_prompt('login-session','continue my work')
+check('a fresh post-login limit blocks again and refreshes the offer', fresh and fresh['decision']=='block'
+      and abs(routes.route_limit(login_store,'claude')['seen_at']-(NOW-5))<0.001)
+with patch.object(routes, 'switch', return_value={'decision':'block','reason':'picked-before-limit'}) as pick:
+    picked_login = login_prompt('login-session','continue my work1')
+check('a restored-input route pick still runs before the active limit gate', picked_login['reason']=='picked-before-limit'
+      and pick.call_args.args[4]=='codex')
+write(login_path, [old_limit, command, success])
+check('an added endpoint does not mistake native login for changing its key',
+      routes.read_limit(login_path,'claude','endpoint') is not None)
+# A new refusal from a second session is not erased by replaying an older login marker.
+check('a newer account refusal remains in the route cache', routes.route_limit(login_store,'claude') is not None)
+
 tmp.cleanup()
 print('\n%s' % ('PASS' if not FAILED else 'FAIL: ' + ', '.join(FAILED)))
 sys.exit(1 if FAILED else 0)
