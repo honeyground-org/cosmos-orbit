@@ -229,10 +229,11 @@ def main(argv=None):
     result.add_argument('--file')
     result.add_argument('--title')
     result.add_argument('--summary')
-    route_cmd = sub.add_parser('route', help='list | add | remove | run | on | off | key: where a session can run when '
-                                             'the one in use hits its usage limit (any Anthropic- or OpenAI-compatible '
-                                             'service, on your own key), and the switches for all of it')
-    route_cmd.add_argument('action', choices=('list', 'add', 'remove', 'run', 'on', 'off', 'key'))
+    route_cmd = sub.add_parser('route', help='list | add | remove | run | on | off | key | mode: where a session can '
+                                             'run when the one in use hits its usage limit (any Anthropic- or '
+                                             'OpenAI-compatible service, on your own key), and the switches for all of '
+                                             'it (mode on|off: whether a switch carries the permission mode)')
+    route_cmd.add_argument('action', choices=('list', 'add', 'remove', 'run', 'on', 'off', 'key', 'mode'))
     route_cmd.add_argument('name', nargs='?')
     route_cmd.add_argument('--base-url', help='add: the endpoint, e.g. https://ollama.com (anthropic) or '
                                               'https://ollama.com/v1 (openai)')
@@ -665,6 +666,11 @@ def main(argv=None):
                     return 0
             elif args.action in ('on', 'off'):
                 result = routes.set_enabled(store, args.action == 'on', args.name)
+            elif args.action == 'mode':
+                if args.name not in (None, 'on', 'off'):
+                    raise SystemExit('route mode takes on or off')
+                result = (routes.set_mode(store, args.name == 'on') if args.name else
+                          {'mode': 'carried' if routes.mode_carried(store) else 'host default'})
             elif not args.name:
                 raise SystemExit('route %s needs a NAME' % args.action)
             elif args.action == 'add':
@@ -682,6 +688,14 @@ def main(argv=None):
                     print('Orbit: ' + str(error), file=sys.stderr)
                     return 2
             else:
+                if routes.needs_terminal(store, args.name, passthrough) and not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    # A session started where nobody watches could be neither seen nor steered (2026-11-18: one
+                    # started from an agent's own shell ran in the background of the pane the user was looking at).
+                    print('Orbit: `route run` starts an interactive session and this shell has no terminal: it would '
+                          'run where nobody sees it. Run it in the pane you watch — a switch does that by itself: '
+                          'type the route\'s number or name there. (A one-off answer needs none: add `-- -p PROMPT` '
+                          'for Claude Code or `-- exec PROMPT` for Codex.)', file=sys.stderr)
+                    return 2
                 try:
                     routes.run(store, args.name, carry=args.carry, extra=passthrough, force=args.force,
                                came_from=args.came_from, model=args.model, capsule=args.capsule)

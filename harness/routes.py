@@ -26,6 +26,13 @@ handed to the new session at its start, whichever host each runs on and whether 
 A route's end need not be known in advance. When its service refuses for payment (a free period over, credits spent,
 a plan it needs: HTTP 402, or the service's words saying so), the session's next prompt gets the same offer, and
 the route is not offered again until `route on NAME` says it answers again: waiting does not bring it back.
+
+A switch is meant to be one number or name and nothing else (2026-11-18: "클로드 <-> 코덱스 스위칭도 자연스럽게"). The
+session it starts runs in the permission mode of the one left, so its first command is not stopped by an approval
+prompt the user never had (`route mode off`: the host's own default instead). A switch whose typing failed says why at
+the session's next prompt, with the command to run by hand, and the same pick tries again; a pick is never passed on to
+the model or recorded as a change of what the task must deliver. `route run` starts a session only in a terminal: one
+started from a shell nobody watches could be neither seen nor steered.
 """
 import datetime
 import json
@@ -92,6 +99,19 @@ PAID = re.compile(r'requires? an? (paid )?(subscription|plan)|upgrade (for|to ge
                   r'|payment required|insufficient[_ ](credits?|balance|funds|quota)|(out of|no) (usage )?credits'
                   r'|add credits|exceeded your current quota', re.I)
 USAGE_WORDS = re.compile(r'usage limit|rate limit|hit your', re.I)   # a usage limit: it resets, it is no refusal
+OUTCOME_KEY = 'route-switch:'      # + session: what became of the switch it started (JSON, left by the typist)
+SWITCH_WAIT = 45                   # a switch types for at most about this long (its host is given 30s to quit)
+# The permission modes carried to the session a switch starts. Claude Code names its mode (hook payload
+# `permission_mode`, transcript `permissionMode`); Codex has an approval policy and a sandbox (rollout `turn_context`).
+CLAUDE_MODES = ('acceptEdits', 'plan', 'dontAsk', 'bypassPermissions')
+CODEX_APPROVALS = ('untrusted', 'on-failure', 'on-request', 'never')
+CODEX_SANDBOXES = ('read-only', 'workspace-write', 'danger-full-access')
+PERMISSION_OPTIONS = ('--dangerously-skip-permissions', '--allow-dangerously-skip-permissions', '--permission-mode',
+                      '-a', '--ask-for-approval', '-s', '--sandbox', '--dangerously-bypass-approvals-and-sandbox',
+                      '--full-auto', '--yolo')
+# `route run NAME -- ARGS` with one of these answers once and ends: its output goes to whoever ran it, no session stays.
+ONE_OFF = {'claude': ('-p', '--print', '--version', '-v', '--help', '-h'),
+           'codex': ('exec', 'e', 'review', '--version', '-V', '--help', '-h')}
 
 
 # ---------------------------------------------------------------- the routes
@@ -172,6 +192,19 @@ def set_enabled(store, value, name=None):
     if value:
         forget_refusal(store, name)       # `route on NAME`: the user says it answers again
     return {'route': name, 'enabled': bool(value)}
+
+
+def mode_carried(store):
+    """Whether a switch starts the new session in the permission mode of the one left (on unless turned off)."""
+    return _data(store).get('carry_mode') is not False
+
+
+def set_mode(store, value):
+    """`route mode on|off`."""
+    data = _data(store)
+    data['carry_mode'] = bool(value)
+    _save(store, data)
+    return {'mode': 'carried' if value else 'host default'}
 
 
 def models(route):
@@ -639,10 +672,15 @@ _shell_word = shlex.quote
 def _pick(text, offer, blocked=None):
     """The pick a prompt makes from the offer, or None. Claude Code puts a blocked prompt back into its input, so
     what arrives is often those words with the pick typed after them ("stubo로 바꿔줘1", seen 2026-11-17 in a real
-    pane): the words the hook blocked, then a number or a name, count as that pick."""
-    text = (text or '').strip()
-    if blocked and text != blocked.strip() and text.startswith(blocked.strip()):
-        text = text[len(blocked.strip()):]
+    pane): the words the hook blocked, then a number or a name, count as that pick. A pick typed before the words
+    are back arrives ahead of them, on a line of its own ("1\ncodex로 바꿔줘", seen 2026-11-18 in cmux with Claude
+    Code 2.1.327: it went to the model, which used the turn to work out why it had not switched)."""
+    text, blocked = (text or '').strip(), (blocked or '').strip()
+    if blocked and text != blocked:
+        if text.startswith(blocked):
+            text = text[len(blocked):]
+        elif text.endswith(blocked):
+            text = text[:-len(blocked)]
     word = text.strip().strip('`"\'').strip().lower()
     if word.isdigit() and 1 <= int(word) <= len(offer):
         return offer[int(word) - 1]
@@ -682,12 +720,16 @@ def targets(store):
 def asks_switch(store, text):
     """Whether a prompt asks to change the model or to run on a route or model it names. Deterministic and narrow:
     one short line; a request for work that mentions a model ("Organization 모델 변경", "모델 전환 기능 개발") is not
-    one. Returns the words named ([] for "다른 모델로"), or None when the prompt is not a switch request."""
+    one. A route's or a model's name alone is one ("claude", "코덱스": typed on 2026-11-18 to switch, it went to the
+    model and into the task as a requirement). Returns the words named ([] for "다른 모델로"), or None when the prompt
+    is not a switch request."""
     text = (text or '').strip()
     if not text or len(text) > ASK_LENGTH or '\n' in text or _orbit_line(text):
         return None
     words = targets(store)
     named = [w for w in words if re.search(r'(?<![a-z0-9])' + re.escape(w) + r'(?![a-z])', text, re.I)]
+    if text.strip('`"\'').strip().lower() in words:
+        return named
     bare = text
     for word in named:
         bare = re.sub(re.escape(word), ' ', bare, flags=re.I)
@@ -823,7 +865,8 @@ def conversation(path, host, turns=TURNS):
     return [[role, _cut(text)] for role, text in said[-turns:]], files[-FILES:]
 
 
-def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None, environ=None):
+def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None, environ=None,
+                 mode=None):
     """Keep where the session left was, for the session the switch starts: its own words, never a summary by a model.
 
     On a second or later switch, prepend the turns and files this session itself received. A new process's transcript
@@ -845,7 +888,8 @@ def make_capsule(store, session, host, to_route, model, state, task, transcript,
     capsule = {'id': uuid.uuid4().hex[:12], 'at': now(), 'reason': 'asked' if asked else 'limit',
                'asked': asked, 'held': held, 'from_route': state.get('route') or host, 'from_host': host,
                'from_session': session, 'to_route': to_route, 'model': model, 'cwd': cwd,
-               'task': task['id'] if task and task.get('status') not in CLOSED else None, 'turns': turns, 'files': files, 'served_to': None}
+               'task': task['id'] if task and task.get('status') not in CLOSED else None, 'turns': turns, 'files': files,
+               'mode': mode, 'served_to': None}
     store.preference(CAPSULE_KEY + capsule['id'], json.dumps(capsule, ensure_ascii=False))
     return capsule
 
@@ -907,40 +951,233 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
     state = _json(store, SESSION_KEY + session)
     offer = state.get('offer') or []
     live = offer and (_stamp(state.get('at')) or 0) + (ASKED_TTL if state.get('asked') else OFFER_TTL) > at
+
+    def go(chosen, state, note=''):
+        mode = session_mode(payload, host, pid, environ=environ) if mode_carried(store) else None
+        reply = switch(store, session, host, task, chosen, state, text, environ=environ, at=at, terminal=terminal,
+                       spawn=spawn, pid=pid, which=which, runner=runner, transcript=payload.get('transcript_path'),
+                       cwd=payload.get('cwd'), mode=mode)
+        return dict(reply, reason=note + '\n' + reply['reason']) if note else reply
+
     if live:
         chosen = _pick(text, offer, state.get('blocked_text'))
         if chosen:
-            return switch(store, session, host, task, chosen, state, text, environ=environ, at=at, terminal=terminal,
-                          spawn=spawn, pid=pid, which=which, runner=runner, transcript=payload.get('transcript_path'),
-                          cwd=payload.get('cwd'))
+            return go(chosen, state)
+    # A switch this session started, and the session is still here to be asked. The pick typed again is never the
+    # model's to answer: on 2026-11-18 "1" and "claude", typed again after a switch cmux had refused, went through as
+    # prompts and were recorded as changes of what the task must deliver.
+    note = ''
+    result, why = switch_result(store, session, state, at)
+    if result:
+        # Claude Code put the pick itself back into its input: "1" typed behind it arrives as "…11".
+        again = (_pick(text, state.get('picked_from') or [], state.get('blocked_text'))
+                 or _pick(text, state.get('picked_from') or [], state.get('picked_text')))
+        if result == 'typing':
+            if again:
+                return {'decision': 'block', 'reason': (
+                    'Orbit: already switching this pane to %s: this session quits, then `%s` starts. Nothing more to '
+                    'type.' % (state.get('switched'), state.get('run_line')))}
+        else:
+            note = ('Orbit: the switch to %s did not happen: %s. Nothing was started. Type its number or name again '
+                    'to retry, or do it by hand: quit this session with /exit and run:\n  %s'
+                    % (state.get('switched'), why, state.get('run_line')))
+            state = dict(state, switch_told=True)
+            store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
+            if again:
+                return go(again, state, note)
     limit = read_limit(payload.get('transcript_path'), host)
     on = current_route(host, environ)
     if not active(limit, at):
         if state.get('asked') and offer:
             # An offer the user asked for ends at the next prompt that picks nothing: that prompt is theirs to send,
             # and the very words that asked, sent again, were meant for the session.
-            store.preference(SESSION_KEY + session, json.dumps(dict(state, offer=[]), ensure_ascii=False))
+            state = dict(state, offer=[])
+            store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
             if text == state['asked'] and live:
                 return None
         named = asks_switch(store, text)
-        if named is None:
+        if named is None and not note:
             return None
         usable, unusable = choices(store, on, at, environ, runner, which)
         picks = [pick for pick, _, _ in offer_rows(usable)]
-        state = dict(state, offer=picks, at=now(), asked=text, route=on, host=host, held=None, blocked_text=text)
+        if named is None:                 # the prompt asked for no switch: it is blocked this once, to say the above
+            note += '\n(This prompt was not sent. Send it again to go on in this session.)'
+        state = dict(state, offer=picks, at=now(), asked=text if named is not None else state.get('asked') or text,
+                     route=on, host=host, held=None, blocked_text=text)
         store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
-        return {'decision': 'block', 'reason': ask_guidance(store, _label(store, on, host), usable, unusable, at, named)}
+        reason = ask_guidance(store, _label(store, on, host), usable, unusable, at, named or [])
+        return {'decision': 'block', 'reason': note + '\n' + reason if note else reason}
     limit = dict(limit, route=on)
     record_limit(store, on, limit)
-    if not limit.get('resets_at') and state.get('blocked') == limit['id']:
+    asking = asks_switch(store, text) is not None
+    if not limit.get('resets_at') and state.get('blocked') == limit['id'] and not note and not asking:
         return None                       # no reset time known: shown once, then the user may simply try again
     usable, unusable = choices(store, on, at, environ, runner, which)
     picks = [pick for pick, _, _ in offer_rows(usable)]
-    held = text if text and not _orbit_line(text) and not _pick(text, picks) else state.get('held')
+    # What is held is work to carry over: not Orbit's own lines, not a pick, not the words that ask for the switch.
+    held = text if text and not _orbit_line(text) and not _pick(text, picks) and not asking else state.get('held')
     state = {'offer': picks, 'at': now(), 'blocked': limit['id'], 'route': on, 'host': host,
              'held': held, 'limit': limit, 'blocked_text': text}
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
-    return {'decision': 'block', 'reason': guidance(store, _label(store, on, host), limit, usable, unusable, at, bool(held))}
+    reason = guidance(store, _label(store, on, host), limit, usable, unusable, at, bool(held))
+    return {'decision': 'block', 'reason': note + '\n' + reason if note else reason}
+
+
+def switch_outcome(store, session, switch, error=None):
+    """The detached typist's report on the switch `switch` (its capsule id) that `session` started."""
+    store.preference(OUTCOME_KEY + session, json.dumps(
+        {'switch': switch, 'ok': error is None, 'reason': ' '.join(str(error or '').split())[:300], 'at': now()},
+        ensure_ascii=False))
+
+
+def switch_result(store, session, state, at):
+    """What became of the switch this session started, asked while the session is still there: (None, None) when
+    there is nothing to say (none started, a command shown to run by hand, typed to the end, or told already),
+    ('typing', None) while the keys are being typed, ('failed', why) when it did not happen. A typist that left no
+    report at all (it died: seen 2026-11-17) counts as failed once the time a switch can take has passed."""
+    if not state.get('switched') or not state.get('typed') or state.get('switch_told'):
+        return None, None
+    outcome = _json(store, OUTCOME_KEY + session)
+    if outcome.get('switch') and outcome.get('switch') == state.get('capsule'):
+        if outcome.get('ok'):
+            return None, None
+        return 'failed', 'Orbit could not type into this pane — ' + (outcome.get('reason') or 'no reason given')
+    if (_stamp(state.get('switched_at')) or 0) + SWITCH_WAIT > at:
+        return 'typing', None
+    return 'failed', 'the typing left no result within %d seconds (see hooks.log in %s)' % (SWITCH_WAIT, store.home)
+
+
+# ---------------------------------------------------------------- the permission mode a switch carries
+
+def _host_argv(pid, runner=None):
+    """The command line the host process was started with ([] when it cannot be read)."""
+    if not pid:
+        return []
+    try:
+        out = (runner or subprocess.run)(['ps', '-o', 'args=', '-p', str(pid)], capture_output=True, text=True, timeout=5)
+        return shlex.split((out.stdout or '').strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def _option(argv, *names):
+    """The value of the first of `names` in argv (`--name value` or `--name=value`), or None."""
+    for index, arg in enumerate(argv):
+        name, eq, value = arg.partition('=')
+        if name in names:
+            return value if eq else (argv[index + 1] if index + 1 < len(argv) else None)
+    return None
+
+
+def _codex_config(environ=None):
+    """approval_policy and sandbox_mode at the top of the user's Codex config.toml (before any [table])."""
+    environ = os.environ if environ is None else environ
+    home = environ.get('CODEX_HOME') or os.path.join(os.path.expanduser('~'), '.codex')
+    found = {}
+    try:
+        with open(os.path.join(home, 'config.toml'), encoding='utf-8') as handle:
+            for line in handle:
+                if line.lstrip().startswith('['):
+                    break
+                match = re.match(r'\s*(approval_policy|sandbox_mode)\s*=\s*["\']([\w-]+)["\']', line)
+                if match:
+                    found[match.group(1)] = match.group(2)
+    except OSError:
+        pass
+    return found
+
+
+def session_mode(payload, host, pid=None, runner=None, environ=None):
+    """The permission mode the session runs in now, to start the session a switch opens in: {'host': 'claude',
+    'mode': …} or {'host': 'codex', 'approval': …, 'sandbox': …}; None when nothing says.
+
+    Claude Code: the hook payload's `permission_mode` (what the session is in now, after any shift+tab), else its
+    transcript's latest `permissionMode`, else the options it was started with. Codex: the latest `turn_context` of its
+    rollout (the policy and the sandbox in effect, whether a flag or config.toml set them), else the options it was
+    started with over config.toml. Seen 2026-11-18: this user runs `claude --dangerously-skip-permissions` and Codex
+    with approval_policy "never" and sandbox_mode "danger-full-access" in config.toml; `route run` started the bare
+    host, so the Claude Code session a switch opened stopped at an approval prompt on its first command."""
+    payload = payload or {}
+    if host == 'claude':
+        mode = payload.get('permission_mode')
+        if not mode:
+            for line in reversed(_tail(payload.get('transcript_path'))):
+                if '"permissionMode"' in line:
+                    try:
+                        mode = json.loads(line).get('permissionMode')
+                    except ValueError:
+                        mode = None
+                    if mode:
+                        break
+        if not mode:
+            argv = _host_argv(pid or host_pid(host, runner=runner), runner)
+            mode = 'bypassPermissions' if '--dangerously-skip-permissions' in argv else _option(argv, '--permission-mode')
+        return {'host': 'claude', 'mode': mode} if mode else None
+    if host != 'codex':
+        return None
+    approval = sandbox = None
+    for line in reversed(_tail(payload.get('transcript_path'))):
+        if '"turn_context"' not in line:
+            continue
+        try:
+            turn = json.loads(line)
+        except ValueError:
+            continue
+        if turn.get('type') == 'turn_context':
+            context = turn.get('payload') or {}
+            policy = context.get('sandbox_policy')
+            approval = context.get('approval_policy')
+            sandbox = policy.get('type') if isinstance(policy, dict) else policy
+            break
+    if not approval and not sandbox:
+        argv = _host_argv(pid or host_pid(host, runner=runner), runner)
+        config = _codex_config(environ)
+        if '--dangerously-bypass-approvals-and-sandbox' in argv or '--yolo' in argv:
+            approval, sandbox = 'never', 'danger-full-access'
+        else:
+            approval = _option(argv, '-a', '--ask-for-approval') or config.get('approval_policy')
+            sandbox = _option(argv, '-s', '--sandbox') or config.get('sandbox_mode')
+    return {'host': 'codex', 'approval': approval, 'sandbox': sandbox} if approval or sandbox else None
+
+
+def mode_args(mode, host):
+    """The options that start `host` in the permission mode of the session left.
+
+    The same host: the mode as it was. The other host: only the one mode both have — nothing asked and no sandbox
+    (Claude Code's bypassPermissions, Codex's approval never with danger-full-access); any other mode has no equal
+    there and the host starts in its own default, the cautious side. Every value is checked against the names the
+    hosts know: nothing read from a transcript reaches a command line as it is."""
+    if not isinstance(mode, dict):
+        return []
+    free = mode.get('mode') == 'bypassPermissions' or (mode.get('approval') == 'never'
+                                                       and mode.get('sandbox') == 'danger-full-access')
+    if host == 'claude':
+        if free:
+            return ['--dangerously-skip-permissions']
+        return ['--permission-mode', mode['mode']] if mode.get('host') == 'claude' and mode.get('mode') in CLAUDE_MODES else []
+    if host == 'codex':
+        if free:
+            return ['-a', 'never', '-s', 'danger-full-access']
+        if mode.get('host') != 'codex':
+            return []
+        return ((['-a', mode['approval']] if mode.get('approval') in CODEX_APPROVALS else [])
+                + (['-s', mode['sandbox']] if mode.get('sandbox') in CODEX_SANDBOXES else []))
+    return []
+
+
+def mode_words(mode):
+    """The mode in the user's words, for the lines Orbit shows."""
+    if not isinstance(mode, dict):
+        return ''
+    if mode.get('mode'):
+        return 'bypass permissions (nothing asked)' if mode['mode'] == 'bypassPermissions' else mode['mode']
+    return 'approval %s · sandbox %s' % (mode.get('approval') or 'default', mode.get('sandbox') or 'default')
+
+
+def needs_terminal(store, name, extra=()):
+    """Whether `route run NAME -- EXTRA` starts a session someone has to watch (anything but a one-off answer)."""
+    route = all_routes(store).get(split_pick(name)[0])
+    return not any(arg in ONE_OFF.get((route or {}).get('host'), ()) for arg in extra)
 
 
 def host_pid(host, start=None, runner=None):
@@ -967,12 +1204,13 @@ def host_pid(host, start=None, runner=None):
 
 def switch_steps(host, presses, pid, run_line):
     """Quit the host in its pane, wait until it is gone, then start the route from the shell it leaves."""
+    from .typist import clear_steps
     steps = [('wait', 0.8)]
-    if host == 'claude' and presses:
+    if host == 'claude':
         # Claude Code puts the blocked pick back into its input. cmux 0.65.2 then refuses send-panel unless --force
-        # is passed (seen live 2026-11-18: "the agent prompt … holds text someone is typing"). Force only the first
-        # clear: it removes the pick this hook just blocked. Later input keeps cmux's protection for the user's typing.
-        steps += [('key', {'key': 'ctrl+u', 'force': True})] + [('key', 'ctrl+u')] * (presses - 1)
+        # is passed (seen live 2026-11-18: "the agent prompt … holds text someone is typing"). Only presses cmux
+        # refuses over the pick this hook just blocked are forced: later input keeps its protection for the user.
+        steps += clear_steps(presses)
     steps += [('text', '/exit')]
     if host == 'codex':                   # Codex takes an Enter right behind typed text as part of a paste: a newline,
         steps += [('wait', 1.2)]          # so /exit stayed in its input (seen 2026-11-17 in a real pane)
@@ -981,9 +1219,10 @@ def switch_steps(host, presses, pid, run_line):
 
 
 def switch(store, session, host, task, name, state, text, environ=None, at=None, terminal=None, spawn=None, pid=None,
-           which=None, runner=None, transcript=None, cwd=None):
+           which=None, runner=None, transcript=None, cwd=None, mode=None):
     """Start route `name` in this session's pane with this session's context (a capsule), carrying the held request
-    (or a continuation) to the task when one is attached."""
+    (or a continuation) to the task when one is attached. `mode`: this session's permission mode (session_mode),
+    which the new session starts in."""
     from . import typist
     from .attach import CLOSED
     at = time.time() if at is None else at
@@ -1011,24 +1250,32 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
                        {'route': name, 'from': state.get('route') or host, 'session': session, 'layer': 'context',
                         'terminal': (terminal or {}).get('kind')})
     capsule = make_capsule(store, session, host, name, model, state, task if carry else None,
-                           transcript or store.preference(_transcript_key() + session), cwd, at, environ=environ)
-    state = dict(state, offer=[], switched=name, switched_at=now(), capsule=capsule['id'])
-    store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
+                           transcript or store.preference(_transcript_key() + session), cwd, at, environ=environ,
+                           mode=mode)
     left_route = state.get('route') or host
     run_line = '%s route run %s%s --carry --capsule %s%s' % (
         _orbit(store), name, (' --model ' + _shell_word(model)) if model else '', capsule['id'],
         ' --from ' + left_route if left_route != name else '')
+    # What the next prompt here needs if this session is still there: the pick again, and the command by hand.
+    state = dict(state, offer=[], switched=name, switched_at=now(), capsule=capsule['id'], run_line=run_line,
+                 picked_from=list(state.get('offer') or state.get('picked_from') or []), typed=bool(terminal),
+                 picked_text=text)
+    state.pop('switch_told', None)
+    store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     note = (' · model ' + model if model else '') + _until_note(route, at)
     carried = ('The new session takes the task over with this conversation\'s context%s.' % (
         ' and runs your request; nothing to retype' if state.get('held') else '')) if carry else \
         ('The new session gets this conversation\'s context%s.' % (
             ' and your request; nothing to retype' if state.get('held') else ''))
+    if mode_args(mode, route['host']):
+        carried += ' It starts in this session\'s permission mode: %s.' % mode_words(mode)
     if not terminal:
         return {'decision': 'block', 'reason': (
             'Orbit: to continue on %s (%s%s), quit this session with /exit and run:\n  %s\n%s' % (
                 name, route['label'], note, run_line, carried))}
     steps = switch_steps(host, typist.clear_presses(text), pid or host_pid(host), run_line)
-    (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'] if carry else None)
+    (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home,
+                            task=task['id'] if carry else None, report={'session': session, 'switch': capsule['id']})
     return {'decision': 'block', 'reason': (
         'Orbit: switching this pane to %s (%s%s): quitting this session, then `%s`. %s' % (
             name, route['label'], note, run_line, carried))}
@@ -1138,6 +1385,10 @@ def list_text(store, at=None, environ=None):
             row['name'], state, row['label'],
             (' · models ' + ', '.join(row['models'])) if len(row['models']) > 1 else '',
             _until_note(routes[row['name']], at), '' if row['usable'] else ' · ' + row['why']))
+    lines.append('MODE: %s' % ('carried — a switch starts the new session in the permission mode of the one left '
+                               '(host default instead: %s route mode off)' % orbit if mode_carried(store) else
+                               'host default — a switch starts the new session in its host\'s own permission mode '
+                               '(carried instead: %s route mode on)' % orbit))
     lines.append('`route run NAME [--model MODEL]` starts one here · `route on|off NAME` · `route key NAME` stores '
                  'your key · `route add NAME --base-url URL --model M[,M…] [--api anthropic|openai]`')
     return '\n'.join(lines)
@@ -1177,12 +1428,17 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
     environ.pop(CAPSULE_ENV, None)        # a capsule belongs to the one session a switch started, never to a later one
     if came_from and came_from != name:
         environ[FROM_ENV] = came_from
+    mode = None
     if capsule:
         if not re.match(r'^[0-9a-f]{12}$', capsule) or not _json(store, CAPSULE_KEY + capsule):
             print('Orbit: no carried context %r here: starting without it' % capsule, file=out, flush=True)
         else:
             environ[CAPSULE_ENV] = capsule
-    argv = [route['host']]
+            mode = _json(store, CAPSULE_KEY + capsule).get('mode')
+    # The permission mode of the session left, unless it is turned off or the user gave their own after `--`.
+    own = any(arg.partition('=')[0] in PERMISSION_OPTIONS for arg in extra)
+    carried_mode = mode_args(mode, route['host']) if mode_carried(store) and not own else []
+    argv = [route['host']] + carried_mode
     if name in BUILTIN:
         if model:                         # the host's own account, on a model the user picked
             argv += ['--model', model] if route['host'] == 'claude' else ['-c', 'model=' + _toml(model)]
@@ -1218,8 +1474,9 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
     if carry:
         argv.append(CARRY_LINE)
     limit = route_limit(store, name)
-    print('Orbit: starting %s on route %s (%s%s%s)%s' % (
+    print('Orbit: starting %s on route %s (%s%s%s)%s%s' % (
         route['host'], name, route['label'], (' · model ' + model) if model else '', _until_note(route, at),
+        (' · in the permission mode of the session left: ' + mode_words(mode)) if carried_mode else '',
         (' — note: ' + _limited_text(limit, at)) if active(limit, at) else ''), file=out, flush=True)
     if hasattr(store, 'close'):
         store.close()                     # the host replaces this process: nothing of the ledger stays open in it

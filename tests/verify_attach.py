@@ -248,7 +248,8 @@ def verify_handoff_continues(base):
           tick(tid, 'cc-continue') == 'handed_off' and len(spawned) == 2
           and ('text', '/clear') in spawned[-1][1] and ('text', typist.CARRY_LINE) in spawned[-1][1], spawned[-1:])
     check('…nothing is erased first: the input was read empty, so a ctrl+u could only remove the user\'s typing',
-          len(spawned) == 2 and ('key', 'ctrl+u') not in spawned[-1][1], spawned[-1:])
+          len(spawned) == 2 and ('key', 'ctrl+u') not in spawned[-1][1]
+          and not [step for step in spawned[-1][1] if step[0] == 'clear'], spawned[-1:])
 
     count = len(spawned)
     tid = ready('codex', 'cx-question', question='Which source should be used?')

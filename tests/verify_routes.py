@@ -23,6 +23,11 @@ carries any credential but the route's (with ANTHROPIC_API_KEY alone Claude Code
 ⑫ ⑬ a switch the user asks for and the context carried. ⑭ (2026-11-18: "실제 날짜 모르겠어" — when a free period ends is not
 known): a route whose service refuses for payment is seen when it happens, in Claude Code and in Codex, and is not
 offered again until `route on NAME`; a 401 for a wrong key, a network error and Claude Code's own rate limit are not.
+⑮ (2026-11-18: "클로드 <-> 코덱스 스위칭도 자연스럽게 되어야 해"): the session a switch starts runs in the permission mode
+of the one left (seen: `route run` started the bare host, and the new Claude Code session stopped at an approval prompt);
+a switch whose typing failed says why at the next prompt with the command to run by hand, and the pick typed again
+retries (seen: "1" and "claude" went on to the model and were recorded as changes of the task); a request of several
+lines is cleared under cmux's draft protection; `route run` refuses a shell with no terminal.
 Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of routes.
 """
 import datetime
@@ -55,6 +60,11 @@ patch.object(_supervision, 'subprocess', _Namespace(
     SubprocessError=subprocess.SubprocessError)).start()
 patch.object(attach, 'orbit_command', return_value='cosmos-orbit').start()
 patch.object(routes.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name if name in ('claude', 'codex') else None).start()
+# The permission mode a switch carries is read from the payload and the transcript; its last resorts are the host's own
+# command line and the user's Codex config.toml. Neither of this machine's may leak into a check (⑮ reads them itself).
+REAL_HOST_ARGV, REAL_CODEX_CONFIG = routes._host_argv, routes._codex_config
+patch.object(routes, '_host_argv', return_value=[]).start()
+patch.object(routes, '_codex_config', return_value={}).start()
 
 FAILED = []
 
@@ -187,7 +197,7 @@ print('③ a number picks a route: the pane switches, the request is carried to 
 spawned = []
 terminal = {'kind': 'tmux', 'cli': '/usr/bin/true', 'target': '%9'}
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned.append((term, steps, task)) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned.append((term, steps, task)) or 1), \
         patch.object(routes, 'host_pid', return_value=4242):
     picked = attach.handle(store, 'prompt', {'cwd': str(repo), 'session_id': session, 'prompt': '2',
                                               'transcript_path': str(transcript)}, 'claude')
@@ -201,7 +211,7 @@ check('the task waits for the session that starts in this pane', state.get('stat
 steps = spawned[0][1] if spawned else []
 texts = [value for kind, value in steps if kind == 'text']
 check('typed: the input emptied, /exit, then the route started once the host is gone',
-      ('key', 'ctrl+u') in steps and texts[0] == '/exit' and ('gone', [4242, 30.0]) in steps
+      ('clear', 3) in steps and texts[0] == '/exit' and ('gone', [4242, 30.0]) in steps
       and re.fullmatch(r'cosmos-orbit route run kimi --carry --capsule [0-9a-f]{12} --from claude', texts[-1] or '')
       and steps.index(('gone', [4242, 30.0])) < steps.index(('text', texts[-1])), steps)
 check('nothing typed holds the key', all('secret-test-key-value' not in str(value) for _, value in steps))
@@ -229,23 +239,35 @@ check('no pane Orbit can type into: the reply gives the command to run', 'route 
       and '/exit' in ((manual or {}).get('reason') or ''), manual)
 codex_steps = routes.switch_steps('codex', 5, 77, 'cosmos-orbit route run claude --carry')
 check('Codex: nothing to empty (its blocked prompt does not come back), /exit then the route',
-      ('key', 'ctrl+u') not in codex_steps and ('text', '/exit') in codex_steps and ('gone', [77, 30.0]) in codex_steps)
+      ('key', 'ctrl+u') not in codex_steps and 'clear' not in [k for k, _ in codex_steps]
+      and ('text', '/exit') in codex_steps and ('gone', [77, 30.0]) in codex_steps)
 # cmux 0.65.2 refused the restored pick as somebody's draft, so the old typist stopped before /exit. Force only the
 # first clear: every later keystroke, including /exit, still gets cmux's draft protection.
 cmux = {'kind': 'cmux', 'cli': '/bin/cmux', 'target': 'surface-test'}
 cmux_steps = routes.switch_steps('claude', 3, 77, 'cosmos-orbit route run kimi --carry')
-check('cmux: only the first clear of the just-blocked pick is forced; /exit and later input are not',
-      cmux_steps[1] == ('key', {'key': 'ctrl+u', 'force': True})
-      and cmux_steps[2:4] == [('key', 'ctrl+u')] * 2 and ('text', '/exit') in cmux_steps, cmux_steps)
-cmux_typed = []
+check('cmux: the just-blocked pick is cleared by one step (three presses), then /exit', cmux_steps[1] == ('clear', 3)
+      and cmux_steps.index(('clear', 3)) < cmux_steps.index(('text', '/exit')), cmux_steps)
+cmux_typed, cmux_draft = [], ['1']
+
+
+def cmux_refusing(argv):
+    """cmux 0.65.2: an unforced send is refused while the prompt holds a draft; ctrl+u (0x15) empties this one line."""
+    cmux_typed.append(argv)
+    if cmux_draft and '--force' not in argv:
+        return 1
+    if argv[-1] == '\x15':
+        cmux_draft.clear()
+    return 0
+
+
 try:
-    typist.run(cmux, [cmux_steps[1], cmux_steps[2], next(step for step in cmux_steps if step == ('text', '/exit'))],
-               runner=lambda argv: cmux_typed.append(argv) or 0)
-    cmux_ok = (len(cmux_typed) == 3 and '--force' in cmux_typed[0]
-               and all('--force' not in argv for argv in cmux_typed[1:]))
-except (KeyError, TypeError) as error:
+    typist.run(cmux, [cmux_steps[1], ('text', '/exit')], runner=cmux_refusing)
+    forced_at = [index for index, argv in enumerate(cmux_typed) if '--force' in argv]
+    cmux_ok = (forced_at == [1] and cmux_typed[0][-1] == '\x15' and cmux_typed[1][-1] == '\x15'
+               and cmux_typed[-1][-1] == '/exit' and len(cmux_typed) == 5)
+except (KeyError, TypeError, RuntimeError):
     cmux_ok = False
-check('the forced clear reaches send-panel; force does not leak into the next keys or /exit', cmux_ok, cmux_typed)
+check('only the press cmux refuses over that pick is sent again forced; the margin and /exit are not', cmux_ok, cmux_typed)
 try:
     tmux_forced = typist.command(terminal, key='ctrl+u', force=True)
     tmux_ok = '--force' not in tmux_forced
@@ -257,10 +279,11 @@ try:
     with patch.object(typist.subprocess, 'run', return_value=_Namespace(
             returncode=1, stdout='', stderr='Error: send-panel: the agent prompt holds text someone is typing')), redirect_stdout(log):
         status = typist._terminal_run(['cmux', 'send-panel'])
-    logged = status == 1 and 'holds text someone is typing' in log.getvalue()
+    logged = status == 1 and 'holds text someone is typing' in typist.SAID[0] and 'holds text someone is typing' in str(
+        typist._failed(cmux, status))
 except AttributeError:
     logged = False
-check('a detached typing failure logs cmux\'s actual reason, not only "cmux exit 1"', logged)
+check('a typing failure carries cmux\'s actual reason, not only "cmux exit 1" (⑮: into the log and the next prompt)', logged)
 # controls
 plain = base / 'plain.jsonl'
 write(plain, [answer(NOW - 30)])
@@ -525,7 +548,7 @@ check('the offer lists the route on its default model, then each other model as 
       '2  ollama     Ollama cloud · model kimi-k3.1-pro' in reason10 and '3  ollama:GLM-5 the same route on model GLM-5' in reason10, reason10)
 spawned10 = []
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned10.append(steps) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned10.append(steps) or 1), \
         patch.object(routes, 'host_pid', return_value=4242):
     picked10 = routes.on_prompt(s10, {'session_id': 's10', 'prompt': 'ollama:glm-5', 'transcript_path': str(limited)}, 'claude', None)
 texts10 = [v for k, v in (spawned10[0] if spawned10 else []) if k == 'text']
@@ -689,7 +712,7 @@ check('another prompt after the offer goes on, and ends it', routes.on_prompt(
       and not routes._json(s12, routes.SESSION_KEY + 'm-1').get('offer'))
 spawned_back = []
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned_back.append(steps) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned_back.append(steps) or 1), \
         patch.object(routes, 'host_pid', return_value=4242):
     back12 = routes.on_prompt(s12, {'session_id': 'm-6', 'prompt': 'codex로 전환해줘1', 'transcript_path': str(t12)}, 'claude', None)
 texts_back = [v for k, v in (spawned_back[0] if spawned_back else []) if k == 'text']
@@ -719,7 +742,7 @@ check('in a session with a task, through the hook: the offer, and the request is
                                                                                   ensure_ascii=False), asked12)
 spawned12 = []
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned12.append(steps) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned12.append(steps) or 1), \
         patch.object(routes, 'host_pid', return_value=4242):
     picked12 = attach.handle(s12, 'prompt', {'cwd': str(repo12), 'session_id': 's12', 'prompt': '2',
                                              'transcript_path': str(t12)}, 'claude')
@@ -803,7 +826,7 @@ check('Codex, no task: asking gets the offer (codex itself not offered) and star
       and attach.current_task(s12, repo13) is None, asked13)
 spawned13 = []
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned13.append((steps, task)) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned13.append((steps, task)) or 1), \
         patch.object(routes, 'host_pid', return_value=4343):
     picked13 = attach.handle(s12, 'prompt', {'cwd': str(repo13), 'session_id': 'cx13', 'prompt': 'kimi',
                                              'transcript_path': str(rollout)}, 'codex')
@@ -812,7 +835,7 @@ texts13 = [v for k, v in steps13 if k == 'text']
 run13 = re.fullmatch(r'cosmos-orbit route run kimi --carry --capsule ([0-9a-f]{12}) --from codex', texts13[-1] if texts13 else '')
 check('Codex → kimi (Claude Code): /exit, a pause before its Enter (Codex reads a quick one as part of a paste), then '
       'the route with the capsule; nothing to empty first in Codex',
-      bool(run13) and texts13[0] == '/exit' and ('key', 'ctrl+u') not in steps13
+      bool(run13) and texts13[0] == '/exit' and ('key', 'ctrl+u') not in steps13 and 'clear' not in [k for k, _ in steps13]
       and steps13[steps13.index(('text', '/exit')) + 1] == ('wait', 1.2)
       and 'gets this conversation\'s context' in (picked13 or {}).get('reason', ''), (steps13, picked13))
 with patch.dict(os.environ, {routes.CAPSULE_ENV: run13[1] if run13 else ''}):
@@ -915,7 +938,7 @@ check('… and no "usable again" note is given in the session that left it', rou
                                                        routes.FROM_ENV: 'kimi'}, at=NOW + 86400) is None)
 spawned14 = []
 with patch.object(typist, 'detect', return_value=terminal), \
-        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned14.append(steps) or 1), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw: spawned14.append(steps) or 1), \
         patch.object(routes, 'host_pid', return_value=4444):
     write(t14, [said(NOW - 900, 'add a parser'), answer(NOW - 880),
                 refused_line(NOW - 20, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403)])
@@ -951,6 +974,395 @@ routes.on_stop_failure(s14, {'session_id': 'sf14', 'transcript_path': str(t14), 
 check('StopFailure (the turn ended on it): kimi marked and the task\'s panes told it was refused for payment',
       told14 and 'kimi was refused: its service asks for payment' in told14[0]
       and (routes.route_limit(s14, 'kimi') or {}).get('paid'), (told14, routes.route_limit(s14, 'kimi')))
+
+print('⑮ a switch is one pick: the permission mode goes with it, a failed typing says why, a pick is never a prompt')
+s15 = Store(base / 'home-natural')
+repo15 = make_repo(base, 'natural-repo')
+attach.set_switch(s15, 'on', repo15)
+routes.add(s15, 'kimi', 'https://ollama.com', 'kimi-k3.1-pro', 'env:ROUTES_TEST_KEY', 'Kimi K3.1 Pro on Ollama cloud')
+t15 = base / 'natural.jsonl'
+write(t15, [said(NOW - 900, 'add a parser'), answer(NOW - 880)])
+cmux15 = {'kind': 'cmux', 'cli': '/bin/cmux', 'target': 'surface-15'}
+spawned15 = []
+
+
+def pay15(sid, prompt, **more):
+    return dict({'cwd': str(repo15), 'session_id': sid, 'prompt': prompt, 'transcript_path': str(t15)}, **more)
+
+
+def typing15():
+    return patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw:
+                        spawned15.append((steps, task, kw)) or 1)
+
+
+def capsule15(sid):
+    return routes._json(s15, routes.CAPSULE_KEY + routes._json(s15, routes.SESSION_KEY + sid).get('capsule', ''))
+
+
+# -- the two built-in routes come first whichever one the session runs on
+check('claude and codex are offered first from any route; an added route follows',
+      [r['name'] for r in routes.choices(s15, 'claude')[0]] == ['codex', 'kimi']
+      and [r['name'] for r in routes.choices(s15, 'codex')[0]] == ['claude', 'kimi']
+      and [r['name'] for r in routes.choices(s15, 'kimi')[0]] == ['claude', 'codex'])
+
+# -- the permission mode the session runs in
+check('Claude Code: the mode the hook payload names (what the session is in now)',
+      routes.session_mode({'permission_mode': 'bypassPermissions'}, 'claude') == {'host': 'claude', 'mode': 'bypassPermissions'})
+tm15 = base / 'mode.jsonl'
+write(tm15, [dict(said(NOW - 50, 'hi'), permissionMode='acceptEdits'), answer(NOW - 40)])
+check('… or its transcript\'s latest permissionMode',
+      routes.session_mode({'transcript_path': str(tm15)}, 'claude') == {'host': 'claude', 'mode': 'acceptEdits'})
+ps15 = lambda argv, **kw: _Namespace(stdout='/Users/x/.local/bin/claude --model opus --dangerously-skip-permissions\n')  # noqa: E731
+with patch.object(routes, '_host_argv', REAL_HOST_ARGV):
+    check('… or the options it was started with (`claude --dangerously-skip-permissions`)',
+          routes.session_mode({}, 'claude', pid=4242, runner=ps15) == {'host': 'claude', 'mode': 'bypassPermissions'})
+check('control: nothing says — no mode', routes.session_mode({}, 'claude', pid=4242) is None)
+rm15 = base / 'mode-rollout.jsonl'
+write(rm15, [{'timestamp': iso(NOW - 60), 'type': 'turn_context', 'payload': {'approval_policy': 'on-request',
+                                                                             'sandbox_policy': {'type': 'workspace-write'}}},
+             {'timestamp': iso(NOW - 30), 'type': 'turn_context', 'payload': {'approval_policy': 'never',
+                                                                             'sandbox_policy': {'type': 'danger-full-access'}}}])
+check('Codex: the approval policy and the sandbox of its latest turn (the rollout\'s turn_context)',
+      routes.session_mode({'transcript_path': str(rm15)}, 'codex')
+      == {'host': 'codex', 'approval': 'never', 'sandbox': 'danger-full-access'})
+home15 = base / 'codex-home-15'
+home15.mkdir()
+(home15 / 'config.toml').write_text('model = "gpt-6"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n\n'
+                                    '[profiles.careful]\napproval_policy = "untrusted"\n')
+empty15 = base / 'no-turn.jsonl'
+write(empty15, [{'timestamp': iso(NOW - 5), 'type': 'session_meta', 'payload': {'id': 'x'}}])
+with patch.object(routes, '_codex_config', REAL_CODEX_CONFIG):
+    check('… before its first turn: the user\'s config.toml (top level, not a profile\'s)',
+          routes.session_mode({'transcript_path': str(empty15)}, 'codex', pid=1, environ={'CODEX_HOME': str(home15)})
+          == {'host': 'codex', 'approval': 'never', 'sandbox': 'danger-full-access'})
+    with patch.object(routes, '_host_argv', return_value=['codex', '-a', 'on-request', '--sandbox=read-only']):
+        check('… and the options it was started with come before config.toml',
+              routes.session_mode({'transcript_path': str(empty15)}, 'codex', pid=1, environ={'CODEX_HOME': str(home15)})
+              == {'host': 'codex', 'approval': 'on-request', 'sandbox': 'read-only'})
+FREE_CLAUDE = {'host': 'claude', 'mode': 'bypassPermissions'}
+FREE_CODEX = {'host': 'codex', 'approval': 'never', 'sandbox': 'danger-full-access'}
+check('nothing asked and no sandbox is the one mode both hosts have: it crosses either way',
+      routes.mode_args(FREE_CLAUDE, 'codex') == ['-a', 'never', '-s', 'danger-full-access']
+      and routes.mode_args(FREE_CODEX, 'claude') == ['--dangerously-skip-permissions']
+      and routes.mode_args(FREE_CLAUDE, 'claude') == ['--dangerously-skip-permissions']
+      and routes.mode_args(FREE_CODEX, 'codex') == ['-a', 'never', '-s', 'danger-full-access'])
+check('the same host keeps its mode as it was',
+      routes.mode_args({'host': 'claude', 'mode': 'acceptEdits'}, 'claude') == ['--permission-mode', 'acceptEdits']
+      and routes.mode_args({'host': 'codex', 'approval': 'on-request', 'sandbox': 'workspace-write'}, 'codex')
+      == ['-a', 'on-request', '-s', 'workspace-write'])
+check('control: a mode the other host has no equal for starts it in its own default — never more than was given',
+      routes.mode_args({'host': 'codex', 'approval': 'never', 'sandbox': 'read-only'}, 'claude') == []
+      and routes.mode_args({'host': 'claude', 'mode': 'acceptEdits'}, 'codex') == []
+      and routes.mode_args({'host': 'claude', 'mode': 'default'}, 'claude') == [] and routes.mode_args(None, 'claude') == [])
+check('control: a value no host knows never reaches a command line',
+      routes.mode_args({'host': 'claude', 'mode': 'plan; rm -rf ~'}, 'claude') == []
+      and routes.mode_args({'host': 'codex', 'approval': '$(id)', 'sandbox': '--help'}, 'codex') == [])
+
+# -- asked, picked, typed into cmux: the mode in the capsule, the typist told whom to report to
+first15 = attach.handle(s15, 'prompt', pay15('n1', 'add a parser for the config file and keep the old behaviour'), 'claude')
+task15 = attach.current_task(s15, repo15)
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    asked15 = attach.handle(s15, 'prompt', pay15('n1', 'codex로 전환해줘', permission_mode='bypassPermissions'), 'claude')
+    picked15 = attach.handle(s15, 'prompt', pay15('n1', 'codex로 전환해줘1', permission_mode='bypassPermissions'), 'claude')
+    cid15 = capsule15('n1').get('id')
+    flying15 = attach.handle(s15, 'prompt', pay15('n1', '1', permission_mode='bypassPermissions'), 'claude')
+reason15 = (picked15 or {}).get('reason') or ''
+check('asked and picked: the pane switches to codex', (asked15 or {}).get('decision') == 'block' and task15
+      and 'switching this pane to codex' in reason15 and len(spawned15) == 1, (asked15, picked15))
+check('the capsule carries the session\'s permission mode, and the reply says the new session starts in it',
+      capsule15('n1').get('mode') == FREE_CLAUDE and 'permission mode: bypass permissions' in reason15,
+      (capsule15('n1').get('mode'), reason15))
+check('the typist is told which session and switch to report to', spawned15 and spawned15[0][2].get('report')
+      == {'session': 'n1', 'switch': cid15}, spawned15[0][2] if spawned15 else None)
+check('the pick typed again while the keys are being typed starts no second switch: it is answered "already switching"',
+      (flying15 or {}).get('decision') == 'block' and 'already switching this pane to codex' in flying15['reason']
+      and len(spawned15) == 1, flying15)
+ran.clear()
+run_fresh(base / 'home-natural', 'codex', carry=True, capsule=cid15, environ={'PATH': '/bin'})
+check('route run --capsule starts Codex in that mode: nothing asked, no sandbox, the carry line last',
+      ran and ran[-1][1] == ['codex', '-a', 'never', '-s', 'danger-full-access', typist.CARRY_LINE], ran[-1][1] if ran else None)
+s15 = Store(base / 'home-natural')
+
+# -- the typing failed: the next prompt says why, with the command to run by hand, once
+REFUSAL = 'typing failed (cmux exit 1: Error: send-panel: the agent prompt holds text someone is typing)'
+routes.switch_outcome(s15, 'n1', cid15, REFUSAL)
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    told15 = attach.handle(s15, 'prompt', pay15('n1', 'add a test for the parser'), 'claude')
+why15 = (told15 or {}).get('reason') or ''
+print('\n'.join('      | ' + line for line in why15.splitlines()))
+check('the next prompt in that session is answered with why the switch did not happen (the terminal\'s own words)',
+      (told15 or {}).get('decision') == 'block' and 'the switch to codex did not happen' in why15
+      and 'holds text someone is typing' in why15, why15)
+check('… the command to run by hand (quit with /exit, then the same route run with the same capsule)',
+      '/exit' in why15 and ('cosmos-orbit route run codex --carry --capsule %s --from claude' % cid15) in why15, why15)
+check('… the routes numbered again to retry, and that this prompt was not sent',
+      '  1  codex' in why15 and 'This prompt was not sent' in why15, why15)
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    retried15 = attach.handle(s15, 'prompt', pay15('n1', 'add a test for the parsercodex'), 'claude')
+    routes.switch_outcome(s15, 'n1', capsule15('n1').get('id'), REFUSAL)
+    told_again15 = attach.handle(s15, 'prompt', pay15('n1', 'add a test for the parser'), 'claude')
+    after15 = attach.handle(s15, 'prompt', pay15('n1', 'add a test for the parser'), 'claude')
+    bare15 = attach.handle(s15, 'prompt', pay15('n1', 'codex'), 'claude')
+check('the name typed after that (behind the words Claude Code put back) retries the switch',
+      'switching this pane to codex' in ((retried15 or {}).get('reason') or '')
+      and len(spawned15) == 2 and capsule15('n1').get('id') != cid15, retried15)
+check('a failure is told once: the prompt sent again after it goes to the session',
+      (told_again15 or {}).get('decision') == 'block' and (after15 or {}).get('decision') != 'block', (told_again15, after15))
+check('a route\'s name alone, with no offer open, asks for the switch: the offer, pointing at it — not a prompt for the model',
+      (bare15 or {}).get('decision') == 'block' and 'you asked to switch' in bare15['reason']
+      and '(what you named: 1)' in bare15['reason'], bare15)
+ledger15 = s15.get(task15['id'])['data']
+typed15 = [p['text'] for p in ledger15.get('prompts') or []] + [f['text'] for f in ledger15.get('feedback') or []]
+check('no pick and no request to switch is in the task\'s ledger as a prompt or as a change of what it must deliver '
+      '(seen 2026-11-18: "1" and "claude" recorded as requirements)',
+      not [t for t in typed15 if t != 'add a test for the parser' and ('codex' in t or t == '1')]
+      and 'add a test for the parser' in typed15, typed15)
+
+# -- a pick typed before Claude Code has put the blocked words back arrives ahead of them, on its own line
+check('the pick ahead of the words put back ("1", a new line, the words) is that pick; other words around it are not',
+      routes._pick('1\ncodex로 바꿔줘', ['codex', 'kimi'], 'codex로 바꿔줘') == 'codex'
+      and routes._pick('kimi\ncodex로 바꿔줘', ['codex', 'kimi'], 'codex로 바꿔줘') == 'kimi'
+      and routes._pick('codex로 바꿔줘1', ['codex', 'kimi'], 'codex로 바꿔줘') == 'codex'
+      and routes._pick('1 then tell me why\ncodex로 바꿔줘', ['codex', 'kimi'], 'codex로 바꿔줘') is None
+      and routes._pick('codex로 바꿔줘', ['codex', 'kimi'], 'codex로 바꿔줘') is None)
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    routes.on_prompt(s15, pay15('n7', 'codex로 바꿔줘'), 'claude', None)
+    before15 = len(spawned15)
+    ahead15 = routes.on_prompt(s15, pay15('n7', '1\ncodex로 바꿔줘'), 'claude', None)
+check('… in a session: it switches (it went to the model before, and used up the offer)',
+      'switching this pane to codex' in ((ahead15 or {}).get('reason') or '') and len(spawned15) == before15 + 1, ahead15)
+
+# -- a pick right after the failure retries at once, saying what happened before
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    routes.on_prompt(s15, pay15('n2', 'switch to codex'), 'claude', None)
+    routes.on_prompt(s15, pay15('n2', 'switch to codex1'), 'claude', None)
+    routes.switch_outcome(s15, 'n2', capsule15('n2')['id'], REFUSAL)
+    before15 = len(spawned15)
+    again15 = routes.on_prompt(s15, pay15('n2', 'switch to codex11'), 'claude', None)
+check('the pick typed after a failed switch retries it and says why the first did not happen — typed behind the pick '
+      'Claude Code put back ("…1" then 1 again arrives as "…11")',
+      (again15 or {}).get('decision') == 'block' and 'did not happen' in again15['reason']
+      and 'switching this pane to codex' in again15['reason'] and len(spawned15) == before15 + 1, again15)
+
+# -- a typist that left no report at all (it died) is a failure once a switch's time has passed
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    routes.on_prompt(s15, pay15('n3', 'switch to codex'), 'claude', None)
+    routes.on_prompt(s15, pay15('n3', '1'), 'claude', None)
+    soon15 = routes.on_prompt(s15, pay15('n3', 'add docs'), 'claude', None)
+    late15 = routes.on_prompt(s15, pay15('n3', 'add docs'), 'claude', None, at=time.time() + routes.SWITCH_WAIT + 5)
+check('while the keys are typed another prompt is left alone; with no report after %ds it is told as failed' % routes.SWITCH_WAIT,
+      soon15 is None and (late15 or {}).get('decision') == 'block' and 'left no result' in late15['reason']
+      and 'route run codex' in late15['reason'], (soon15, late15))
+
+# -- controls: a switch typed to the end, and one shown as a command to run by hand, say nothing later
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    routes.on_prompt(s15, pay15('n4', 'switch to codex'), 'claude', None)
+    routes.on_prompt(s15, pay15('n4', '1'), 'claude', None)
+routes.switch_outcome(s15, 'n4', capsule15('n4')['id'])
+check('control: a switch typed to the end — that session, resumed later, is told nothing',
+      routes.on_prompt(s15, pay15('n4', 'add docs'), 'claude', None, at=time.time() + 3600) is None)
+with patch.object(typist, 'detect', return_value=None):
+    routes.on_prompt(s15, pay15('n5', 'switch to codex'), 'claude', None)
+    hand15 = routes.on_prompt(s15, pay15('n5', '1'), 'claude', None)
+    later15 = routes.on_prompt(s15, pay15('n5', 'add docs'), 'claude', None, at=time.time() + 3600)
+check('control: no pane to type into — the command is shown once and nothing is reported as failed',
+      'route run codex' in ((hand15 or {}).get('reason') or '') and later15 is None, (hand15, later15))
+
+# -- at a limit with no reset time (shown once): the pick and the request to switch still never reach the model
+tl15 = base / 'natural-limit.jsonl'
+write(tl15, [said(NOW - 900, 'add a parser'), answer(NOW - 880),
+             limit_line(NOW - 30, "You're out of usage credits. Switch to another model to continue.")])
+
+
+def lim15(sid, prompt, **kw):
+    return routes.on_prompt(s15, dict(pay15(sid, prompt), transcript_path=str(tl15)), 'claude', None, **kw)
+
+
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    lim15('l1', 'write the docs')
+    once15 = lim15('l1', 'write the docs')
+    ask15 = lim15('l1', '코덱스로 돌아가')
+    held15 = routes._json(s15, routes.SESSION_KEY + 'l1').get('held')
+    before15 = len(spawned15)
+    lim15('l1', 'codex')
+    routes.switch_outcome(s15, 'l1', capsule15('l1')['id'], REFUSAL)
+    relim15 = lim15('l1', 'codex')
+check('control: a limit with no reset time is shown once — the same request sent again goes on', once15 is None)
+check('… but words that ask for the switch get the offer again, and are not what is carried over',
+      (ask15 or {}).get('decision') == 'block' and '  1  codex' in ask15['reason'] and held15 == 'write the docs', (ask15, held15))
+check('… and the name typed again after a failed switch retries (it went to the model before, as a requirement)',
+      (relim15 or {}).get('decision') == 'block' and 'did not happen' in relim15['reason']
+      and len(spawned15) == before15 + 2 and capsule15('l1').get('held') == 'write the docs', relim15)
+
+# -- the typist's own report, from a terminal that refuses: the terminal's words reach the next prompt
+refuse15 = base / 'cmux-refuses'
+refuse15.write_text('#!/bin/sh\necho "Error: send-panel: the agent prompt holds text someone is typing" >&2\nexit 1\n')
+refuse15.chmod(0o755)
+with redirect_stdout(io.StringIO()) as log15:
+    code15 = typist._main({'terminal': {'kind': 'cmux', 'cli': str(refuse15), 'target': 'surface-15'},
+                           'steps': [['clear', 3], ['text', '/exit']],
+                           'home': str(base / 'home-natural'), 'task': None, 'report': {'session': 'n9', 'switch': 'c9'}})
+    ok15 = typist._main({'terminal': {'kind': 'tmux', 'cli': '/usr/bin/true', 'target': '%1'}, 'steps': [['text', 'x']],
+                         'home': str(base / 'home-natural'), 'task': None, 'report': {'session': 'n10', 'switch': 'c10'}})
+out15 = routes._json(Store(base / 'home-natural'), routes.OUTCOME_KEY + 'n9')
+check('a typist whose terminal refuses reports the terminal\'s own words for that session (and logs them)',
+      code15 == 1 and out15.get('ok') is False and out15.get('switch') == 'c9'
+      and 'cmux exit 1' in out15.get('reason', '') and 'holds text someone is typing' in out15.get('reason', '')
+      and 'holds text someone is typing' in log15.getvalue(), (out15, log15.getvalue()[-300:]))
+check('control: one that typed to the end reports that',
+      ok15 == 0 and routes._json(Store(base / 'home-natural'), routes.OUTCOME_KEY + 'n10').get('ok') is True)
+
+
+# -- cmux refuses unforced input over a draft: a request of several lines is a draft until its last line is gone
+class Cmux15:
+    """cmux 0.65.2 and Claude Code 2.1.327 as measured 2026-11-18 in a real pane: a send without --force is refused
+    while the agent prompt holds a draft; a ctrl+u removes the text of the last row, the next one the line break
+    before it (1 line: 1 press, 2: 3, 3: 5, 4: 7)."""
+
+    def __init__(self, draft, types_after=None):
+        self.draft, self.typed, self.refused, self.forced, self.calls, self.types_after = list(draft), [], 0, 0, 0, types_after
+
+    def __call__(self, argv):
+        self.calls += 1
+        if self.draft and '--force' not in argv:
+            self.refused += 1
+            return 1
+        self.forced += '--force' in argv
+        if argv[1] == 'send-panel' and argv[-1] == '\x15':
+            if self.draft and self.draft[-1]:
+                self.draft[-1] = ''
+                if len(self.draft) == 1:
+                    self.draft.pop()
+            elif self.draft:
+                self.draft.pop()
+        else:
+            self.typed.append(argv[-1])
+        if self.types_after == self.calls:
+            self.draft.append('what the user began to type')
+        return 0
+
+
+cmuxp = {'kind': 'cmux', 'cli': 'cmux', 'target': 'P'}
+for lines15, needs15 in ((1, 1), (2, 3), (3, 5), (4, 7)):
+    request15 = '\n'.join('line %d of the request the hook blocked' % n for n in range(lines15))
+    fake15 = Cmux15(request15.split('\n'))
+    typist.run(cmuxp, typist.handoff_steps('claude', typist.clear_presses(request15), settle=0), runner=fake15,
+               sleep=lambda seconds: None, adopted=lambda: True)
+    check('the automatic handoff in cmux: a blocked request of %d line(s) is emptied with %d forced presses, then /clear '
+          'and the carry line unforced' % (lines15, needs15),
+          fake15.typed == ['/clear', 'enter', typist.CARRY_LINE, 'enter'] and not fake15.draft and fake15.forced == needs15,
+          (fake15.typed, fake15.forced, fake15.draft))
+request15 = 'refactor the parser\nkeep the old behaviour for empty input\nand add a test\nthen the docs'
+old15 = Cmux15(request15.split('\n'))
+try:
+    typist.run(cmuxp, [('key', 'ctrl+u')] * 6 + [('text', '/clear'), ('key', 'enter')], runner=old15, sleep=lambda seconds: None)
+    refused15 = False
+except RuntimeError:
+    refused15 = not old15.typed
+check('control: the presses unforced (the handoff until now) — cmux refuses the first, /clear is never typed', refused15)
+one15 = Cmux15(request15.split('\n'))
+try:
+    typist.run(cmuxp, [('key', {'key': 'ctrl+u', 'force': True})] + [('key', 'ctrl+u')] * 5 + [('text', '/clear')],
+               runner=one15, sleep=lambda seconds: None)
+    second15 = False
+except RuntimeError:
+    second15 = len(one15.draft) == 4 and not one15.typed
+check('control: only the first press forced — the request is still a draft and the second press is refused', second15)
+six15 = Cmux15(request15.split('\n'))
+try:
+    typist.run(cmuxp, [('key', {'key': 'ctrl+u', 'force': True})] * 6 + [('text', '/clear')], runner=six15,
+               sleep=lambda seconds: None)
+    short15 = False
+except RuntimeError:
+    short15 = six15.draft == ['refactor the parser'] and not six15.typed
+check('control: one press a line and two more, all forced (the count until now: 6 for 4 lines) — the first line is '
+      'still there and /clear is refused', short15, six15.draft)
+pick15 = Cmux15(['1'], types_after=2)
+try:
+    typist.run(cmuxp, routes.switch_steps('claude', typist.clear_presses('1'), None, 'cosmos-orbit route run codex'),
+               runner=pick15, sleep=lambda seconds: None, alive=lambda pid: False)
+    kept15 = False
+except RuntimeError:
+    kept15 = pick15.draft == ['what the user began to type'] and '/exit' not in pick15.typed and pick15.forced == 1
+check('what the user begins to type once the pick is cleared is never erased: the typing stops there', kept15,
+      (pick15.draft, pick15.typed, pick15.forced))
+tmux15 = []
+typist.run({'kind': 'tmux', 'cli': 'tmux', 'target': '%1'}, typist.clear_steps(7), runner=lambda argv: tmux15.append(argv) or 0)
+check('tmux (no draft protection): the presses as they are, none forced', len(tmux15) == 7
+      and all(argv[-1] == 'C-u' and '--force' not in argv for argv in tmux15), tmux15)
+
+# -- route run: the mode of the capsule, the user's own options first, the switch for it
+s15 = Store(base / 'home-natural')
+made15 = []
+
+
+def capsule_with(mode):
+    cid = '%012x' % (0xd23000000000 + len(made15))
+    made15.append(cid)
+    Store(base / 'home-natural').preference(routes.CAPSULE_KEY + cid, json.dumps(
+        {'id': cid, 'mode': mode, 'to_route': 'claude', 'served_to': None}))
+    return cid
+
+
+def argv15(name, mode, **kw):
+    ran.clear()
+    run_fresh(base / 'home-natural', name, carry=True, capsule=capsule_with(mode),
+              environ={'PATH': '/bin', 'ROUTES_TEST_KEY': 'k15'}, **kw)
+    return ran[-1][1]
+
+
+check('Codex with nothing asked → Claude Code starts with --dangerously-skip-permissions (it stopped at an approval '
+      'prompt before: the bare `claude`)', argv15('claude', FREE_CODEX) == ['claude', '--dangerously-skip-permissions', typist.CARRY_LINE])
+check('… an added route on Claude Code too, before its model',
+      argv15('kimi', FREE_CLAUDE)[:4] == ['claude', '--dangerously-skip-permissions', '--model', 'kimi-k3.1-pro'])
+check('control: a session in the default mode starts the bare host', argv15('claude', {'host': 'claude', 'mode': 'default'})
+      == ['claude', typist.CARRY_LINE] and argv15('codex', None) == ['codex', typist.CARRY_LINE])
+check('control: Codex read-only with nothing asked does not become a Claude Code session that asks nothing',
+      argv15('claude', {'host': 'codex', 'approval': 'never', 'sandbox': 'read-only'}) == ['claude', typist.CARRY_LINE])
+check('the user\'s own option after `--` is the one used', argv15('claude', FREE_CODEX, extra=['--permission-mode', 'plan'])
+      == ['claude', '--permission-mode', 'plan', typist.CARRY_LINE])
+cli15 = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(base / 'home-natural')]
+off15 = subprocess.run(cli15 + ['route', 'mode', 'off'], capture_output=True, text=True, timeout=60)
+listed15 = subprocess.run(cli15 + ['route', 'list'], capture_output=True, text=True, timeout=60).stdout
+check('route mode off: the host\'s own default, and route list says so', off15.returncode == 0 and 'MODE: host default' in listed15
+      and argv15('claude', FREE_CODEX) == ['claude', typist.CARRY_LINE], listed15)
+s15 = Store(base / 'home-natural')
+with patch.object(typist, 'detect', return_value=cmux15), typing15(), patch.object(routes, 'host_pid', return_value=4242):
+    routes.on_prompt(s15, pay15('n6', 'switch to codex', permission_mode='bypassPermissions'), 'claude', None)
+    routes.on_prompt(s15, pay15('n6', '1', permission_mode='bypassPermissions'), 'claude', None)
+check('… and a switch carries none while it is off', capsule15('n6').get('id') and capsule15('n6').get('mode') is None, capsule15('n6'))
+on15 = subprocess.run(cli15 + ['route', 'mode', 'on'], capture_output=True, text=True, timeout=60)
+listed15 = subprocess.run(cli15 + ['route', 'list'], capture_output=True, text=True, timeout=60).stdout
+check('route mode on: carried again', on15.returncode == 0 and 'MODE: carried' in listed15
+      and argv15('claude', FREE_CODEX) == ['claude', '--dangerously-skip-permissions', typist.CARRY_LINE], listed15)
+
+# -- route run needs a terminal: a session nobody watches is not started
+blind15 = subprocess.run(cli15 + ['route', 'run', 'codex', '--carry'], stdin=subprocess.DEVNULL, capture_output=True,
+                         text=True, timeout=60)
+check('route run from a shell with no terminal is refused (it would run where nobody sees it)',
+      blind15.returncode == 2 and 'no terminal' in blind15.stderr and 'pane you watch' in blind15.stderr, blind15.stderr)
+s15 = Store(base / 'home-natural')
+check('control: a one-off answer needs none (`-- -p …`, `-- exec …`; ⑦ and ⑪ run those for real)',
+      not routes.needs_terminal(s15, 'claude', ['-p', 'hi']) and not routes.needs_terminal(s15, 'codex', ['exec', 'hi'])
+      and routes.needs_terminal(s15, 'codex', []) and routes.needs_terminal(s15, 'claude', ['--model', 'opus']))
+import pty  # noqa: E402
+bin15 = base / 'bin15'
+bin15.mkdir()
+seen15 = base / 'argv15.txt'
+(bin15 / 'codex').write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "' + str(seen15) + '"\n')
+(bin15 / 'codex').chmod(0o755)
+cid_pty = capsule_with(FREE_CLAUDE)
+master, slave = pty.openpty()
+try:
+    inpty = subprocess.run(cli15 + ['route', 'run', 'codex', '--carry', '--capsule', cid_pty], stdin=slave, stdout=slave,
+                           stderr=slave, timeout=60, cwd=str(base),
+                           env=dict(os.environ, PATH=str(bin15) + os.pathsep + os.environ.get('PATH', '')))
+finally:
+    os.close(slave)
+    os.close(master)
+check('in a terminal the same command starts the host, in the mode its capsule carries (the real CLI, a stand-in codex)',
+      inpty.returncode == 0 and seen15.exists() and seen15.read_text().splitlines()
+      == ['-a', 'never', '-s', 'danger-full-access', typist.CARRY_LINE], seen15.read_text() if seen15.exists() else inpty)
 
 import shutil  # noqa: E402
 fake = base / 'installed'

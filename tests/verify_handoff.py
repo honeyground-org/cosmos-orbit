@@ -178,11 +178,16 @@ def main():
         request = 'Add CSV export for the report\nwith one row per item'
         out = attach.handle(store, 'prompt', dict(pay_f, prompt=request), 'claude')
         check('a request is blocked here and carried over', out and out.get('decision') == 'block' and 'carried over' in out['reason'], out)
-        keys = [s[1] for s in typed[-1][1] if s[0] in ('key', 'text')] if typed else []
-        presses = keys.index('/clear') if '/clear' in keys else -1
-        check('the typist empties the input first (one ctrl+u per line of the restored request, at least), then '
-              '/clear, Enter, the carry line, Enter', presses >= 2 and set(keys[:presses]) == {'ctrl+u'}
-              and keys[presses:] == ['/clear', 'enter', typist.CARRY_LINE, 'enter'], keys)
+        steps_f = typed[-1][1] if typed else []
+        keys = [s[1] for s in steps_f if s[0] in ('key', 'text')]
+        kinds_f = [s[0] for s in steps_f]
+        # The request the host put back has two lines: its text, the line break, the first line's text — three
+        # presses, and a margin of two. In cmux only the presses it refuses over that draft are forced (typist.run;
+        # verify_routes ⑮ runs it against cmux's rule).
+        check('the typist empties the input first (the presses the restored request of two lines takes, and a margin), '
+              'then /clear, Enter, the carry line, Enter', ('clear', 5) in steps_f
+              and kinds_f.index('clear') < steps_f.index(('text', '/clear'))
+              and keys == ['/clear', 'enter', typist.CARRY_LINE, 'enter'], steps_f)
         check('…and the carry line waits until the task was taken over', typed and ('adopted', 25.0) in typed[-1][1]
               and typed[-1][2] == tid_f, typed[-1][1] if typed else None)
         data = store.get(tid_f)['data']
@@ -886,11 +891,14 @@ def main():
     check('tmux: send-keys -l text, send-keys Enter and C-u', typist.command(tmux, text='/clear') == ['tmux', 'send-keys', '-t', '%3', '-l', '/clear']
           and typist.command(tmux, key='enter') == ['tmux', 'send-keys', '-t', '%3', 'Enter']
           and typist.command(tmux, key='ctrl+u') == ['tmux', 'send-keys', '-t', '%3', 'C-u'])
-    check('ctrl+u presses cover every line of the request (wrapped lines too)', typist.clear_presses('one line') == 3
-          and typist.clear_presses('a\nb\nc') == 5 and typist.clear_presses('x' * 130) == 5)
+    check('ctrl+u presses cover every line of the request: a row\'s text, then its line break (measured 2026-11-18: 1 '
+          'line 1 press, 3 lines 5), a wrapped row one more, and a margin of two', typist.clear_presses('one line') == 3
+          and typist.clear_presses('a\nb\nc') == 7 and typist.clear_presses('x' * 130) == 5
+          and typist.clear_presses('a\nb\nc\nd') == 9)
     codex_steps = typist.handoff_steps('codex')
     check('Codex types /new inside its own step (at an empty input, never after ctrl+u: its blocked prompt does not come back)',
-          [k for k, _ in codex_steps].count('codex_new') == 1 and ('key', 'ctrl+u') not in codex_steps, codex_steps)
+          [k for k, _ in codex_steps].count('codex_new') == 1 and ('key', 'ctrl+u') not in codex_steps
+          and 'clear' not in [k for k, _ in codex_steps], codex_steps)
     check('detect: nothing outside cmux or tmux (control)', typist.detect({}) is None)
     ran = []
     try:
