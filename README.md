@@ -956,3 +956,5 @@ The brief and observer distinguish executing checks, an executing review, a work
 review, and a stopped worker. They no longer say that checks passed or a reviewer is running merely
 because a verification flag is set. Supervision restarts a missing worker for an already authorised
 pending verification. Questions about the next work or remaining steps do not add new requirements.
+
+A successful native Claude Code `/login` makes earlier account-limit observations stale. Orbit lets the next request retry and accepts a fresh refusal if the new authentication is also limited. It clears the stale account offer without changing the task or starting another model; named or numbered route choices still run before an active-limit gate. Login success does not clear an added endpoint's independent API-key refusal.

@@ -55,6 +55,7 @@ BUILTIN = {
 ROUTE_ENV = 'COSMOS_ORBIT_ROUTE'   # set by `route run` for the session it starts: the route a session runs on
 FROM_ENV = 'COSMOS_ORBIT_ROUTE_FROM'  # set by a switch: the route the session left, offered back once it resets
 LIMIT_ERRORS = ('rate_limit', 'billing_error')
+AUTH_KEY = 'route-auth:'          # + built-in route: latest successful native login, not a quota claim
 LIMIT_KEY = 'route-limit:'         # + route: the latest limit seen on that route (JSON)
 SESSION_KEY = 'route-session:'     # + session: the limit it stopped on, the routes offered, the request held
 UNKNOWN_RESET = 3600               # a limit without a reset time is taken to hold this long after it was seen
@@ -437,8 +438,55 @@ def _content_text(message):
     return ' '.join(part.get('text', '') for part in content or () if isinstance(part, dict)).strip()
 
 
-def claude_limit(path):
+def claude_login(path):
+    """A native /login command followed by its parent-linked successful local output."""
+    records = []
+    for line in _tail(path):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and not row.get('isSidechain'):
+            records.append(row)
+    commands = {r.get('uuid'): r for r in records if r.get('uuid')}
+    for row in reversed(records):
+        if row.get('type') != 'user' or row.get('userType') != 'external':
+            continue
+        content = (row.get('message') or {}).get('content')
+        if content != '<local-command-stdout>Login successful</local-command-stdout>':
+            continue
+        parent = commands.get(row.get('parentUuid')) or {}
+        command = (parent.get('message') or {}).get('content')
+        if (parent.get('type') == 'user' and parent.get('userType') == 'external'
+                and isinstance(command, str)
+                and re.fullmatch(r'\s*<command-name>/login</command-name>\s*'
+                                 r'<command-message>login</command-message>\s*'
+                                 r'<command-args>.*?</command-args>\s*', command, re.S)
+                and _stamp(row.get('timestamp'))):
+            return {'id': row.get('uuid'), 'seen_at': _stamp(row['timestamp'])}
+    return None
+
+
+def _after_auth(store, route, limit):
+    """Old account limits cannot block a retry after a newer successful native login."""
+    changed = _json(store, AUTH_KEY + route) if route == 'claude' else {}
+    if limit and changed.get('seen_at', 0) > (limit.get('seen_at') or 0):
+        return None
+    return limit
+
+
+def _refresh_auth(store, path, route):
+    if route != 'claude':
+        return
+    changed = claude_login(path)
+    held = _json(store, AUTH_KEY + route)
+    if changed and changed['seen_at'] > held.get('seen_at', 0):
+        store.preference(AUTH_KEY + route, json.dumps(changed))
+
+
+def claude_limit(path, auth=True):
     """The limit a Claude Code session stopped on: its last answer is the host's synthetic limit line. Else None."""
+    login = claude_login(path) if auth else None
     for line in reversed(_tail(path)):
         try:
             record = json.loads(line)
@@ -446,6 +494,8 @@ def claude_limit(path):
             continue
         if not isinstance(record, dict) or record.get('type') != 'assistant' or record.get('isSidechain'):
             continue
+        if login and login['seen_at'] > (_stamp(record.get('timestamp')) or 0):
+            return None
         if not record.get('isApiErrorMessage'):
             return None                                   # the last answer was a real one: no limit holds
         text = _content_text(record.get('message'))
@@ -519,10 +569,10 @@ def forget_refusal(store, name):
         store.preference(LIMIT_KEY + name, 'null')
 
 
-def read_limit(path, host):
+def read_limit(path, host, route=None):
     if not path:
         return None
-    return codex_limit(path) if host == 'codex' else claude_limit(path)
+    return codex_limit(path) if host == 'codex' else claude_limit(path, auth=route in (None, 'claude'))
 
 
 def active(limit, at=None):
@@ -547,17 +597,20 @@ def _json(store, key):
 def session_limited(store, session, host, at=None):
     """The limit a session stopped on, read from the transcript its hooks last reported, while it holds; else None."""
     from .verifier import TRANSCRIPT_KEY
-    limit = read_limit(store.preference(TRANSCRIPT_KEY + session) if session else None, host or 'claude')
+    route = _json(store, SESSION_KEY + session).get('route') or host or 'claude'
+    path = store.preference(TRANSCRIPT_KEY + session) if session else None
+    _refresh_auth(store, path, route)
+    limit = _after_auth(store, route, read_limit(path, host or 'claude', route))
     return limit if active(limit, at) else None
 
 
 def record_limit(store, route, limit):
-    if limit:
+    if _after_auth(store, route, limit):
         store.preference(LIMIT_KEY + route, json.dumps(dict(limit, route=route), ensure_ascii=False))
 
 
 def route_limit(store, route):
-    return _json(store, LIMIT_KEY + route) or None
+    return _after_auth(store, route, _json(store, LIMIT_KEY + route) or None)
 
 
 def _clock(stamp, at):
@@ -948,6 +1001,8 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
         return None                       # routes off: a limited session is left alone, as before routes existed
     at = time.time() if at is None else at
     text = (payload.get('prompt') or '').strip()
+    on = current_route(host, environ)
+    _refresh_auth(store, payload.get('transcript_path'), on)
     state = _json(store, SESSION_KEY + session)
     offer = state.get('offer') or []
     live = offer and (_stamp(state.get('at')) or 0) + (ASKED_TTL if state.get('asked') else OFFER_TTL) > at
@@ -985,8 +1040,11 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
             store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
             if again:
                 return go(again, state, note)
-    limit = read_limit(payload.get('transcript_path'), host)
-    on = current_route(host, environ)
+    limit = _after_auth(store, on, read_limit(payload.get('transcript_path'), host, on))
+    if state.get('blocked') and not state.get('switched') and not active(limit, at):
+        state = dict(state, offer=[], blocked=None, limit=None, held=None, blocked_text=None)
+        offer, live = [], False
+        store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     if not active(limit, at):
         if state.get('asked') and offer:
             # An offer the user asked for ends at the next prompt that picks nothing: that prompt is theirs to send,
@@ -1324,7 +1382,8 @@ def on_stop_failure(store, payload, host, task, environ=None, deliver=None):
     panes (the host shows nothing a hook returns here); the user's next prompt there gets the offer."""
     if not enabled(store):
         return None
-    limit = read_limit(payload.get('transcript_path'), host)
+    on = current_route(host, environ)
+    limit = read_limit(payload.get('transcript_path'), host, on)
     if not limit and str(payload.get('error') or payload.get('error_type') or '') in LIMIT_ERRORS:
         text = str(payload.get('error_message') or payload.get('message') or payload.get('last_assistant_message') or '')
         seen = time.time()
