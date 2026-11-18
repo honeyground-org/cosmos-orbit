@@ -49,8 +49,12 @@ KEYS = {'cmux': {'enter': ('key', 'enter'), 'ctrl+u': ('text', '\x15')},
         'tmux': {'enter': ('key', 'Enter'), 'ctrl+u': ('key', 'C-u')}}
 
 
-def command(terminal, text=None, key=None):
-    """argv that types `text` literally, or presses `key` ('enter' or 'ctrl+u')."""
+def command(terminal, text=None, key=None, force=False):
+    """argv that types `text` literally, or presses `key` ('enter' or 'ctrl+u').
+
+    cmux refuses input while an agent prompt holds a draft. `force` is for the one known draft a hook has just
+    blocked, never for ordinary typing: callers must opt in step by step. tmux needs no such flag.
+    """
     cli, target, kind = terminal['cli'], terminal['target'], terminal['kind']
     if kind not in KEYS:
         raise ValueError('unknown terminal kind: ' + str(kind))
@@ -59,8 +63,10 @@ def command(terminal, text=None, key=None):
         if how == 'text':
             text = name
         else:
-            return [cli, 'send-key-panel', '--panel', target, name] if kind == 'cmux' else [cli, 'send-keys', '-t', target, name]
-    return [cli, 'send-panel', '--panel', target, '--', text] if kind == 'cmux' else [cli, 'send-keys', '-t', target, '-l', text]
+            return ([cli, 'send-key-panel', '--panel', target] + (['--force'] if force else []) + [name]
+                    if kind == 'cmux' else [cli, 'send-keys', '-t', target, name])
+    return ([cli, 'send-panel', '--panel', target] + (['--force'] if force else []) + ['--', text]
+            if kind == 'cmux' else [cli, 'send-keys', '-t', target, '-l', text])
 
 
 def clear_presses(text):
@@ -201,6 +207,19 @@ def alive(pid):
     return True
 
 
+def _terminal_run(argv):
+    """Run one terminal command, leaving its own error in the detached typist's log before returning its status."""
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as error:
+        print('typing command could not run: ' + str(error)[:500], flush=True)
+        return 1
+    if done.returncode:
+        detail = (done.stderr or done.stdout or '').strip()
+        print('typing command said: ' + (detail or 'no error output')[-1000:], flush=True)
+    return done.returncode
+
+
 def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None, screen=None,
         find=None, claim=None, alive=alive):
     """Perform the steps; returns the argv list that ran. Stops at the first failure.
@@ -208,8 +227,9 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
     when the wait runs out, the typing stops, so the carry line never lands in the old session. A 'deliver'
     step types the carry line once the screen shows an empty input line (wake.deliver), never over the user's
-    own typing."""
-    runner = runner or (lambda argv: subprocess.run(argv, capture_output=True, timeout=15).returncode)
+    own typing. A text/key step may be {'text'|'key': value, 'force': True}; force is a cmux-only exception for
+    the known blocked draft, and is not inherited by any later step."""
+    runner = runner or _terminal_run
     done = []
 
     def press(argv):
@@ -267,7 +287,12 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
                                        'was not typed' % value)
                 sleep(0.5)
             continue
-        argv = command(terminal, text=value) if kind == 'text' else command(terminal, key=value)
+        if kind in ('text', 'key') and isinstance(value, dict):
+            force = bool(value.get('force'))
+            value = value[kind]
+        else:
+            force = False
+        argv = command(terminal, text=value, force=force) if kind == 'text' else command(terminal, key=value, force=force)
         code = runner(argv)
         done.append(argv)
         if code != 0:

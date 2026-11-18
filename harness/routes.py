@@ -823,11 +823,22 @@ def conversation(path, host, turns=TURNS):
     return [[role, _cut(text)] for role, text in said[-turns:]], files[-FILES:]
 
 
-def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None):
-    """Keep where the session left was, for the session the switch starts: its own words, never a summary by a model."""
+def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None, environ=None):
+    """Keep where the session left was, for the session the switch starts: its own words, never a summary by a model.
+
+    On a second or later switch, prepend the turns and files this session itself received. A new process's transcript
+    does not contain its SessionStart brief, so without this the previous conversation would fall out after one hop.
+    Only the capsule served to this exact session may be inherited; an environment variable alone is not proof.
+    """
     import uuid
     from .attach import CLOSED
     turns, files = conversation(transcript, host) if transcript else ([], [])
+    environ = os.environ if environ is None else environ
+    inherited = _json(store, CAPSULE_KEY + environ.get(CAPSULE_ENV, ''))
+    if session and inherited.get('served_to') == session:
+        turns = (inherited.get('turns') or []) + turns
+        files = (inherited.get('files') or []) + [path for path in files if path not in (inherited.get('files') or [])]
+    turns, files = turns[-TURNS:], files[-FILES:]
     held, asked = state.get('held'), state.get('asked')
     if turns and turns[-1][0] == 'user' and turns[-1][1].strip() in {(held or '').strip(), (asked or '').strip()}:
         turns = turns[:-1]
@@ -957,8 +968,11 @@ def host_pid(host, start=None, runner=None):
 def switch_steps(host, presses, pid, run_line):
     """Quit the host in its pane, wait until it is gone, then start the route from the shell it leaves."""
     steps = [('wait', 0.8)]
-    if host == 'claude':                  # Claude Code puts a blocked prompt back into its input: empty it first
-        steps += [('key', 'ctrl+u')] * presses
+    if host == 'claude' and presses:
+        # Claude Code puts the blocked pick back into its input. cmux 0.65.2 then refuses send-panel unless --force
+        # is passed (seen live 2026-11-18: "the agent prompt … holds text someone is typing"). Force only the first
+        # clear: it removes the pick this hook just blocked. Later input keeps cmux's protection for the user's typing.
+        steps += [('key', {'key': 'ctrl+u', 'force': True})] + [('key', 'ctrl+u')] * (presses - 1)
     steps += [('text', '/exit')]
     if host == 'codex':                   # Codex takes an Enter right behind typed text as part of a paste: a newline,
         steps += [('wait', 1.2)]          # so /exit stayed in its input (seen 2026-11-17 in a real pane)
@@ -997,7 +1011,7 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
                        {'route': name, 'from': state.get('route') or host, 'session': session, 'layer': 'context',
                         'terminal': (terminal or {}).get('kind')})
     capsule = make_capsule(store, session, host, name, model, state, task if carry else None,
-                           transcript or store.preference(_transcript_key() + session), cwd, at)
+                           transcript or store.preference(_transcript_key() + session), cwd, at, environ=environ)
     state = dict(state, offer=[], switched=name, switched_at=now(), capsule=capsule['id'])
     store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
     left_route = state.get('route') or host

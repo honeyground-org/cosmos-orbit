@@ -602,12 +602,14 @@ Or wait until 22:47 and type again. Add a route: cosmos-orbit route add NAME …
 ```
 
 Type `2` and Orbit quits the session (`/exit`), waits until it is gone, and starts the route in the same pane (cmux or
-tmux; elsewhere it shows the two commands to run). The new session takes the task over and runs the request you typed
-before the switch, as after a handoff. Orbit never switches by itself, and a limit with no known reset (out of
-credits) is shown once, then you may simply try again. When the route you left resets, the session on the other route
-mentions it once, and typing that route's name switches back. A round never types a continuation into a session
-stopped at its limit, and Claude Code's `StopFailure` hook announces the limit in the task's panes when it happens
-(run `cosmos-orbit hooks install` again after updating, to add that hook).
+tmux; elsewhere it shows the two commands to run). In cmux, Claude Code puts the blocked pick back into its input and
+cmux protects that draft; Orbit force-clears only that just-blocked pick once, then leaves the protection on for every
+later input. A detached typing failure logs the terminal's actual error, not just an exit status. The new session takes
+the task over and runs the request you typed before the switch, as after a handoff. Orbit never switches by itself, and
+a limit with no known reset (out of credits) is shown once, then you may simply try again. When the route you left
+resets, the session on the other route mentions it once, and typing that route's name switches back. A round never types
+a continuation into a session stopped at its limit, and Claude Code's `StopFailure` hook announces the limit in the
+task's panes when it happens (run `cosmos-orbit hooks install` again after updating, to add that hook).
 
 A route is `claude` or `codex` on the account your shell already has, or one you add: Claude Code against an
 Anthropic-compatible endpoint, for example a model on Ollama's cloud.
@@ -636,7 +638,9 @@ lines is never taken for one.
 **Every switch carries the conversation.** Orbit keeps where the session was — its last turns in its own words, the
 files it changed, the request held at a limit, the task — and hands it to the new session when it starts, once, in the
 same form whichever host each runs on (Claude Code → Codex, Codex → Claude Code) and whether or not an Orbit task is
-attached; a task is also taken over as after a handoff. Nothing is summarised by a model on the way.
+attached; a task is also taken over as after a handoff. A later switch inherits the capsule actually served to the
+session it leaves as well as that session's new turns, so Claude → Kimi → Claude → Codex → Kimi can keep the same
+context and task. Nothing is summarised by a model on the way.
 
 **A route's end need not be known.** When a route's service refuses for payment — its free period over, its credits
 spent, a plan it needs (HTTP 402, or its own words: Ollama answers "this model requires a subscription") — the
