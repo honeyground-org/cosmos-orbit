@@ -8,8 +8,10 @@ picks the carried-over request up in the fresh context. Anywhere else there is n
 The typing runs in a detached process: the hook must return first, so that the host is back at its input line
 when the keys arrive. Two things were learned from the first real run (Claude Code 2.1.318 in cmux):
   - a prompt the hook blocked comes back into the input line, so '/clear' typed after it was sent as part of the
-    old text. The input is emptied first with ctrl+u, once per line (measured: one press removes one line, a
-    press on an empty input does nothing; ctrl+l and Escape left the text in place);
+    old text. The input is emptied first with ctrl+u (a press on an empty input does nothing; ctrl+l and Escape
+    left the text in place). Measured again 2026-11-18 (Claude Code 2.1.327 in cmux): a press removes the text of
+    one row, the next press the line break before it, so a text of N lines takes 2N-1 presses, and one more for
+    every row a long line wraps onto (1 line: 1, 2: 3, 3: 5, 4: 7; 359 characters on two rows: 2);
   - the carry line is typed only once the fresh session has taken the task over. If its own hook did not take it
     (seen 2026-11-04: it started in another folder than the task's and skipped it), the typist hands the task to
     the session that appeared in this pane after the /clear. If none did within the wait, nothing more is typed
@@ -70,9 +72,26 @@ def command(terminal, text=None, key=None, force=False):
 
 
 def clear_presses(text):
-    """ctrl+u presses that empty an input holding `text`: one per line, wrapped lines counted, a margin of two."""
+    """ctrl+u presses that empty an input holding `text`, with a margin of two: a row's text and then its line break
+    (2N-1 for N lines), one more for each row a long line wraps onto (a row taken as 60 characters, so a wider pane
+    is given more presses than it needs, never fewer)."""
     lines = (text or '').split('\n')
-    return min(400, len(lines) + sum(len(line) // 60 for line in lines) + 2)
+    return min(400, 2 * len(lines) - 1 + sum(len(line) // 60 for line in lines) + 2)
+
+
+def clear_steps(presses):
+    """The step that empties the input of the prompt a hook has just blocked and the host put back: `presses` ctrl+u
+    (clear_presses of that prompt), of which all but the margin of two may be forced.
+
+    cmux refuses outside input while the agent prompt holds a draft, and the restored prompt is one: it refused the
+    first ctrl+u, so neither /exit (a route switch) nor /clear (the automatic handoff) was ever typed (hooks.log
+    2026-11-16 and 11-18: "typing failed (cmux exit 1)"). How many presses are forced is not guessed: each press is
+    sent unforced first, and only one cmux refuses — it says a draft is still there — is sent again with --force,
+    as often as the blocked prompt itself can take. Once the input is empty the rest go through unforced and do
+    nothing; a press refused after that budget is what the user began to type, and the typing stops there with
+    their text in place. Forcing a fixed count failed both ways: one press left a request of several lines a draft,
+    and its remaining presses were refused."""
+    return [('clear', presses)] if presses > 0 else []
 
 
 def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, deliver_wait=60.0, expect='',
@@ -92,7 +111,7 @@ def handoff_steps(host, presses=3, settle=1.5, adopt_wait=25.0, new_wait=40.0, d
     # Claude Code with Orbit's mod loaded: the mod clears the session and submits the carry line through the host's
     # own API, nothing typed; the typist waits `mod_grace` for it to take the handoff, then only watches the takeover.
     grace = [('mod_grace', mod_grace)] if mod_grace else []
-    return ([('wait', settle)] + grace + [('key', 'ctrl+u')] * presses
+    return ([('wait', settle)] + grace + clear_steps(presses)
             + [('text', '/clear'), ('key', 'enter'),
                ('adopted', adopt_wait), ('text', CARRY_LINE), ('key', 'enter')])
 
@@ -207,17 +226,28 @@ def alive(pid):
     return True
 
 
+SAID = ['']   # what the last terminal command that failed said: the reason a failed typing reports
+
+
 def _terminal_run(argv):
     """Run one terminal command, leaving its own error in the detached typist's log before returning its status."""
+    SAID[0] = ''
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError) as error:
+        SAID[0] = 'could not run: ' + str(error)[:200]
         print('typing command could not run: ' + str(error)[:500], flush=True)
         return 1
-    if done.returncode:
-        detail = (done.stderr or done.stdout or '').strip()
-        print('typing command said: ' + (detail or 'no error output')[-1000:], flush=True)
+    if done.returncode:                       # kept for the error of the step that fails: a press refused over a draft
+        detail = (done.stderr or done.stdout or '').strip()   # is an answer the clear step expects, not a failure
+        SAID[0] = ' '.join(detail.split())[-300:] or 'no error output'
     return done.returncode
+
+
+def _failed(terminal, code):
+    """The error of a typing command that failed, with the terminal's own words when it gave any."""
+    said, SAID[0] = SAID[0], ''
+    return RuntimeError('typing failed (%s exit %s%s)' % (terminal['kind'], code, ': ' + said if said else ''))
 
 
 def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time.monotonic, deliver=None, screen=None,
@@ -227,20 +257,37 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
     An 'adopted' step waits until `adopted()` is true: the fresh session took the task over. Without it, or
     when the wait runs out, the typing stops, so the carry line never lands in the old session. A 'deliver'
     step types the carry line once the screen shows an empty input line (wake.deliver), never over the user's
-    own typing. A text/key step may be {'text'|'key': value, 'force': True}; force is a cmux-only exception for
-    the known blocked draft, and is not inherited by any later step."""
+    own typing. A 'clear' step empties the input of the prompt a hook just blocked (clear_steps). A text/key step
+    may be {'text'|'key': value, 'force': True}; force is a cmux-only exception, never inherited by a later step."""
     runner = runner or _terminal_run
     done = []
 
     def press(argv):
         done.append(argv)
-        if runner(argv) != 0:
-            raise RuntimeError('typing failed (%s exit)' % terminal['kind'])
+        code = runner(argv)
+        if code != 0:
+            raise _failed(terminal, code)
 
     watch_only = False
     for kind, value in steps:
         if kind == 'wait':
             sleep(value)
+            continue
+        if kind == 'clear':
+            if watch_only:
+                continue
+            budget = max(0, value - 2) if terminal['kind'] == 'cmux' else 0   # the presses the blocked prompt can take
+            for _ in range(value):
+                argv = command(terminal, key='ctrl+u')
+                done.append(argv)
+                code = runner(argv)
+                if code != 0 and budget > 0:              # cmux: a draft is still there
+                    budget -= 1
+                    argv = command(terminal, key='ctrl+u', force=True)
+                    done.append(argv)
+                    code = runner(argv)
+                if code != 0:
+                    raise _failed(terminal, code)
             continue
         if kind == 'mod_grace':
             who = claim(value) if claim else 'typist'
@@ -296,16 +343,18 @@ def run(terminal, steps, runner=None, sleep=time.sleep, adopted=None, clock=time
         code = runner(argv)
         done.append(argv)
         if code != 0:
-            raise RuntimeError('typing failed (%s exit %s)' % (terminal['kind'], code))
+            raise _failed(terminal, code)
     return done
 
 
-def spawn(terminal, steps, log_path, home=None, task=None):
-    """Run the steps in a detached process so the hook can return first."""
+def spawn(terminal, steps, log_path, home=None, task=None, report=None):
+    """Run the steps in a detached process so the hook can return first. `report` ({'session', 'switch'}): a route
+    switch, whose outcome the typist leaves for that session's next prompt (routes.switch_outcome)."""
     package_root = str(Path(__file__).resolve().parent.parent)
     env = dict(os.environ)
     env['PYTHONPATH'] = package_root + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
-    request = {'terminal': terminal, 'steps': steps, 'home': str(home) if home else None, 'task': task}
+    request = {'terminal': terminal, 'steps': steps, 'home': str(home) if home else None, 'task': task,
+               'report': report}
     with open(log_path, 'a', encoding='utf-8') as output:
         process = subprocess.Popen([sys.executable, '-m', 'harness.typist', json.dumps(request)],
                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
@@ -317,10 +366,22 @@ def _main(request):
     # A route switch from a session with no task types with neither (2026-11-17: `claim` was left unbound there, and
     # the detached typist died before /exit, so the pane never switched).
     store = adopted = claim = None
-    if request.get('home') and request.get('task'):
+    report = request.get('report') or {}
+    if request.get('home') and (request.get('task') or report):
         from .store import Store
         store = Store(request['home'])
 
+    def outcome(error=None):
+        # A route switch: the session left reads this at its next prompt. A hook's block reason is the one place the
+        # user sees; the log alone left a refused switch looking like nothing had happened (2026-11-18).
+        if store is not None and report.get('session'):
+            try:
+                from .routes import switch_outcome
+                switch_outcome(store, report['session'], report.get('switch'), error)
+            except Exception as failure:  # noqa: BLE001 - the report never hides the typing error itself
+                print('route switch outcome not recorded: ' + repr(failure)[:200], flush=True)
+
+    if store is not None and request.get('task'):
         def adopted():
             # Taken over by the fresh session's own hook, or handed to the session that appeared in this pane.
             from .continuity import adopt_in_panel
@@ -338,10 +399,12 @@ def _main(request):
             return typist_claim(store, request['task'])
     try:
         run(request['terminal'], [tuple(step) for step in request['steps']], adopted=adopted, claim=claim)
+        outcome()
         return 0
-    except Exception as error:  # the log is the only place a detached typist can report to
-        print(time.strftime('%Y-%m-%dT%H:%M:%S') + ' auto handoff typing error: ' + str(error)[:200], flush=True)
-        if store is not None:
+    except Exception as error:  # the log, and for a route switch the session's next prompt
+        print(time.strftime('%Y-%m-%dT%H:%M:%S') + ' auto handoff typing error: ' + str(error)[:300], flush=True)
+        outcome(str(error))
+        if store is not None and request.get('task'):
             from .continuity import auto_failed
             auto_failed(store, request['task'], str(error))
         return 1

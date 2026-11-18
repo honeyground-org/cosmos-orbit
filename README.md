@@ -603,9 +603,10 @@ Or wait until 22:47 and type again. Add a route: cosmos-orbit route add NAME …
 
 Type `2` and Orbit quits the session (`/exit`), waits until it is gone, and starts the route in the same pane (cmux or
 tmux; elsewhere it shows the two commands to run). In cmux, Claude Code puts the blocked pick back into its input and
-cmux protects that draft; Orbit force-clears only that just-blocked pick once, then leaves the protection on for every
-later input. A detached typing failure logs the terminal's actual error, not just an exit status. The new session takes
-the task over and runs the request you typed before the switch, as after a handoff. Orbit never switches by itself, and
+cmux protects that draft; Orbit sends each clearing key unforced first and forces only the ones cmux refuses over that
+just-blocked pick, so the protection stays on for everything typed after it (the automatic handoff's `/clear` clears
+the request it blocked the same way, however many lines it has). The new session
+takes the task over and runs the request you typed before the switch, as after a handoff. Orbit never switches by itself, and
 a limit with no known reset (out of credits) is shown once, then you may simply try again. When the route you left
 resets, the session on the other route mentions it once, and typing that route's name switches back. A round never types
 a continuation into a session stopped at its limit, and Claude Code's `StopFailure` hook announces the limit in the
@@ -634,6 +635,19 @@ is answered by the same numbered list instead of a turn. Type a number or a name
 puts back in the input is fine) and the pane switches; send the same words again, or anything else, and they go to the
 session as usual. A request for work that mentions a model ("Organization 모델 변경", "모델 전환 기능 개발") or several
 lines is never taken for one.
+
+**A switch is one pick, and it says so when it did not happen.** `claude` and `codex` are offered first, the routes
+you added after them. The session a switch starts runs in the permission mode of the one you left: Claude Code's mode
+as its hook reports it, Codex's approval policy and sandbox as its rollout records them. On the same host the mode is
+kept as it was; across hosts only the one mode both have is carried — nothing asked and no sandbox (`claude
+--dangerously-skip-permissions` ↔ `codex -a never -s danger-full-access`) — and any other mode starts the other host in
+its own default, never with more than you gave. Options you pass after `--` are used instead, and `cosmos-orbit route
+mode off` starts every route in its host's default (`route list` shows which). When the typing fails (cmux refused a
+key because you went on typing, say), the next prompt in that session is answered with the terminal's own words and
+the command to run by hand, and the same number or name tries again; while the keys are still being typed, a second
+pick starts nothing. A pick, a route's name typed alone, or the words that asked for the switch never reach the model
+and are never recorded as a change of what the task must deliver. `route run` starts a session only in a terminal:
+from a shell nobody watches it is refused (`-- -p PROMPT` and `-- exec PROMPT` answer once and need none).
 
 **Every switch carries the conversation.** Orbit keeps where the session was — its last turns in its own words, the
 files it changed, the request held at a limit, the task — and hands it to the new session when it starts, once, in the
