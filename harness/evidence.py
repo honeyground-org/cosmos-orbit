@@ -1,12 +1,88 @@
 """Bounded workspace and native tool observations; never private reasoning."""
+import collections
 import json
 from pathlib import Path
+
+# The changed-path lists went into the review prompt whole. An attached task shares its folder: observed 2026-11-18,
+# a task's record listed 28,657 changed paths (25,823 of them another project's untracked build output, 30 its own),
+# 6.3 million characters of a 6.45 million character prompt, and all seven reviews of that task ended in 2 seconds
+# with "Prompt is too long" (about 1.1 million tokens) — the work was never reviewed, and the user was asked a
+# question nobody could answer. Each list is now held to PATH_ROWS rows and PATH_CHARS characters, what the task
+# itself most plainly changed first, and what was left out is counted by top-level folder so the reviewer knows.
+PATH_ROWS, PATH_CHARS = 300, 30000
+
+
+def _named_in_evidence(data, root):
+    """Files in the folder that the executor's evidence names: fingerprinted files and command arguments."""
+    named = set()
+    for rows in (data.get('done_evidence') or {}).values():
+        for row in rows:
+            bases = [Path(row['cwd'])] if row.get('cwd') else []
+            for token in [row.get('path')] + list(row.get('argv') or []):
+                if not isinstance(token, str) or not token or len(token) > 1000:
+                    continue
+                for base in bases + [root]:
+                    try:
+                        path = (base / token).resolve()
+                        if path.is_file():                    # '-m' or 'pytest' is not a file in the folder
+                            named.add(path.relative_to(root).as_posix())
+                    except (OSError, ValueError):
+                        continue
+    return named
+
+
+def bounded_paths(paths, rank):
+    """(shown, omitted). A list within the budget is returned as recorded with omitted None; a longer one keeps the
+    lowest-ranked paths that fit and reports how many were left out, by top-level folder."""
+    paths = list(paths)
+    if len(paths) <= PATH_ROWS and sum(len(p) for p in paths) <= PATH_CHARS:
+        return paths, None
+    ordered = sorted(paths, key=lambda p: (rank(p), p))
+    shown, used = [], 0
+    for path in ordered:
+        if len(shown) >= PATH_ROWS or used + len(path) > PATH_CHARS:
+            break
+        shown.append(path)
+        used += len(path)
+    rest = ordered[len(shown):]
+    folders = collections.Counter(p.split('/', 1)[0][:120] if '/' in p else '(top level)' for p in rest)
+    top = folders.most_common(15)
+    by_folder = dict(top)
+    if len(folders) > len(top):
+        by_folder['(other folders)'] = len(rest) - sum(count for _, count in top)
+    return shown, {'omitted': len(rest), 'of': len(paths), 'by_top_level_folder': by_folder}
+
+
+def workspace_paths(data, root):
+    """The changed and untracked path lists as the reviewer gets them: (changed, untracked, omitted or None).
+    First what differs in tracked files, then untracked files the evidence names, then their neighbours, then the rest."""
+    dev = data['development']
+    changed, untracked = dev.get('changed_paths', []), dev.get('untracked_paths', [])
+    loose, named, beside = set(untracked), None, None
+
+    def rank(path):
+        nonlocal named, beside
+        if path not in loose:
+            return 0
+        if named is None:                                     # only a list over the budget is ever ranked
+            named = _named_in_evidence(data, root)
+            beside = {name.rsplit('/', 1)[0] for name in named if '/' in name}
+        if path in named:
+            return 1
+        return 2 if '/' in path and path.rsplit('/', 1)[0] in beside else 3
+
+    shown, cut = bounded_paths(changed, rank)
+    shown_untracked, cut_untracked = bounded_paths(untracked, rank)
+    omitted = {key: value for key, value in (('changed_paths', cut), ('untracked_paths', cut_untracked)) if value}
+    return shown, shown_untracked, omitted or None
+
 
 def evidence_bundle(task):
     data = task['data']
     root = Path(task['workspace']).resolve()
+    changed, untracked, omitted = workspace_paths(data, root)
     files, left = [], 48000
-    for name in data['development'].get('changed_paths', [])[:20]:
+    for name in changed[:20]:
         path = root / name
         try:
             if path.is_symlink() or not path.resolve().is_relative_to(root):
@@ -20,13 +96,21 @@ def evidence_bundle(task):
                 break
         except (OSError, UnicodeError, ValueError):
             files.append({'path': name, 'unavailable': True})
+    changes = {'source': 'Orbit Git comparison against original base',
+               'base': data['development']['base'],
+               'changed_paths': changed,
+               'untracked_paths': untracked,
+               'verified_tree': data['development'].get('verified_tree'),
+               'limits': 'Excludes ignored files and external paths; not a full access audit.'}
+    if omitted:
+        changes['omitted'] = omitted
+        changes['limits'] += (' The path lists are bounded (%d rows, %d characters each): changes to tracked files come '
+                              'first, then untracked files the executor\'s evidence names, then files beside those, then '
+                              'the rest in name order. omitted counts what was left out by top-level folder; a path left '
+                              'out is not shown to be unchanged — list the folder yourself when an item depends on it.'
+                              % (PATH_ROWS, PATH_CHARS))
     return {'checks': data.get('evidence', []), 'files': files,
-            'workspace_changes': {'source': 'Orbit Git comparison against original base',
-                                  'base': data['development']['base'],
-                                  'changed_paths': data['development'].get('changed_paths', []),
-                                  'untracked_paths': data['development'].get('untracked_paths', []),
-                                  'verified_tree': data['development'].get('verified_tree'),
-                                  'limits': 'Excludes ignored files and external paths; not a full access audit.'},
+            'workspace_changes': changes,
             'native_tool_trace': native_tool_trace(task),
             'file_limits': 'At most 20 files, 8000 characters per file and 48000 total. Omitted content is not verified.',
             'host_observations': host_observations(data),
