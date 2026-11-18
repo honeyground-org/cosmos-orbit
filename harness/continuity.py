@@ -138,15 +138,16 @@ def _tokens(value):
         return None
 
 
-def update_settings(store, change):
-    """Read, change and write the file under a lock. A file that cannot be parsed is the user's to fix: never overwrite it."""
+def update_settings(store, change, name='handoff'):
+    """Read, change and write one section of the file under a lock ("handoff", or "offload" for offload.py). A file
+    that cannot be parsed is the user's to fix: never overwrite it."""
     with store.lock('settings-file', timeout=2.0):
         data, problem = read_settings(store)
         if problem:
             raise ValueError(problem + ' - fix or remove it, then run the command again')
-        section = data.get('handoff')
+        section = data.get(name)
         if not isinstance(section, dict):
-            section = data['handoff'] = {}
+            section = data[name] = {}
         change(section)
         _write_file(settings_path(store), data)
     return data

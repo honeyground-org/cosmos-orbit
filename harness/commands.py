@@ -6,7 +6,7 @@ from html import escape
 
 GROUPS = [
     ('Your own session (hooks)', [
-        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, and SessionEnd and StopFailure for Claude Code) once. Inert until something is switched on. Run it again after an update that adds a hook.'),
+        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, PreToolUse on shell calls, and SessionEnd and StopFailure for Claude Code) once. Inert until something is switched on. Run it again after an update that adds a hook.'),
         ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
          'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
         ('cosmos-orbit context [350k | on | off | reset] [--global]   ·   export ORBIT_HANDOFF_AT=250k',
@@ -27,7 +27,17 @@ GROUPS = [
          'The switches. Without NAME: the whole offer (off = a limited session is left alone). With NAME: one route, built-in or added, kept out of the offer and of route run.'),
         ('cosmos-orbit route run NAME [--model MODEL] [--carry] [-- ARGS]',
          'Start that route in this terminal, on its default model or the one you name. A session stopped at its limit offers the usable routes (and each other model of theirs) at your next prompt, numbered; so does a session where you ask for it ("kimi로 바꿔줘", "다른 모델로", "switch to codex"). Type a number or a name and Orbit quits it and runs this in the same pane, carrying the conversation\'s context (and your request) to the new session, Claude Code or Codex.'),
-        ('cosmos-orbit settings', 'Hook installation, switches, handoff points and what applies in this folder.'),
+        ('cosmos-orbit offload run [--cwd DIR] [--timeout SEC] [--label NAME] -- ARGV…   ·   cosmos-orbit offload run --shell \'PIPELINE\'',
+         'Run a test suite outside the conversation, with no model: a summary of at most 40 lines comes back (verdict, '
+         'exit code, totals for pytest, unittest, go, cargo, jest, vitest, TAP and these verify scripts, the failing '
+         'lines), the full output goes to <home>/offload/ (newest 200 kept). The exit code is the command\'s (124 on timeout).'),
+        ('cosmos-orbit offload   ·   cosmos-orbit offload on|off|advise|block|reset [--session [ID] | --global]   ·   '
+         'offload --model NAME [--host claude|codex]   ·   offload --at 150k   ·   export ORBIT_OFFLOAD=off',
+         'The PreToolUse hook on shell calls: once this conversation is past the point (built in 150k, measured from the '
+         'transcript at the call), a test suite run directly is told (advise = on) or refused (block) with the offload '
+         'form and the model for a subagent (built in: haiku for Claude Code). Off by default. This session by default, '
+         'or --global; precedence: session → ORBIT_OFFLOAD → global → built in. Without a value: what applies here.'),
+        ('cosmos-orbit settings', 'Hook installation, switches, handoff points, offload and what applies in this folder.'),
         ('claude --dangerously-skip-permissions   ·   codex',
          'Your normal command. The first substantial prompt becomes the goal; every prompt, correction, evidence and verdict lands in the ledger; the brief returns after compaction and at the next session.')]),
     ('Inside the session (the executor calls these)', [

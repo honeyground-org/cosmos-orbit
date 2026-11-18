@@ -84,7 +84,7 @@ Install once:
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
 ./install.sh
-cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop · PreCompact (+ SessionEnd for Claude Code)
+cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop · PreCompact · PreToolUse on shell calls (+ SessionEnd for Claude Code)
 ```
 
 The hooks are inert until something is switched on. Then use your normal command: `claude`,
@@ -583,6 +583,64 @@ restart. Values are token counts or the same words the command takes (`"350k"`, 
 JSON is never overwritten: the hooks fall back to the built-in point and the command asks you to fix
 it. Points stored by an earlier version (in the ledger database) move into the file once, by
 themselves.
+
+## Test runs outside the conversation: offload
+
+Every tool call re-reads the whole conversation. On one measured Claude Code session (2026-11-18), 55 of 133
+requests (41%) were test runs or waits for them, each re-reading about 400k tokens: 45% of all the tokens it
+re-read. A test suite's verdict needs no model at all, so Orbit runs it and gives back only a summary:
+
+```sh
+cosmos-orbit offload run -- python3 -m pytest -q          # argv after --
+cosmos-orbit offload run --shell 'for f in tests/verify_*.py; do python3 "$f" < /dev/null; done'
+cosmos-orbit offload run --timeout 600 --label unit --cwd ../api -- go test ./...
+```
+
+```
+offload[unit]: FAIL exit=1 in 42.1s - 212 passed, 2 failed (pytest)
+failing:
+  FAILED tests/test_a.py::test_x - AssertionError: assert 1 == 2
+  FAILED tests/test_b.py::test_y - KeyError: 'k'
+log: ~/.local/share/local-harness/offload/20261118-101500-4242-unit.log (5,310 lines, 412,977 bytes) - kept out of the conversation
+```
+
+The summary is at most 40 lines and 3,000 characters however large the output: the verdict, the exit code, the
+totals Orbit recognises (pytest, unittest, Go, Cargo, Jest, Vitest, TAP and this repository's `tests/verify_*.py`),
+up to 15 failing lines, or the last 15 lines when it recognises none. The full output goes to `<home>/offload/` (the
+newest 200 logs are kept). The exit code is the command's own (124 after `--timeout`, which ends the whole process
+group), so `&&` chains keep working. When the session has an Orbit task, the run is one `offload_run` event in its
+ledger; none is created when it has none. When the results need reading, a subagent on a cheaper model can run the
+same command and return only its conclusion.
+
+**The hook.** `cosmos-orbit hooks install` adds a PreToolUse hook on shell calls (Claude Code, and Codex, which reports
+its shell calls as `Bash` too, with the same output contract: read from codex-cli 0.167.1's own hook schema, not yet
+seen in a live Codex session; Codex asks once to trust it). It is silent unless all of these hold: the command looks like a test suite (pytest,
+`python -m unittest`, `tests/verify_*.py` and loops over test files, `npm|pnpm|yarn|bun test`, Vitest, Jest,
+`go test`, `cargo test`, PHPUnit and `php artisan test`, `make test|check`, tox, plus your own regular expressions
+in `offload.patterns`), it is not already going through Orbit (`offload run`, `evidence`, `claim`) or prefixed with
+`ORBIT_OFFLOAD=off`, it comes from the main conversation (a subagent's call carries `agent_id`, and the subagent is
+the offload), Orbit is on there, offload is not off, and the conversation measured from the transcript at that very
+call is past the point. Then it **advises** (a note beside the call: the measured size, the point, the `offload run`
+form, and the model for a subagent when one is set for that host) or **blocks** the call with the same reason. The
+first check runs before the store or the transcript is opened.
+
+```sh
+cosmos-orbit offload                                   # what applies here (mode, point, model) and where each came from
+cosmos-orbit offload on|off|advise|block               # this session (on = advise); --global for every session
+cosmos-orbit offload --model haiku [--host claude|codex] [--global]   # none: no subagent advice
+cosmos-orbit offload --at 150k [--global]              # the conversation size from which the hook speaks
+cosmos-orbit offload reset [--session ID | --global]   # back to the next scope
+export ORBIT_OFFLOAD=off                               # one terminal; or prefix one command with ORBIT_OFFLOAD=off
+```
+
+Precedence, highest first: this session → `ORBIT_OFFLOAD` (mode only) → global → built in (off, 150k, Claude Code:
+`haiku`, no built-in model for Codex). Without `--session` or `--global` the change is for this session, found from
+`CLAUDE_CODE_SESSION_ID` (Claude Code's shell), `CODEX_THREAD_ID` (Codex's) or the session last seen in this cmux or
+tmux pane; with none of them the command asks for `--global`. Session overrides live in the store and are bounded
+(the newest 100, none older than 30 days); global values live in `<home>/settings.json`, section `offload`, next to
+`handoff`, editable by hand (`patterns` is a list of regular expressions for your own scripts). **To turn it off:**
+`cosmos-orbit offload off --global` (or `reset --global`, since off is the built-in mode); `cosmos-orbit hooks
+uninstall` removes the hook altogether.
 
 ## When a session hits its usage limit: routes
 
