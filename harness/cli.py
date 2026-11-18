@@ -112,7 +112,8 @@ def main(argv=None):
         switch_cmd.add_argument('path', nargs='?')
         switch_cmd.add_argument('--global', dest='global_default', action='store_true')
     sub.add_parser('settings', help='Hook installation, default and per-project switches').add_argument('path', nargs='?')
-    hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the four hooks (SessionStart/UserPromptSubmit/Stop/PreCompact) in Claude Code and Codex')
+    hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the hooks (SessionStart/UserPromptSubmit/Stop/PreCompact/'
+                                             'PreToolUse on Bash, and SessionEnd/StopFailure for Claude Code) in Claude Code and Codex')
     hooks_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
     hooks_cmd.add_argument('--host', action='append', choices=('claude', 'codex'))
     service_cmd = sub.add_parser('service', help='install | uninstall | status: start Orbit again at login (the dashboard, '
@@ -222,8 +223,25 @@ def main(argv=None):
     context_cmd.add_argument('--host', choices=('claude', 'codex'), default=None,
                              help='the point for every session of one host (built in: claude 300k, codex 250k; Claude Code is capped at 300k, Codex at 80%% of its window)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
-    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end', 'stop-failure'))
+    hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end', 'stop-failure',
+                                            'pre-tool'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
+    offload_cmd = sub.add_parser('offload', help='Run a test suite outside the conversation (run -- ARGV | run --shell CMD: '
+                                                 'a short summary back, the full log on disk, no model) and the hook that '
+                                                 'steers a large conversation there: on | off | advise | block | reset, '
+                                                 '--model NAME [--host H], --at 150k, each for this session (default) '
+                                                 'or --global; without a value: what applies here')
+    offload_cmd.add_argument('action', nargs='?', choices=('on', 'off', 'advise', 'block', 'reset', 'run', 'status'))
+    offload_cmd.add_argument('--session', nargs='?', const='', default=None, metavar='ID',
+                             help='this session (default when one is found here) or the session ID given')
+    offload_cmd.add_argument('--global', dest='global_default', action='store_true', help='every session (<home>/settings.json)')
+    offload_cmd.add_argument('--model', help='the model a subagent should use for interpreting results (none: no such advice)')
+    offload_cmd.add_argument('--host', choices=('claude', 'codex'), help='whose model --model names (default: this session\'s host, else claude)')
+    offload_cmd.add_argument('--at', help='the conversation size from which the hook speaks, e.g. 150k')
+    offload_cmd.add_argument('--cwd', help='run: the folder to run in (default: here)')
+    offload_cmd.add_argument('--timeout', type=float, help='run: stop the command after this many seconds (exit 124)')
+    offload_cmd.add_argument('--label', help='run: a name for the log file and the summary')
+    offload_cmd.add_argument('--shell', dest='shell_command', metavar='STRING', help='run: a shell pipeline instead of argv after --')
     result = sub.add_parser('result')
     result.add_argument('id')
     result.add_argument('--file')
@@ -286,7 +304,8 @@ def main(argv=None):
     recover.add_argument('--keep-current-files', required=True, action='store_true')
     argv = list(sys.argv[1:] if argv is None else argv)
     passthrough = []
-    if 'route' in argv and '--' in argv:   # `route run NAME -- ARGS`: ARGS go to the host program as they are
+    if '--' in argv and any(word in ('route', 'offload') for word in argv[:argv.index('--')]):
+        # `route run NAME -- ARGS`: ARGS go to the host program as they are · `offload run -- ARGV`: the command to run
         cut = argv.index('--')
         argv, passthrough = argv[:cut], argv[cut + 1:]
     try:
@@ -320,6 +339,10 @@ def main(argv=None):
     if args.command == 'doctor':
         print(json.dumps(doctor(), indent=2))
         return 0
+    if args.command == 'hook' and args.event == 'pre-tool':
+        # Every shell call runs this: decided before the store is opened, silent unless it matters (offload.py).
+        from .offload import pre_tool_main
+        return pre_tool_main(args.home, args.host)
     store = Store(args.home)
     if args.command == 'hook':
         # Host hook: stdin carries the event JSON; stdout carries one JSON object or nothing. Exit 0 always.
@@ -601,6 +624,36 @@ def main(argv=None):
                                                                      now_text=args.now_text, keep=args.keep, shifts=args.shifts,
                                                                      retire=args.retire),
                       'handoff_file': str(store.home / 'runs' / args.id / 'handoff.md')}
+        elif args.command == 'offload':
+            from . import offload
+            explicit = args.session or None
+            session, host, how = offload.here_session(store, explicit)
+            if args.action == 'run':
+                if args.global_default or args.model or args.at:
+                    raise ValueError('offload run takes --cwd, --timeout, --label and the command; settings are separate')
+                code, summary = offload.run(store, passthrough, args.shell_command, args.cwd, args.timeout, args.label,
+                                            session)
+                print(summary)
+                return code
+            if passthrough or args.shell_command or args.cwd or args.timeout or args.label:
+                raise ValueError('a command is given to `cosmos-orbit offload run`')
+            if args.global_default and args.session is not None:
+                raise ValueError('Choose --session or --global, not both')
+            mode = args.action if args.action in ('on', 'off', 'advise', 'block') else None
+            changed = None
+            if mode or args.model is not None or args.at is not None or args.action == 'reset':
+                if args.session == '' and not session:
+                    raise ValueError('No session found here (no CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID or known pane); '
+                                     'give --session ID, or --global')
+                if args.global_default:
+                    scope = 'global'
+                elif session:
+                    scope = 'session'
+                else:
+                    raise ValueError('No session found here; add --global (or --session ID)')
+                changed = offload.configure(store, scope, session, args.host or host or 'claude', mode, args.at,
+                                            args.model, reset=args.action == 'reset')
+            result = offload.view(store, session, args.host or host, how, changed=changed)
         elif args.command == 'context':
             from .attach import project_root, current_task
             from . import continuity

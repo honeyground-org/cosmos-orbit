@@ -23,9 +23,13 @@ HOOK_MARK = 'cosmos-orbit hook'  # identifies Orbit entries inside host hook fil
 HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prompt', 20), ('Stop', 'stop', 600),
                ('PreCompact', 'pre-compact', 30))
 # StopFailure: a turn ended on an API error (a usage limit among them); Codex has no such event, its limit is read
-# from its transcript at the next prompt.
-HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10)),
-               'codex': HOOK_EVENTS}
+# from its transcript at the next prompt. PreToolUse (shell calls only, offload.py): both hosts have it, with the same
+# output contract (Claude Code 2.1.327 hook docs; codex-cli 0.167.1's embedded pre-tool-use schema, matcher alias Bash).
+PRE_TOOL = ('PreToolUse', 'pre-tool', 5)
+HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10), PRE_TOOL),
+               'codex': HOOK_EVENTS + (PRE_TOOL,)}
+HOOK_MATCHERS = {'PreToolUse': 'Bash'}  # every other event takes every occurrence
+QUIET_EVENTS = ('PreToolUse',)          # runs on every shell call: no status line
 CLOSED = ('verified', 'stalled', 'interrupted', 'closed')  # closed: untouched for 12 h, or continued elsewhere (lifecycle)
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 # The claim words, negated in the same clause: '완료로 주장하지 않습니다', '완료로 기록한 건 없어요', 'not done yet'.
@@ -124,7 +128,15 @@ def settings_view(store, path=None):
                      'task': current, 'effective': value == 'on' and is_git},
             'environment': os.environ.get('ORBIT') or os.environ.get('COSMOS_ORBIT'),
             'supervision': __import__('harness.supervision', fromlist=['configure']).configure(store),
-            'handoff': __import__('harness.continuity', fromlist=['threshold_view']).threshold_view(store, root)}
+            'handoff': __import__('harness.continuity', fromlist=['threshold_view']).threshold_view(store, root),
+            'offload': _offload_here(store)}
+
+
+def _offload_here(store):
+    from . import offload
+    session, host, how = offload.here_session(store)
+    return dict(offload.effective(store, session, host), session=session, session_from=how,
+                details='cosmos-orbit offload')
 
 
 # ---------------------------------------------------------------- host hooks
@@ -200,13 +212,23 @@ def hook_entries(host, home=None):
         base += ' --home ' + shlex.quote(str(home))
     entries = {}
     for event, name, timeout in HOST_EVENTS.get(host, HOOK_EVENTS):
-        entries[event] = {'matcher': '', 'hooks': [{'type': 'command', 'timeout': timeout, 'statusMessage': 'Orbit',
-                                                    'command': base + ' hook ' + name + ' --host ' + host}]}
+        hook = {'type': 'command', 'timeout': timeout, 'statusMessage': 'Orbit',
+                'command': base + ' hook ' + name + ' --host ' + host}
+        if event in QUIET_EVENTS:
+            hook.pop('statusMessage')
+        entries[event] = {'matcher': HOOK_MATCHERS.get(event, ''), 'hooks': [hook]}
     return entries
 
 
+# `hooks install --home H` writes `cosmos-orbit --home H hook …`, which HOOK_MARK alone does not find: such hooks were
+# installed again beside themselves, never uninstalled, and reported missing (found 2026-11-18 driving the CLI).
+HOOK_COMMAND = re.compile(r'cosmos-orbit\b.*\shook\s+(?:session-start|prompt|stop|pre-compact|session-end|stop-failure'
+                          r'|pre-tool)\b')
+
+
 def _is_ours(entry):
-    return any(HOOK_MARK in str(hook.get('command', '')) for hook in (entry.get('hooks') or []) if isinstance(hook, dict))
+    return any(HOOK_MARK in command or HOOK_COMMAND.search(command)
+               for command in (str(hook.get('command', '')) for hook in (entry.get('hooks') or []) if isinstance(hook, dict)))
 
 
 def _read(path):
@@ -273,8 +295,13 @@ def hook_status(host):
         return {'file': str(path), 'installed': False, 'error': str(error)}
     wanted = HOST_EVENTS.get(host, HOOK_EVENTS)
     present = [event for event, _, _ in wanted if any(isinstance(e, dict) and _is_ours(e) for e in hooks.get(event) or [])]
-    return {'file': str(path), 'installed': len(present) == len(wanted), 'events': present,
-            'cli': bool(shutil.which(host))}
+    status = {'file': str(path), 'installed': len(present) == len(wanted), 'events': present,
+              'cli': bool(shutil.which(host))}
+    if present and len(present) < len(wanted):
+        # An installation from before a hook was added: true, and one command away (seen with PreToolUse, 2026-11-18).
+        status['missing'] = [event for event, _, _ in wanted if event not in present]
+        status['fix'] = 'cosmos-orbit hooks install'
+    return status
 
 
 # ---------------------------------------------------------------- task record
