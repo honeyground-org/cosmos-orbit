@@ -22,6 +22,10 @@ model by name ("kimi로 바꿔줘", "올라마 모델 쓰고 싶어", "switch to
 of a turn; the same words sent again go to the session as they are. Every switch carries the session's context: a
 capsule of where it was (its last turns, the files it changed, the request held, the task) is kept in the store and
 handed to the new session at its start, whichever host each runs on and whether or not an Orbit task is attached.
+
+A route's end need not be known in advance. When its service refuses for payment (a free period over, credits spent,
+a plan it needs: HTTP 402, or the service's words saying so), the session's next prompt gets the same offer, and
+the route is not offered again until `route on NAME` says it answers again: waiting does not bring it back.
 """
 import datetime
 import json
@@ -59,8 +63,8 @@ ENDPOINT_VARS = ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KE
 APIS = {'anthropic': 'claude', 'openai': 'codex'}   # the protocol an added route's service speaks -> the host for it
 AUTHS = ('bearer', 'x-api-key')    # how a Claude Code route sends its key: Authorization: Bearer, or x-api-key
 PROVIDER = 'orbit-'                # + route: the model provider a Codex route defines for its run
-CONTINUE_TEXT = ('Continue the unfinished task on this route. The previous session stopped at its usage limit and '
-                 'the user chose this route; they asked nothing new.')
+CONTINUE_TEXT = ('Continue the unfinished task on this route. The previous session stopped (its usage limit, or its '
+                 'service refused for payment) and the user chose this route; they asked nothing new.')
 ASKED_TEXT = ('Continue the unfinished task on this route. The user switched to it by choice; the context of the session '
               'they left is in this session\'s brief. They asked nothing new.')
 MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
@@ -78,6 +82,16 @@ ASK_NOT = re.compile(r'(기능|개발|구현|코드|함수|클래스|스키마|�
                      r'refactor\w*)\b|[`/\\{}<>=]|::|\.(py|php|ts|tsx|js|go|rb|json|md)\b)', re.I)
 ASK_CLASS = re.compile(r'\b[A-Z][a-z]+[A-Z]\w*\b|\b[A-Z][a-z]{2,}\s?모델')   # a class: "UserProfile", "Organization 모델"
 ALIASES = {'클로드': 'claude', '코덱스': 'codex', '키미': 'kimi', '올라마': 'ollama'}
+# A service refusing for payment. Seen 2026-11-18, Claude Code 2.1.327 and Codex 0.167.1 against an endpoint refusing
+# the way Ollama's cloud does ("this model requires a subscription, upgrade for access: https://ollama.com/upgrade"):
+# Claude Code records `error: authentication_failed` with `apiErrorStatus: 403` (402: no error kind of its own) and
+# the service's words in the text; Codex ends the turn (`task_complete`) with `error.message` "unexpected status 402
+# Payment Required: …" and `codex_error_info.http_connection_failed.http_status_code`. A 401 or 403 without these
+# words (a wrong key, say) is not one.
+PAID = re.compile(r'requires? an? (paid )?(subscription|plan)|upgrade (for|to get) access|ollama\.com/upgrade'
+                  r'|payment required|insufficient[_ ](credits?|balance|funds|quota)|(out of|no) (usage )?credits'
+                  r'|add credits|exceeded your current quota', re.I)
+USAGE_WORDS = re.compile(r'usage limit|rate limit|hit your', re.I)   # a usage limit: it resets, it is no refusal
 
 
 # ---------------------------------------------------------------- the routes
@@ -155,6 +169,8 @@ def set_enabled(store, value, name=None):
     else:
         raise ValueError('no route named %r (cosmos-orbit route list)' % name)
     _save(store, data)
+    if value:
+        forget_refusal(store, name)       # `route on NAME`: the user says it answers again
     return {'route': name, 'enabled': bool(value)}
 
 
@@ -219,6 +235,7 @@ def add(store, name, base_url, model, key=None, label=None, until=None, api=None
                     'label': (label or '%s at %s' % (served[0], base_url)).strip(), 'until': until or None,
                     'enabled': True, 'added': now()}
     _write(store, routes)
+    forget_refusal(store, name)           # added again (a new key, a new plan): what it refused before is past
     return dict(routes[name], name=name)
 
 
@@ -396,11 +413,15 @@ def claude_limit(path):
             continue
         if not isinstance(record, dict) or record.get('type') != 'assistant' or record.get('isSidechain'):
             continue
-        if not record.get('isApiErrorMessage') or record.get('error') not in LIMIT_ERRORS:
+        if not record.get('isApiErrorMessage'):
             return None                                   # the last answer was a real one: no limit holds
         text = _content_text(record.get('message'))
-        quota = record.get('quotaLimits') if isinstance(record.get('quotaLimits'), dict) else {}
         seen = _stamp(record.get('timestamp')) or time.time()
+        if record.get('error') != 'rate_limit' and paid_refusal(text, record.get('apiErrorStatus')):
+            return refusal(record.get('uuid') or str(seen), text, seen)
+        if record.get('error') not in LIMIT_ERRORS:
+            return None                                   # another error (a network one, say): no limit holds
+        quota = record.get('quotaLimits') if isinstance(record.get('quotaLimits'), dict) else {}
         kind = re.search(r"hit your ([\w-]+) limit", text or '')
         resets = quota.get('resetsAt')
         return {'id': record.get('uuid') or str(seen), 'kind': kind[1] if kind else (
@@ -421,10 +442,19 @@ def codex_limit(path):
         if not isinstance(payload, dict):
             continue
         seen = _stamp(record.get('timestamp')) or time.time()
-        if payload.get('type') == 'error' and re.search(r'usage limit|rate limit|hit your', str(payload.get('message')), re.I):
+        error = payload.get('error') if payload.get('type') == 'task_complete' else None
+        if isinstance(error, dict):                       # Codex 0.167: the turn ended on this error
+            info = error.get('codex_error_info') if isinstance(error.get('codex_error_info'), dict) else {}
+            failed = info.get('http_connection_failed') if isinstance(info.get('http_connection_failed'), dict) else {}
+            message = str(error.get('message') or '')
+            if not USAGE_WORDS.search(message) and paid_refusal(message, failed.get('http_status_code')):
+                return refusal('codex-paid:%s' % (payload.get('turn_id') or record.get('timestamp')), message, seen)
+        if payload.get('type') == 'error' and USAGE_WORDS.search(str(payload.get('message'))):
             text = str(payload['message'])
             return {'id': 'codex-error:%s' % record.get('timestamp'), 'kind': 'usage', 'text': text[:200],
                     'resets_at': reset_from_text(text, seen), 'seen_at': seen}
+        if payload.get('type') == 'error' and paid_refusal(str(payload.get('message'))):
+            return refusal('codex-paid:%s' % record.get('timestamp'), str(payload.get('message')), seen)
         if payload.get('type') != 'token_count':
             continue
         limits = payload.get('rate_limits') if isinstance(payload.get('rate_limits'), dict) else {}
@@ -439,6 +469,23 @@ def codex_limit(path):
     return None
 
 
+def paid_refusal(text, status=None):
+    """Whether an API error is its service asking for payment: HTTP 402, or the service's own words, at any status."""
+    return status == 402 or bool(PAID.search(text or ''))
+
+
+def refusal(ident, text, seen):
+    """A refusal for payment, held like a limit that has no reset: waiting does not end it."""
+    return {'id': ident, 'kind': 'payment', 'paid': True, 'text': (text or 'payment required')[:200],
+            'resets_at': None, 'seen_at': seen}
+
+
+def forget_refusal(store, name):
+    limit = route_limit(store, name)
+    if limit and limit.get('paid'):
+        store.preference(LIMIT_KEY + name, 'null')
+
+
 def read_limit(path, host):
     if not path:
         return None
@@ -448,6 +495,8 @@ def read_limit(path, host):
 def active(limit, at=None):
     if not limit:
         return False
+    if limit.get('paid'):
+        return True                       # until the route answers again: `route on NAME`, or the route added again
     at = time.time() if at is None else at
     if limit.get('resets_at'):
         return limit['resets_at'] > at
@@ -486,6 +535,9 @@ def _clock(stamp, at):
 
 
 def _limited_text(limit, at):
+    if limit.get('paid'):
+        return 'refused for payment %s (route on %s once it answers again)' % (
+            datetime.datetime.fromtimestamp(limit.get('seen_at') or at).strftime('%m-%d %H:%M'), limit.get('route') or 'NAME')
     if limit.get('resets_at'):
         return 'limited until ' + _clock(limit['resets_at'], at)
     return 'limited (%s) since %s' % (limit.get('kind') or 'limit', datetime.datetime.fromtimestamp(limit.get('seen_at') or at).strftime('%H:%M'))
@@ -551,7 +603,8 @@ def split_pick(pick):
 def guidance(store, label, limit, usable, unusable, at, held):
     orbit = _orbit(store)
     when = (' · resets ' + _clock(limit['resets_at'], at)) if limit.get('resets_at') else ''
-    lines = ['Orbit: %s stopped at its %s limit%s.' % (label, limit.get('kind') or 'usage', when)]
+    lines = ['Orbit: %s was refused: its service asks for payment ("%s").' % (label, _cut(limit.get('text'), 160))
+             if limit.get('paid') else 'Orbit: %s stopped at its %s limit%s.' % (label, limit.get('kind') or 'usage', when)]
     if usable:
         lines.append('Switch in this pane — type a number or a name and press Enter (after the words put back in the '
                      'input is fine)%s:' % ('; the request you just typed is carried over' if held else ''))
@@ -567,10 +620,11 @@ def guidance(store, label, limit, usable, unusable, at, held):
         lines.append('No other route is usable right now.')
     for route, why in unusable:
         lines.append('  -  %-10s %s' % (route['name'], why))
-    lines.append('Or wait%s and type again. Routes: %s route list · add one: %s route add NAME --base-url URL --model '
-                 'MODEL[,MODEL…] [--api anthropic|openai] · this offer off: %s route off' % (
-                     ' until ' + _clock(limit['resets_at'], at).split(' (')[0] if limit.get('resets_at') else '',
-                     orbit, orbit, orbit))
+    again = ('Waiting will not bring it back: it is not offered until %s route on %s says it answers again (paid, or '
+             'free again).' % (orbit, limit.get('route') or 'NAME') if limit.get('paid') else 'Or wait%s and type again.' % (
+                 ' until ' + _clock(limit['resets_at'], at).split(' (')[0] if limit.get('resets_at') else ''))
+    lines.append('%s Routes: %s route list · add one: %s route add NAME --base-url URL --model MODEL[,MODEL…] '
+                 '[--api anthropic|openai] · this offer off: %s route off' % (again, orbit, orbit, orbit))
     return '\n'.join(lines)
 
 
@@ -865,6 +919,7 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
         state = dict(state, offer=picks, at=now(), asked=text, route=on, host=host, held=None, blocked_text=text)
         store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
         return {'decision': 'block', 'reason': ask_guidance(store, _label(store, on, host), usable, unusable, at, named)}
+    limit = dict(limit, route=on)
     record_limit(store, on, limit)
     if not limit.get('resets_at') and state.get('blocked') == limit['id']:
         return None                       # no reset time known: shown once, then the user may simply try again
@@ -1014,13 +1069,18 @@ def on_stop_failure(store, payload, host, task, environ=None, deliver=None):
         seen = time.time()
         limit = {'id': 'stop-failure:%s:%s' % (payload.get('session_id'), int(seen)), 'kind': payload.get('error'),
                  'text': text[:200] or str(payload.get('error')), 'resets_at': reset_from_text(text, seen), 'seen_at': seen}
+    words = str(payload.get('last_assistant_message') or payload.get('error_message') or '')
+    if not limit and paid_refusal(words):
+        limit = refusal('stop-failure:%s:%s' % (payload.get('session_id'), int(time.time())), words, time.time())
     if not limit:
         return None
     on = current_route(host, environ)
     record_limit(store, on, limit)
     usable, _ = choices(store, on, environ=environ)
-    body = '%s stopped at its %s limit%s. %s' % (
-        on, limit.get('kind') or 'usage', (' · resets ' + _clock(limit['resets_at'], time.time())) if limit.get('resets_at') else '',
+    body = '%s %s. %s' % (
+        on, 'was refused: its service asks for payment' if limit.get('paid') else 'stopped at its %s limit%s' % (
+            limit.get('kind') or 'usage',
+            (' · resets ' + _clock(limit['resets_at'], time.time())) if limit.get('resets_at') else ''),
         ('Type anything in that pane to see the routes to switch to: ' + ', '.join(r['name'] for r in usable)) if usable
         else 'No other route is usable now.')
     if task:

@@ -638,6 +638,14 @@ files it changed, the request held at a limit, the task — and hands it to the 
 same form whichever host each runs on (Claude Code → Codex, Codex → Claude Code) and whether or not an Orbit task is
 attached; a task is also taken over as after a handoff. Nothing is summarised by a model on the way.
 
+**A route's end need not be known.** When a route's service refuses for payment — its free period over, its credits
+spent, a plan it needs (HTTP 402, or its own words: Ollama answers "this model requires a subscription") — the
+session's next prompt gets the offer with the request carried, as at a limit, and the route is listed as refused and
+not offered again until `cosmos-orbit route on NAME` says it answers again (adding it again clears it too): waiting
+does not bring it back. Claude Code and Codex both: Claude Code records such a 403 as `authentication_failed`, Codex
+ends the turn on it. A 401 for a wrong key or a network error is not taken for one. `--until` stays for an end you do
+know.
+
 ## Messages between sessions: an idle session wakes up by itself
 
 Sessions can talk to each other: Codex to Claude Code, Claude Code to Claude Code, through a mailbox
