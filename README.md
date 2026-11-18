@@ -598,7 +598,8 @@ Switch in this pane — type a number or a name as your next prompt; the request
   2  kimi       Kimi K3.1 Pro on Ollama cloud · until 2026-12-16 (29 days left)
   (or quit and run: cosmos-orbit route run NAME --carry)
   -  trial      ended 2026-11-16
-Or wait until 22:47 and type again. Add a route: cosmos-orbit route add NAME …
+Or wait until 22:47 and type again. Not limited any more (another account, a new plan)? Send the same words again
+and they go to this session. Add a route: cosmos-orbit route add NAME …
 ```
 
 Type `2` and Orbit quits the session (`/exit`), waits until it is gone, and starts the route in the same pane (cmux or
@@ -607,7 +608,10 @@ cmux protects that draft; Orbit sends each clearing key unforced first and force
 just-blocked pick, so the protection stays on for everything typed after it (the automatic handoff's `/clear` clears
 the request it blocked the same way, however many lines it has). The new session
 takes the task over and runs the request you typed before the switch, as after a handoff. Orbit never switches by itself, and
-a limit with no known reset (out of credits) is shown once, then you may simply try again. When the route you left
+a limit with no known reset (out of credits) is shown once, then you may simply try again. Orbit blocks on what it
+read, and that may not hold any more (a new plan, credits bought): the same words sent again — in Claude Code, Enter
+on the words it puts back — go to the session, which answers or refuses again, and a refusal is a new limit line that
+brings the offer back. When the route you left
 resets, the session on the other route mentions it once, and typing that route's name switches back. A round never types
 a continuation into a session stopped at its limit, and Claude Code's `StopFailure` hook announces the limit in the
 task's panes when it happens (run `cosmos-orbit hooks install` again after updating, to add that hook).
