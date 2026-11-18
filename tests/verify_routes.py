@@ -26,9 +26,11 @@ offered again until `route on NAME`; a 401 for a wrong key, a network error and 
 Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of routes.
 """
 import datetime
+import io
 import json
 import os
 import re
+from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
 import sys
@@ -228,6 +230,37 @@ check('no pane Orbit can type into: the reply gives the command to run', 'route 
 codex_steps = routes.switch_steps('codex', 5, 77, 'cosmos-orbit route run claude --carry')
 check('Codex: nothing to empty (its blocked prompt does not come back), /exit then the route',
       ('key', 'ctrl+u') not in codex_steps and ('text', '/exit') in codex_steps and ('gone', [77, 30.0]) in codex_steps)
+# cmux 0.65.2 refused the restored pick as somebody's draft, so the old typist stopped before /exit. Force only the
+# first clear: every later keystroke, including /exit, still gets cmux's draft protection.
+cmux = {'kind': 'cmux', 'cli': '/bin/cmux', 'target': 'surface-test'}
+cmux_steps = routes.switch_steps('claude', 3, 77, 'cosmos-orbit route run kimi --carry')
+check('cmux: only the first clear of the just-blocked pick is forced; /exit and later input are not',
+      cmux_steps[1] == ('key', {'key': 'ctrl+u', 'force': True})
+      and cmux_steps[2:4] == [('key', 'ctrl+u')] * 2 and ('text', '/exit') in cmux_steps, cmux_steps)
+cmux_typed = []
+try:
+    typist.run(cmux, [cmux_steps[1], cmux_steps[2], next(step for step in cmux_steps if step == ('text', '/exit'))],
+               runner=lambda argv: cmux_typed.append(argv) or 0)
+    cmux_ok = (len(cmux_typed) == 3 and '--force' in cmux_typed[0]
+               and all('--force' not in argv for argv in cmux_typed[1:]))
+except (KeyError, TypeError) as error:
+    cmux_ok = False
+check('the forced clear reaches send-panel; force does not leak into the next keys or /exit', cmux_ok, cmux_typed)
+try:
+    tmux_forced = typist.command(terminal, key='ctrl+u', force=True)
+    tmux_ok = '--force' not in tmux_forced
+except TypeError:
+    tmux_ok = False
+check('tmux ignores the cmux-only force flag', tmux_ok)
+try:
+    log = io.StringIO()
+    with patch.object(typist.subprocess, 'run', return_value=_Namespace(
+            returncode=1, stdout='', stderr='Error: send-panel: the agent prompt holds text someone is typing')), redirect_stdout(log):
+        status = typist._terminal_run(['cmux', 'send-panel'])
+    logged = status == 1 and 'holds text someone is typing' in log.getvalue()
+except AttributeError:
+    logged = False
+check('a detached typing failure logs cmux\'s actual reason, not only "cmux exit 1"', logged)
 # controls
 plain = base / 'plain.jsonl'
 write(plain, [answer(NOW - 30)])
@@ -734,6 +767,26 @@ check('its first prompt (the carry line) is not blocked, and the capsule is not 
       not (carry13 or {}).get('decision') and 'Carried over by a route switch' not in carried13, carried13[:800])
 check('a /clear later in that process does not get it again',
       'Carried over by a route switch' not in json.dumps(cleared13 or {}, ensure_ascii=False))
+repeat13 = base / 'repeat13.jsonl'
+write(repeat13, [said(NOW - 100, typist.CARRY_LINE), answer(NOW - 90, 'The new step is KIMI-STEP-9.')])
+try:
+    second13 = routes.make_capsule(s12, 'fresh12', 'claude', 'claude', None,
+                                   {'asked': 'claude로 바꿔줘', 'route': 'kimi'}, task12, repeat13, str(repo12),
+                                   environ={routes.CAPSULE_ENV: cid})
+except TypeError:
+    second13 = {}
+check('a second switch carries the first capsule\'s context and this session\'s new turn (the brief is not a transcript)',
+      any('PELICAN-7' in text for _, text in second13.get('turns') or ())
+      and any('KIMI-STEP-9' in text for _, text in second13.get('turns') or ())
+      and str(repo12 / 'parser.py') in (second13.get('files') or []), second13)
+try:
+    stranger13 = routes.make_capsule(s12, 'some-other-session', 'claude', 'claude', None,
+                                     {'asked': 'claude로 바꿔줘', 'route': 'kimi'}, task12, repeat13, str(repo12),
+                                     environ={routes.CAPSULE_ENV: cid})
+except TypeError:
+    stranger13 = {}
+check('control: a capsule id in the environment does not leak it into a session it was not served to',
+      not any('PELICAN-7' in text for _, text in stranger13.get('turns') or []), stranger13)
 
 repo13 = make_repo(base, 'plain-repo')
 attach.set_switch(s12, 'on', repo13)
