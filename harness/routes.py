@@ -709,6 +709,10 @@ def guidance(store, label, limit, usable, unusable, at, held):
     again = ('Waiting will not bring it back: it is not offered until %s route on %s says it answers again (paid, or '
              'free again).' % (orbit, limit.get('route') or 'NAME') if limit.get('paid') else 'Or wait%s and type again.' % (
                  ' until ' + _clock(limit['resets_at'], at).split(' (')[0] if limit.get('resets_at') else ''))
+    if limit.get('resets_at') and not limit.get('paid'):
+        # What Orbit read may be stale (another account after /login, a new plan): the same words go on (on_prompt).
+        again += (' Not limited any more (another account, a new plan)? Send the same words again and they go to this '
+                  'session.')
     lines.append('%s Routes: %s route list · add one: %s route add NAME --base-url URL --model MODEL[,MODEL…] '
                  '[--api anthropic|openai] · this offer off: %s route off' % (again, orbit, orbit, orbit))
     return '\n'.join(lines)
@@ -1070,6 +1074,18 @@ def on_prompt(store, payload, host, task, environ=None, at=None, terminal=None, 
     asking = asks_switch(store, text) is not None
     if not limit.get('resets_at') and state.get('blocked') == limit['id'] and not note and not asking:
         return None                       # no reset time known: shown once, then the user may simply try again
+    if (limit.get('resets_at') and state.get('blocked') == limit['id'] and text and text == state.get('blocked_text')
+            and not note and not asking and not _orbit_line(text) and not _pick(text, state.get('offer') or [])):
+        # Orbit blocks on what it read, and the limit it read may not hold any more. Seen 2026-11-18 (Claude Code
+        # 2.1.327): at the 5-hour limit the user ran /login to another account, typed "이어서 해." twice, and both were
+        # blocked until 19:40 with no way on but a pick or `route off`. A successful /login is read now (claude_login);
+        # a new plan, credits bought or anything else the transcript does not show is not. So the words just blocked,
+        # sent again, are the user's answer: they go to the session. It answers, or refuses again, and a refusal is a
+        # new limit line (a new id): the offer comes back. The limit and the words stay, so a third send goes on too;
+        # the numbers are put away, so a "1" answered to the model after it did answer is not taken for a pick.
+        state = dict(state, offer=[])
+        store.preference(SESSION_KEY + session, json.dumps(state, ensure_ascii=False))
+        return None
     usable, unusable = choices(store, on, at, environ, runner, which)
     picks = [pick for pick, _, _ in offer_rows(usable)]
     # What is held is work to carry over: not Orbit's own lines, not a pick, not the words that ask for the switch.

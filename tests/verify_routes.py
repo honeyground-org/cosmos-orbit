@@ -28,6 +28,11 @@ of the one left (seen: `route run` started the bare host, and the new Claude Cod
 a switch whose typing failed says why at the next prompt with the command to run by hand, and the pick typed again
 retries (seen: "1" and "claude" went on to the model and were recorded as changes of the task); a request of several
 lines is cleared under cmux's draft protection; `route run` refuses a shell with no terminal.
+⑯ (2026-11-18: the user hit the 5-hour limit, ran /login to another account, and "이어서 해." typed twice was blocked
+both times until the reset): a limit Orbit read may not hold any more — the words just blocked, sent again, go to the
+session (and a third time), a refusal there is a new limit line that brings the offer back; a different prompt is still
+blocked and held, a pick still switches, words that ask for a switch are not passed, and a limit with no reset time
+keeps its rule (shown once).
 Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of routes.
 """
 import datetime
@@ -1363,6 +1368,96 @@ finally:
 check('in a terminal the same command starts the host, in the mode its capsule carries (the real CLI, a stand-in codex)',
       inpty.returncode == 0 and seen15.exists() and seen15.read_text().splitlines()
       == ['-a', 'never', '-s', 'danger-full-access', typist.CARRY_LINE], seen15.read_text() if seen15.exists() else inpty)
+
+print('⑯ a limit Orbit read may not hold any more: the same words sent again go to the session')
+# Seen 2026-11-18 (Claude Code 2.1.327): at the 5-hour limit the user ran /login to another account and typed "이어서
+# 해." twice; Orbit blocked both until 19:40 although the session now ran on another account. Orbit blocks on what it
+# read, and may be wrong: the words it just blocked, sent again, are the user's answer.
+s16 = Store(base / 'home-again')
+LIMIT16 = "You've hit your 5-hour limit · resets 7:40pm (Asia/Seoul)"
+STALE16 = 'Not limited any more (another account, a new plan)? Send the same words again and they go to this session.'
+t16 = base / 'again.jsonl'
+write(t16, [said(NOW - 900, 'add a parser'), answer(NOW - 880), limit_line(NOW - 60, LIMIT16, NOW + 7200)])
+spawned16 = []
+
+
+def again16(sid, prompt, path=t16):
+    return routes.on_prompt(s16, {'session_id': sid, 'prompt': prompt, 'transcript_path': str(path)}, 'claude', None,
+                            environ={}, at=NOW)
+
+
+def blocked16(reply):
+    return (reply or {}).get('decision') == 'block'
+
+
+def typing16():
+    return patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None, **kw:
+                        spawned16.append(steps) or 1)
+
+
+first16 = again16('g1', 'go on')
+reason16 = (first16 or {}).get('reason') or ''
+print('\n'.join('      | ' + line for line in reason16.splitlines()))
+check('a limit with a reset time: the first prompt is blocked with the offer, as before',
+      blocked16(first16) and 'stopped at its 5-hour limit' in reason16 and '  1  codex' in reason16, first16)
+check('the offer says it, next to "wait until … and type again": the same words sent again go to this session',
+      'and type again. ' + STALE16 in reason16, reason16)
+second16 = again16('g1', 'go on')
+check('the same words sent again go to the session: it answers, or refuses again (blocked, seen live)', second16 is None,
+      second16)
+third16 = again16('g1', 'go on')
+check('… and a third time too: no loop back into blocking', third16 is None, third16)
+
+# -- the session refused again: its refusal is a new limit line, a new id, and the offer comes back
+t16b = base / 'again-refused.jsonl'
+write(t16b, [answer(NOW - 880), limit_line(NOW - 60, LIMIT16, NOW + 7200)])
+again16('g2', 'go on', t16b)
+passed16 = again16('g2', 'go on', t16b)
+write(t16b, [answer(NOW - 880), limit_line(NOW - 60, LIMIT16, NOW + 7200), said(NOW - 10, 'go on'),
+             limit_line(NOW - 5, LIMIT16, NOW + 7200)])
+refused16 = again16('g2', 'go on', t16b)
+check('a new limit line after the words went on (a new id): the same words are blocked, the offer is back',
+      passed16 is None and blocked16(refused16) and '  1  codex' in ((refused16 or {}).get('reason') or ''),
+      (passed16, refused16))
+check('… and sent again they go on, for the new limit as for the first', again16('g2', 'go on', t16b) is None)
+
+# -- the session answered after the words went on: the numbers are put away
+t16d = base / 'again-answered.jsonl'
+write(t16d, [answer(NOW - 880), limit_line(NOW - 60, LIMIT16, NOW + 7200)])
+again16('g3', 'go on', t16d)
+again16('g3', 'go on', t16d)
+write(t16d, [answer(NOW - 880), limit_line(NOW - 60, LIMIT16, NOW + 7200), said(NOW - 10, 'go on'),
+             answer(NOW - 5, 'Two ways to do it: 1 keeps the old parser, 2 replaces it. Which one?')])
+with patch.object(typist, 'detect', return_value=None):
+    answered16 = again16('g3', '1', t16d)
+check('the session answered: a "1" answered to the model goes to it, not taken for a pick of the old offer',
+      answered16 is None, answered16)
+
+# -- controls: a different prompt, a pick, words that ask for a switch, a limit with no reset time, a payment refusal
+again16('g4', 'go on')
+other16 = again16('g4', 'fix the failing test first')
+check('a different prompt right after a block is blocked, and it is the request held', blocked16(other16)
+      and routes._json(s16, routes.SESSION_KEY + 'g4').get('held') == 'fix the failing test first', other16)
+check('control: the words blocked before the last ones are not "the same words sent again": blocked',
+      blocked16(again16('g4', 'go on')))
+again16('g5', 'go on')
+with patch.object(typist, 'detect', return_value={'kind': 'tmux', 'cli': '/usr/bin/true', 'target': '%16'}), \
+        typing16(), patch.object(routes, 'host_pid', return_value=4242):
+    picked16 = again16('g5', '1')
+check('after a block the pick still switches ("1": codex)', blocked16(picked16)
+      and 'switching this pane to codex' in picked16['reason'] and len(spawned16) == 1, picked16)
+asked16 = [again16('g6', 'codex로 바꿔줘') for _ in range(2)]
+check('control: words that ask for a switch, sent again, do not go to the session: the offer again',
+      all(blocked16(reply) and '  1  codex' in reply['reason'] for reply in asked16), asked16)
+t16c = base / 'again-credits.jsonl'
+write(t16c, [limit_line(NOW - 30, "You're out of usage credits. Switch to another model to continue.")])
+one16, two16 = again16('g7', 'continue the work', t16c), again16('g7', 'something else', t16c)
+check('control: a limit with no reset time keeps its rule — shown once (without the new clause), then any prompt goes on',
+      blocked16(one16) and STALE16 not in one16['reason'] and two16 is None, (one16, two16))
+paid16 = routes.guidance(s16, 'kimi', dict(routes.refusal('p16', 'this model requires a subscription', NOW),
+                                           route='kimi'), [], [], NOW, False)
+check('control: a refusal for payment does not say it (waiting or sending again does not bring that back)',
+      STALE16 not in paid16 and 'Waiting will not bring it back' in paid16, paid16)
 
 import shutil  # noqa: E402
 fake = base / 'installed'
