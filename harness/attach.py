@@ -138,12 +138,18 @@ def host_hook_file(host):
 
 
 def _same_code(found):
-    """True when an installed console script imports exactly this package (compared by file content)."""
+    """True when an installed console script imports exactly this package: the same modules, each the same content.
+    Only attach.py was compared until 2026-11-18, when a checkout that changed routes.py alone had its hooks installed
+    as the older installed Orbit, whose routes did not have the change."""
     try:
         target = Path(found).resolve()
-        mine = Path(__file__).resolve()
-        for candidate in target.parent.parent.glob('lib/python*/site-packages/harness/attach.py'):
-            if candidate.resolve() == mine or candidate.read_bytes() == mine.read_bytes():
+        here = Path(__file__).resolve().parent
+        mine = sorted(path.name for path in here.glob('*.py'))
+        for candidate in target.parent.parent.glob('lib/python*/site-packages/harness'):
+            if candidate.resolve() == here:
+                return True
+            if sorted(path.name for path in candidate.glob('*.py')) == mine and all(
+                    (candidate / name).read_bytes() == (here / name).read_bytes() for name in mine):
                 return True
     except OSError:
         pass

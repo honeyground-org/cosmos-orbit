@@ -6,12 +6,30 @@
 Answers POST …/responses (streamed) with one fixed text and appends one JSON line per request to LOG: the method,
 the path, the model asked for, whether the bearer token was the one expected (the token itself is never
 written) and which MARKERs the request carries. GET …/models answers an empty list; anything else answers 404. It serves until killed.
+
+With STUB_REFUSE=STATUS in its environment it refuses every request with that HTTP status instead, the way a
+service refuses once a free period is over: the body says STUB_REFUSE_TEXT (by default Ollama's words for a model
+that needs a paid plan), shaped as an OpenAI error unless STUB_REFUSE_SHAPE=plain asks for {"error": TEXT}.
 """
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ANSWER = 'ROUTE-STUB-ANSWER'
+
+REFUSE_TEXT = 'this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: stub)'
+
+
+def refusal():
+    """(status, body) when the stub is told to refuse, else None."""
+    status = os.environ.get('STUB_REFUSE')
+    if not status:
+        return None
+    text = os.environ.get('STUB_REFUSE_TEXT') or REFUSE_TEXT
+    if os.environ.get('STUB_REFUSE_SHAPE') == 'plain':
+        return int(status), {'error': text}
+    return int(status), {'error': {'message': text, 'type': 'insufficient_quota', 'code': None}}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -49,6 +67,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = {}
         self._record('POST', body)
+        refused = refusal()
+        if refused:
+            data = json.dumps(refused[1]).encode()
+            self.send_response(refused[0])
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if not self.path.split('?')[0].endswith('/responses'):
             self._json(404, {'error': {'message': 'not found'}})
             return

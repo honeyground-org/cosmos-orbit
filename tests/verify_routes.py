@@ -20,6 +20,9 @@ works), ⑨ each user's own key put into their keychain by `route key`, never pr
 several models, each offered and any one picked, ⑪ any service: an OpenAI Responses-compatible route runs Codex, an
 Anthropic-compatible one may send its key as x-api-key — end to end with the real `codex` and `claude`, and no request
 carries any credential but the route's (with ANTHROPIC_API_KEY alone Claude Code sent the user's own login instead).
+⑫ ⑬ a switch the user asks for and the context carried. ⑭ (2026-11-18: "실제 날짜 모르겠어" — when a free period ends is not
+known): a route whose service refuses for payment is seen when it happens, in Claude Code and in Codex, and is not
+offered again until `route on NAME`; a 401 for a wrong key, a network error and Claude Code's own rate limit are not.
 Exit 0 = pass. Fails on code without routes, and ⑧-⑪ on the first version of routes.
 """
 import datetime
@@ -781,6 +784,132 @@ s3 = Store(base / 'home')
 held3 = routes._json(s3, routes.CAPSULE_KEY + (routes._json(s3, routes.SESSION_KEY + 's-limited').get('capsule') or ''))
 check('the limit\'s switch carries its capsule too: the blocked request, to be run', held3.get('reason') == 'limit'
       and held3.get('held') == REQUEST and 'Now: run the request carried over' in routes.capsule_text(s3, held3), held3)
+
+print('⑭ a route whose service refuses for payment: seen when it happens, offered no more, no end day needed')
+# Shapes copied from the real hosts on 2026-11-18 (Claude Code 2.1.327, Codex 0.167.1) against tests/stub_*.py with
+# STUB_REFUSE=403 and 402: Claude Code calls a 403 `authentication_failed`; Codex ends the turn with the error.
+OLLAMA = 'this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: x1)'
+
+
+def refused_line(at, text, status, error='authentication_failed'):
+    return dict(limit_line(at, text, error=error), apiErrorStatus=status, uuid='r-%s' % at)
+
+
+def codex_end(at, message=None, status=None):
+    error = {'message': message, 'codex_error_info': {'http_connection_failed': {'http_status_code': status}}} if message else None
+    return {'timestamp': iso(at), 'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 't-%s' % at,
+                                                                     'last_agent_message': None, 'error': error}}
+
+
+def no_limit_count(at):
+    return {'timestamp': iso(at), 'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
+        'primary': {'used_percent': 3.0, 'resets_at': NOW + 9000}, 'rate_limit_reached_type': None}}}
+
+
+t14 = base / 'paid.jsonl'
+write(t14, [said(NOW - 900, 'add a parser'), answer(NOW - 880),
+            refused_line(NOW - 60, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403)])
+found14 = routes.claude_limit(t14)
+check('Claude Code: a 403 whose words ask for a subscription is a refusal for payment, with no reset',
+      found14 and found14.get('paid') and found14['resets_at'] is None and 'requires a subscription' in found14['text'], found14)
+write(t14, [refused_line(NOW - 60, 'API Error: 402 You have run out of usage credits.', 402, error='unknown')])
+check('Claude Code: a 402 is one too', (routes.claude_limit(t14) or {}).get('paid'), routes.claude_limit(t14))
+write(t14, [refused_line(NOW - 60, 'Failed to authenticate. API Error: 401 invalid x-api-key', 401)])
+check('control: a 401 for a wrong key is not', routes.claude_limit(t14) is None, routes.claude_limit(t14))
+write(t14, [refused_line(NOW - 600, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403), answer(NOW - 30)])
+check('control: a real answer after it — nothing holds', routes.claude_limit(t14) is None)
+write(t14, [limit_line(NOW - 30, "You're out of usage credits. Switch to another model to continue.")])
+check('control: Claude Code\'s own rate limit stays a limit (it resets), not a refusal',
+      not (routes.claude_limit(t14) or {}).get('paid') and routes.claude_limit(t14)['kind'] == 'credits')
+r14 = base / 'paid-rollout.jsonl'
+write(r14, [no_limit_count(NOW - 900), codex_end(NOW - 890),
+            codex_end(NOW - 60, 'unexpected status 403 Forbidden: %s, url: http://127.0.0.1/v1/responses' % OLLAMA, 403)])
+check('Codex: a turn ended on a 403 asking for a subscription is a refusal for payment', (routes.codex_limit(r14) or {}).get('paid'),
+      routes.codex_limit(r14))
+write(r14, [codex_end(NOW - 60, 'unexpected status 402 Payment Required: You have run out of usage credits.', 402)])
+check('Codex: a 402 is one too', (routes.codex_limit(r14) or {}).get('paid'), routes.codex_limit(r14))
+write(r14, [no_limit_count(NOW - 900), codex_end(NOW - 60, 'stream disconnected before completion', None)])
+check('control: Codex ending on a network error is not', routes.codex_limit(r14) is None, routes.codex_limit(r14))
+write(r14, [codex_end(NOW - 600, 'unexpected status 402 Payment Required: no credits', 402), no_limit_count(NOW - 40),
+            codex_end(NOW - 30)])
+check('control: a Codex turn that answered after it — nothing holds', routes.codex_limit(r14) is None, routes.codex_limit(r14))
+
+s14 = Store(base / 'home-paid')
+routes.add(s14, 'kimi', 'https://ollama.com', 'kimi-k3.1-pro', 'env:ROUTES_TEST_KEY', 'Kimi K3.1 Pro on Ollama cloud')
+routes.add(s14, 'kimo', 'http://127.0.0.1:1/v1', 'kimi-k3.1-pro', 'env:ROUTES_TEST_KEY', 'Kimi through Codex', api='openai')
+env14 = {'ROUTES_TEST_KEY': 'k', routes.ROUTE_ENV: 'kimi', routes.FROM_ENV: 'claude'}
+write(t14, [said(NOW - 900, 'add a parser'), answer(NOW - 880),
+            refused_line(NOW - 60, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403)])
+blocked14 = routes.on_prompt(s14, {'session_id': 'p14', 'prompt': 'add a test for it', 'transcript_path': str(t14)},
+                             'claude', None, environ=env14)
+reason14 = (blocked14 or {}).get('reason', '')
+print('\n'.join('      | ' + line for line in reason14.splitlines()))
+check('the next prompt in that session gets the offer: refused for payment, the routes to switch to, the request held',
+      (blocked14 or {}).get('decision') == 'block' and 'was refused: its service asks for payment' in reason14
+      and '  1  claude' in reason14 and '  2  codex' in reason14 and 'carried over' in reason14
+      and 'route on kimi' in reason14 and 'Or wait' not in reason14, reason14)
+check('… shown once: the same refusal does not block the next prompt', routes.on_prompt(
+    s14, {'session_id': 'p14', 'prompt': 'add a test for it', 'transcript_path': str(t14)}, 'claude', None, environ=env14) is None)
+usable14, why14 = routes.availability(s14, routes.all_routes(s14)['kimi'], NOW + 30 * 86400, environ=env14)
+check('kimi is not offered again — a month later still not: waiting does not end a refusal for payment',
+      not usable14 and 'refused for payment' in why14 and 'route on kimi' in why14, why14)
+other14 = routes.on_prompt(s14, {'session_id': 'o14', 'prompt': '다른 모델로 바꿔줘', 'transcript_path': str(t12)},
+                           'claude', None, environ={'ROUTES_TEST_KEY': 'k'})
+check('… in another session\'s offer it is listed with why, not numbered', '  -  kimi' in other14['reason']
+      and 'refused for payment' in other14['reason'] and re.search(r'  \d  kimi ', other14['reason']) is None, other14['reason'])
+check('… and no "usable again" note is given in the session that left it', routes.prompt_note(
+    s14, {'session_id': 'back14'}, 'claude', environ={'ROUTES_TEST_KEY': 'k', routes.ROUTE_ENV: 'claude',
+                                                       routes.FROM_ENV: 'kimi'}, at=NOW + 86400) is None)
+spawned14 = []
+with patch.object(typist, 'detect', return_value=terminal), \
+        patch.object(typist, 'spawn', side_effect=lambda term, steps, log, home=None, task=None: spawned14.append(steps) or 1), \
+        patch.object(routes, 'host_pid', return_value=4444):
+    write(t14, [said(NOW - 900, 'add a parser'), answer(NOW - 880),
+                refused_line(NOW - 20, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403)])
+    again14 = routes.on_prompt(s14, {'session_id': 'p14', 'prompt': 'write the docs', 'transcript_path': str(t14)},
+                               'claude', None, environ=env14)
+    picked14 = routes.on_prompt(s14, {'session_id': 'p14', 'prompt': 'write the docs1', 'transcript_path': str(t14)},
+                                'claude', None, environ=env14)
+texts14 = [v for k, v in (spawned14[0] if spawned14 else []) if k == 'text']
+check('a new refusal offers again, and its number switches the pane, carrying the request typed',
+      (again14 or {}).get('decision') == 'block' and texts14 and re.fullmatch(
+          r'cosmos-orbit route run claude --carry --capsule [0-9a-f]{12} --from kimi', texts14[-1])
+      and routes._json(s14, routes.CAPSULE_KEY + routes._json(s14, routes.SESSION_KEY + 'p14').get('capsule', '')).get('held')
+      == 'write the docs', (texts14, again14, picked14))
+routes.set_enabled(s14, True, 'kimi')
+check('route on kimi (it answers again): offered again', routes.availability(
+    s14, routes.all_routes(s14)['kimi'], NOW, environ=env14) == (True, ''))
+told14 = []
+r14b = base / 'paid-codex.jsonl'
+write(r14b, [no_limit_count(NOW - 900), codex_end(NOW - 890),
+             codex_end(NOW - 50, 'unexpected status 402 Payment Required: You have run out of usage credits.', 402)])
+codex14 = routes.on_prompt(s14, {'session_id': 'c14', 'prompt': 'go on', 'transcript_path': str(r14b)}, 'codex', None,
+                           environ={'ROUTES_TEST_KEY': 'k', routes.ROUTE_ENV: 'kimo'})
+check('Codex on an added route: the same — the offer, and the route marked',
+      (codex14 or {}).get('decision') == 'block' and 'was refused: its service asks for payment' in codex14['reason']
+      and not routes.availability(s14, routes.all_routes(s14)['kimo'], NOW, environ={'ROUTES_TEST_KEY': 'k'})[0], codex14)
+routes.add(s14, 'kimo', 'http://127.0.0.1:1/v1', 'kimi-k3.1-pro', 'env:ROUTES_TEST_KEY', 'Kimi through Codex', api='openai')
+check('… adding the route again (a new key, a new plan) clears it', routes.availability(
+    s14, routes.all_routes(s14)['kimo'], NOW, environ={'ROUTES_TEST_KEY': 'k'}) == (True, ''))
+write(t14, [said(NOW - 900, 'add a parser'), refused_line(NOW - 10, 'Failed to authenticate. API Error: 403 ' + OLLAMA, 403)])
+routes.on_stop_failure(s14, {'session_id': 'sf14', 'transcript_path': str(t14), 'error': 'authentication_failed',
+                             'last_assistant_message': 'Failed to authenticate. API Error: 403 ' + OLLAMA}, 'claude',
+                       {'id': 'task14'}, environ=env14, deliver=lambda store, task, text: told14.append(text))
+check('StopFailure (the turn ended on it): kimi marked and the task\'s panes told it was refused for payment',
+      told14 and 'kimi was refused: its service asks for payment' in told14[0]
+      and (routes.route_limit(s14, 'kimi') or {}).get('paid'), (told14, routes.route_limit(s14, 'kimi')))
+
+import shutil  # noqa: E402
+fake = base / 'installed'
+site = fake / 'lib' / 'python3.9' / 'site-packages' / 'harness'
+shutil.copytree(ROOT / 'harness', site, ignore=shutil.ignore_patterns('__pycache__'))
+(fake / 'bin').mkdir()
+(fake / 'bin' / 'cosmos-orbit').write_text('#!/bin/sh\n')
+same14 = attach._same_code(str(fake / 'bin' / 'cosmos-orbit'))
+(site / 'routes.py').write_text((site / 'routes.py').read_text() + '\n# an older routes\n')
+check('hooks call the installed Orbit only when every module is this code: one with an older routes.py alone is not '
+      '(it was, seen live: the hooks ran the installed routes without this change)',
+      same14 and not attach._same_code(str(fake / 'bin' / 'cosmos-orbit')), same14)
 
 tmp.cleanup()
 print('\n%s' % ('PASS' if not FAILED else 'FAIL: ' + ', '.join(FAILED)))
