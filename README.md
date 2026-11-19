@@ -530,6 +530,45 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
    fresh native session from a ledger packet (goal, corrections, checklist, last verdict without
    tool traces, remaining work, changed files). No extra model call writes the handoff.
 
+### During a turn, and the ceiling
+
+Measured 2026-11-18: the point was 300k and a Claude Code session was handed over at 677k. One 65-minute turn grew
+it from 185k to 511k while Orbit measured only at prompts and Stops (its checkpoint recorded the stale 185k), and
+afterwards every chance was postponed by a rule with its own reason: a question, the independent review, an unsure
+prompt, prompts typed mid-turn, an unprocessed request change at the Stop. Each rule postponed; none closed. Two
+additions, each with its own off switch:
+
+- **The notice during a turn (`midturn`, on by default).** The PreToolUse hook (shell calls, the one `offload` uses)
+  reads the conversation's size from the transcript at each call. Past the handoff point it records that size in the
+  ledger and tells the model once: finish the step in hand, `cosmos-orbit checkpoint …`, end the turn; again every
+  50k of growth, and once more, firmer, at the ceiling. The checkpoint then carries the size measured mid-turn, so
+  the Stop that ends the turn finds the handoff ready instead of asking for another one. Silent for a subagent's
+  call, when Orbit or handoff is off here, for a session without a task, below the point; below the lowest point the
+  settings allow it opens no store (measured 2026-11-19 against the previous version, interleaved: 58 ms against
+  61 ms median for a call below the point with a 3 MB transcript, within noise).
+  Over 80 recent transcripts the conversation grew at most 64k between two shell calls (p99 15k), so the hook stays
+  on shell calls. `midturn block` (opt-in) refuses every shell call past the ceiling except Orbit's own commands
+  (`checkpoint`, `claim`, `evidence`, `done`, …); `ORBIT_HANDOFF_MIDTURN=off` before a command lets it run.
+- **The ceiling (built in: 1.5× the session's point, 300k → 450k; or a token count; or off).** Past it nothing
+  waits for a better moment: in auto mode the first prompt at an idle input line hands off whatever it is — a question
+  or an unsure message too, carried word for word with the end of the last answer (up to 3,000 characters), which the
+  fresh session receives in full beside its brief; a missing checkpoint is written by Orbit from the ledger; and a
+  request change at the Stop no longer sends the session back to work: it stays pending, and the fresh session's
+  first Stop asks for the revision. Two waits stay, on purpose: a prompt typed during a turn still goes into that turn
+  (the handoff takes the first prompt after it; the notice above is what ends the turn), and the supervisor still
+  waits for a running review, which holds the task for its whole run, so a fresh session could not take the task
+  over before it ends (after the verdict, unfinished work hands off at once, as before).
+
+| Scope | Set | Off | Show |
+|---|---|---|---|
+| This session (default) | `cosmos-orbit context ceiling 500k` · `cosmos-orbit context midturn block` | `cosmos-orbit context ceiling off` · `cosmos-orbit context midturn off` | `cosmos-orbit context` |
+| Another session | `… --session ID` | `… off --session ID` | `cosmos-orbit context --session ID` |
+| Every session | `… --global` (settings.json `handoff.ceiling`, `handoff.midturn`) | `… off --global` | `cosmos-orbit settings` |
+| One terminal | `export ORBIT_HANDOFF_CEILING=2x` · `export ORBIT_HANDOFF_MIDTURN=block` | `=off` | `cosmos-orbit context` |
+
+Precedence, as for offload: this session → the terminal → every session → built in. `reset` removes a value at its
+scope. A hand-edited value the file cannot hold is ignored and named by `cosmos-orbit context`.
+
 Why 350k: replaying 99 real Claude Code sessions from the author's last 14 days (median start 78k,
 median peak 506k) with a handoff at 200k saved 31–51% of cost-equivalent tokens (input ×1, cache
 write ×1.25, cache read ×0.1) whether a fresh session had to re-read 15k or 80k tokens of files; 42

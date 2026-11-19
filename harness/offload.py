@@ -11,7 +11,8 @@ prompt and stop events only, and the ledger still said 185k while one 65-minute 
 
 Settings, winner first: this session (kept in the store, bounded) -> ORBIT_OFFLOAD for one terminal (mode only) ->
 `<home>/settings.json` section "offload" (hand-editable, written by `cosmos-orbit offload ... --global`) -> built in
-(off, 150k, Claude Code: haiku). Nothing here calls a model, and the hook changes no handoff state.
+(off, 150k, Claude Code: haiku). Nothing here calls a model, and offload changes no handoff state; the mid-turn notice
+that shares the hook (midturn.py) records the measurement it acts on.
 """
 import collections
 import json
@@ -139,10 +140,13 @@ def user_patterns(section):
     return [p for p in patterns if isinstance(p, str)] if isinstance(patterns, list) else []
 
 
-def session_override(store, session):
-    if not session:
+SESSION_TABLES = ('offload_sessions', 'handoff_sessions')  # handoff_sessions: continuity's mid-turn notice and ceiling
+
+
+def session_override(store, session, table='offload_sessions'):
+    if not session or table not in SESSION_TABLES:
         return {}
-    row = store.db.execute('SELECT data FROM offload_sessions WHERE session=?', (session,)).fetchone()
+    row = store.db.execute('SELECT data FROM %s WHERE session=?' % table, (session,)).fetchone()
     try:
         data = json.loads(row[0]) if row else {}
     except ValueError:
@@ -150,19 +154,21 @@ def session_override(store, session):
     return data if isinstance(data, dict) else {}
 
 
-def _write_session(store, session, data):
+def _write_session(store, session, data, table='offload_sessions'):
     """Session overrides are ephemeral: the newest SESSION_KEEP within SESSION_DAYS are kept, nothing more."""
     from datetime import datetime, timedelta, timezone
     from .store import now
+    if table not in SESSION_TABLES:
+        raise ValueError('Unknown session table: ' + str(table))
     cutoff = (datetime.now(timezone.utc) - timedelta(days=SESSION_DAYS)).isoformat()
     with store.db:
         if data:
-            store.db.execute('INSERT OR REPLACE INTO offload_sessions VALUES(?,?,?)',
+            store.db.execute('INSERT OR REPLACE INTO %s VALUES(?,?,?)' % table,
                              (session, json.dumps(data, sort_keys=True), now()))
         else:
-            store.db.execute('DELETE FROM offload_sessions WHERE session=?', (session,))
-        store.db.execute('DELETE FROM offload_sessions WHERE at<? OR session NOT IN '
-                         '(SELECT session FROM offload_sessions ORDER BY at DESC LIMIT ?)', (cutoff, SESSION_KEEP))
+            store.db.execute('DELETE FROM %s WHERE session=?' % table, (session,))
+        store.db.execute('DELETE FROM %s WHERE at<? OR session NOT IN '
+                         '(SELECT session FROM %s ORDER BY at DESC LIMIT ?)' % (table, table), (cutoff, SESSION_KEEP))
 
 
 def effective(store, session=None, host=None, environ=None, data=None):
@@ -777,20 +783,38 @@ def message(store, tokens, settings):
 
 
 def pre_tool_main(home, host, stdin=None):
-    """`cosmos-orbit hook pre-tool`: stdin carries the event, stdout one JSON object or nothing. Exit 0 always."""
+    """`cosmos-orbit hook pre-tool`: stdin carries the event, stdout one JSON object or nothing. Exit 0 always.
+
+    Two independent answers share the hook: offload's (a suite run in a large conversation) and the mid-turn notice
+    (midturn.py: the conversation is past its handoff point). One failing never silences the other."""
     stdin = sys.stdin if stdin is None else stdin
     home = Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()
-    try:
-        raw = stdin.read(400000) if not stdin.isatty() else ''
-        payload = json.loads(raw) if raw.strip() else {}
-        output = decide(home, host, payload if isinstance(payload, dict) else {})
-        if output:
-            print(json.dumps(output, ensure_ascii=False))
-    except Exception as error:  # noqa: BLE001 - a hook must not break the user's session
+
+    def logged(error):
         try:
             from .store import now
             with (home / 'hooks.log').open('a', encoding='utf-8') as handle:
                 handle.write(now() + ' pre-tool error: ' + repr(error)[:300] + '\n')
         except OSError:
             pass
+
+    try:
+        raw = stdin.read(400000) if not stdin.isatty() else ''
+        payload = json.loads(raw) if raw.strip() else {}
+        payload = payload if isinstance(payload, dict) else {}
+    except Exception as error:  # noqa: BLE001 - a hook must not break the user's session
+        logged(error)
+        return 0
+    output = None
+    try:
+        output = decide(home, host, payload)
+    except Exception as error:  # noqa: BLE001
+        logged(error)
+    try:
+        from .midturn import decide as midturn_decide, merge
+        output = merge(output, midturn_decide(home, host, payload))
+    except Exception as error:  # noqa: BLE001
+        logged(error)
+    if output:
+        print(json.dumps(output, ensure_ascii=False))
     return 0

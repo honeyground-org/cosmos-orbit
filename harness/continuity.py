@@ -251,6 +251,238 @@ def set_handoff_mode(store, mode):
     return mode
 
 
+# ---------------------------------------------------------------- the mid-turn notice and the ceiling
+#
+# Measured 2026-11-18 (task 631fe2b8b0cf, Claude Code session c5c75fe8): the handoff point was 300k and the session
+# was handed over at 677k. Orbit measured at prompt and Stop hooks only, and one 65-minute turn took the conversation
+# from 185k (15:55) to 511k (17:00) unseen; its checkpoint recorded the stale 185k. After that every opportunity was
+# deferred by a rule that has its own reason - 17:00 a question, 17:03 the review, 17:13 an unsure prompt, 17:36 and
+# 17:37 prompts typed mid-turn, 17:41 an unprocessed requirement change at Stop, 17:52 the review again - until the
+# first idle request that was not a question handed over at 18:17 in one second. Every gate postponed; none closed.
+# Two answers, each with an off switch: the tool-call hook measures during a turn (midturn.py), and past the ceiling
+# (built in: 1.5 x the session's handoff point, 300k -> 450k) no gate defers the handoff any more.
+
+LIMIT_KEYS = ('midturn', 'ceiling')
+MIDTURN_MODES = ('off', 'advise', 'block')     # block: past the ceiling a shell call other than Orbit's own is refused
+BUILT_IN_LIMITS = {'midturn': 'advise', 'ceiling': '1.5x'}
+LIMIT_ENV = {'midturn': 'ORBIT_HANDOFF_MIDTURN', 'ceiling': 'ORBIT_HANDOFF_CEILING'}
+LIMIT_TABLE = 'handoff_sessions'
+CEILING_KINDS = ('question', 'unsure')          # handed over too past the ceiling, with the end of the last answer
+
+
+def midturn_value(value):
+    """'off' | 'advise' | 'block' (on = advise), or None when it is not one."""
+    if not isinstance(value, str):
+        return None
+    value = {'on': 'advise'}.get(value.strip().lower(), value.strip().lower())
+    return value if value in MIDTURN_MODES else None
+
+
+def ceiling_value(value):
+    """('factor', 1.5) | ('tokens', 450000) | ('off', 0), or None when unreadable. A factor below 1 is not a ceiling."""
+    if value is None or isinstance(value, (bool, list, dict)):
+        return None
+    text = str(value).strip().lower().replace(',', '').replace('_', '')
+    if text in ('off', 'no', 'false', '0'):
+        return ('off', 0)
+    if text in ('on', 'yes', 'true', 'default'):
+        return ('factor', 1.5)
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)\s*x', text)
+    if match:
+        factor = float(match[1])
+        return ('factor', factor) if 1.0 <= factor <= 10.0 else None
+    try:
+        tokens = parse_tokens(text)
+    except ValueError:
+        return None
+    return ('tokens', tokens) if tokens else ('off', 0)
+
+
+def ceiling_text(spec):
+    if not spec or spec[0] == 'off':
+        return 'off'
+    return ('%gx' % spec[1]) if spec[0] == 'factor' else '%dk' % round(spec[1] / 1000)
+
+
+def limits_effective(store, session=None, environ=None, data=None):
+    """The mid-turn mode and the ceiling that apply to a session, each with where it came from. Winner first, as for
+    offload: this session (`cosmos-orbit context midturn|ceiling … --session`) → ORBIT_HANDOFF_MIDTURN /
+    ORBIT_HANDOFF_CEILING → settings.json "handoff" (`--global`) → built in (advise, 1.5x)."""
+    from .offload import session_override
+    env = os.environ if environ is None else environ
+    section = _section(read_settings(store)[0] if data is None else data)
+    override = session_override(store, session, LIMIT_TABLE)
+    result = {}
+    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value)):
+        candidates = [(read(override.get(key)), 'session'), (read(env.get(LIMIT_ENV[key]) or None), 'environment'),
+                      (read(section.get(key)), 'global'), (read(BUILT_IN_LIMITS[key]), 'built-in')]
+        result[key], result[key + '_source'] = next((v, s) for v, s in candidates if v is not None)
+    return result
+
+
+def ceiling_tokens(limit, spec):
+    """The ceiling for a session whose handoff point is `limit`; 0 when off. An absolute ceiling below the point is
+    the point itself: past it nothing waits."""
+    if not limit or not spec or spec[0] == 'off':
+        return 0
+    if spec[0] == 'factor':
+        return int(limit * spec[1])
+    return max(int(spec[1]), int(limit))
+
+
+def set_limit(store, key, value, scope, session=None):
+    """Write the mid-turn mode or the ceiling at one scope ('session' or 'global'); 'reset' removes it there."""
+    if key not in LIMIT_KEYS:
+        raise ValueError('The setting is midturn or ceiling')
+    reset = str(value).strip().lower() == 'reset'
+    if not reset:
+        if key == 'midturn':
+            if midturn_value(value) is None:
+                raise ValueError('The mid-turn notice is on, off, advise or block')
+            value = midturn_value(value)
+        else:
+            spec = ceiling_value(value)
+            if spec is None:
+                raise ValueError('Give the ceiling as a factor of the handoff point (1.5x, at least 1x), a token '
+                                 'count of at least 20k (450k), or off')
+            value = ceiling_text(spec) if spec[0] != 'tokens' else spec[1]
+
+    def change(section):
+        if reset:
+            section.pop(key, None)
+        else:
+            section[key] = value
+    if scope == 'global':
+        update_settings(store, change)
+        return {'scope': 'global', key: None if reset else value, 'settings_file': str(settings_path(store))}
+    if not session:
+        raise ValueError('No session here; add --global, or --session ID')
+    from .offload import _write_session, session_override
+    data = dict(session_override(store, session, LIMIT_TABLE))
+    change(data)
+    _write_session(store, session, data, LIMIT_TABLE)
+    return {'scope': 'session', 'session': session, key: None if reset else value}
+
+
+def limits_view(store, session=None, how=None, host=None, root=None, environ=None):
+    """What `cosmos-orbit context` shows for the two: what applies here, from where, at every scope."""
+    from .offload import session_override
+    env = os.environ if environ is None else environ
+    data, _ = read_settings(store)
+    section = _section(data)
+    here = limits_effective(store, session, env, data)
+    override = session_override(store, session, LIMIT_TABLE) if session else {}
+    point = None
+    if root is not None:
+        threshold, _ = resolve_threshold(store, root, host)
+        point = host_cap(threshold, host, CODEX_WINDOW if host == 'codex' else None)
+    return {'midturn': {'here': here['midturn'], 'source': here['midturn_source'], 'session': override.get('midturn'),
+                        'environment': env.get(LIMIT_ENV['midturn']), 'global': section.get('midturn'),
+                        'built_in': BUILT_IN_LIMITS['midturn'],
+                        'set': 'cosmos-orbit context midturn on|off|block|reset [--session [ID] | --global]'},
+            'ceiling': {'here': ceiling_text(here['ceiling']), 'source': here['ceiling_source'],
+                        'tokens': ceiling_tokens(point, here['ceiling']) if point else None, 'point': point,
+                        'session': override.get('ceiling'), 'environment': env.get(LIMIT_ENV['ceiling']),
+                        'global': section.get('ceiling'), 'built_in': BUILT_IN_LIMITS['ceiling'],
+                        'set': 'cosmos-orbit context ceiling 1.5x|450k|off|reset [--session [ID] | --global]'},
+            'session': session, 'session_from': how}
+
+
+def limit_problems(section, environ=None):
+    env = os.environ if environ is None else environ
+    problems = []
+    if section.get('midturn') is not None and midturn_value(section.get('midturn')) is None:
+        problems.append('handoff.midturn = %r is not on, off, advise or block (ignored)' % (section.get('midturn'),))
+    if section.get('ceiling') is not None and ceiling_value(section.get('ceiling')) is None:
+        problems.append('handoff.ceiling = %r is not a factor (1.5x), a token count or off (ignored)' % (section.get('ceiling'),))
+    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value)):
+        if env.get(LIMIT_ENV[key]) and read(env.get(LIMIT_ENV[key])) is None:
+            problems.append('%s=%r is not readable (ignored)' % (LIMIT_ENV[key], env.get(LIMIT_ENV[key])))
+    return problems
+
+
+def past_ceiling(store, data, session):
+    """True when this session's conversation, as last measured, is at or past its ceiling. The measurement must be
+    this session's and newer than its last compaction."""
+    live = data.get('context_live') or {}
+    if not session or live.get('session') != session or measured_before_compaction(live):
+        return False
+    tokens, limit = live.get('tokens'), live.get('limit')
+    if not isinstance(tokens, int) or not limit:
+        return False
+    ceiling = ceiling_tokens(limit, limits_effective(store, session)['ceiling'])
+    return bool(ceiling) and tokens >= ceiling
+
+
+def ceiling_checkpoint(store, task, trigger):
+    """Past the ceiling a missing checkpoint does not hold the handoff: Orbit writes one from the ledger, as before a
+    native compaction (auto_checkpoint), so the handoff state becomes checkpointed. Returns the fresh task."""
+    data = task['data']
+    executor = data.get('executor_result') or {}
+    remaining = [r for r in executor.get('remaining') or [] if r.strip()]
+    prompts = data.get('prompts') or []
+    next_step = ('; '.join(remaining) if remaining else
+                 'Continue the latest request: ' + (prompts[-1]['text'] if prompts else data.get('goal') or task['prompt']))
+    record_checkpoint(store, task['id'], next_step, by='orbit', kind='auto',
+                      notes='Written by Orbit from the ledger (%s): the conversation was past its handoff ceiling and the '
+                            'executor had written no checkpoint for this handoff.' % trigger)
+    return store.get(task['id'])
+
+
+def ceiling_takes_over(store, task):
+    """True when, past the ceiling, the end of this turn leads to the handoff with nobody typing: auto mode, a host
+    Orbit can clear, a terminal to type into (the supervisor's continue_in_fresh_context) and an open handoff of this
+    session that a Stop can make ready. Gates that would send the session back to work give way only then."""
+    data = task['data']
+    live = data.get('context_live') or {}
+    state = data.get('handoff_state') or {}
+    session = live.get('session')
+    if (handoff_mode(store) != 'auto' or data.get('host') not in ('claude', 'codex') or not session
+            or state.get('session') != session or state.get('state') not in READY_STATES + ASK_STATES):
+        return False
+    if not past_ceiling(store, data, session):
+        return False
+    from . import typist
+    return bool(typist.detect())
+
+
+ANSWER_CHARS = 3000   # the end of the last answer a question carried past the ceiling travels with
+
+
+def last_answer(path, host, limit=ANSWER_CHARS):
+    """The end of the session's last answer, from its own transcript, or None. A question refers to it."""
+    if not path:
+        return None
+    try:
+        from .routes import conversation
+        turns, _ = conversation(path, host, turns=4, size=None)
+    except Exception:  # noqa: BLE001 - the question still travels without it
+        return None
+    for role, text in reversed(turns):
+        if role == 'assistant' and text.strip():
+            text = text.strip()
+            return text if len(text) <= limit else '…' + text[-(limit - 1):]
+    return None
+
+
+def carried_full(data, session):
+    """The whole carried message and the end of the answer it follows, for the session that receives it, once. The
+    brief's CARRIED OVER line is cut at 1200 characters and the brief holds 2400 (attach.BRIEF_LIMIT), so a question
+    carried past the ceiling travels beside the brief: the user's words must never be lost."""
+    carried = data.get('carried_prompt') or {}
+    if not carried.get('ceiling') or not carried.get('text') or not session or carried.get('full_to'):
+        return None
+    if session == carried.get('from_session') or carried.get('consumed_at') or carried.get('served_to') not in (None, session):
+        return None
+    lines = ["[orbit] CARRIED OVER IN FULL - the user's message, word for word, sent just before this fresh context "
+             '(the previous one was past its handoff ceiling):', carried['text']]
+    if carried.get('answer'):
+        lines += ['The end of the previous context\'s last answer, which the message may refer to:', carried['answer']]
+    else:
+        lines.append('(The previous answer could not be read from the transcript; the ledger and the checkpoint hold the work.)')
+    return '\n'.join(lines)
+
+
 def invitation_open(state, at=None):
     """A checkpointed handoff a fresh session may still take: not compacted, not adopted, not expired."""
     if (state or {}).get('state') not in INVITING_STATES:
@@ -282,11 +514,12 @@ def close_on_compaction(data, session):
 CODEX_WINDOW = 258_400  # what Codex reports (measured 2026-11-05); the view shows the point a Codex session gets
 
 
-def threshold_view(store, root, host=None):
+def threshold_view(store, root, host=None, session=None, how=None):
     tokens, source = resolve_threshold(store, root, host)
     data, problem = read_settings(store)
     section = _section(data)
     problems = [problem] if problem else []
+    problems += limit_problems(section)
     projects = {}
     for project, value in _projects(section).items():
         projects[project] = _tokens(value)
@@ -320,7 +553,13 @@ def threshold_view(store, root, host=None):
     if section.get('mode') is not None and section.get('mode') not in MODES:
         problems.append('handoff.mode = %r is not auto or tell (tell applies)' % (section.get('mode'),))
     path = settings_path(store)
+    if session is None:
+        from .offload import here_session
+        session, _, how = here_session(store)
+    limits = limits_view(store, session, how, host or 'claude', root)
     return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0, 'host': host}, 'hosts': hosts,
+            'midturn': limits['midturn'], 'ceiling': limits['ceiling'],
+            'session': {'id': limits['session'], 'from': limits['session_from']},
             'default': default if default is not None else DEFAULT_HANDOFF_AT, 'built_in': DEFAULT_HANDOFF_AT,
             'settings_file': {'path': str(path), 'exists': path.exists(), 'problems': problems},
             'projects': projects, 'min_growth': min_growth(),
@@ -383,6 +622,19 @@ def joined_limit(threshold, live):
     return limit_for_session(threshold, start)
 
 
+def prospective_limit(store, task, session, host, tokens, window=None):
+    """The handoff point observe() would give this session at `tokens`, computed without recording anything: the
+    tool-call hook decides from it whether to speak, and writes to the ledger only when it does."""
+    live = task['data'].get('context_live') or {}
+    threshold, _ = resolve_threshold(store, task['workspace'], host)
+    capped = host_cap(threshold, host, window if window is not None else live.get('window'))
+    if live.get('session') != session:
+        live = {'joined': True, 'start': tokens}           # observe would meet this session now, mid-conversation
+    elif live.get('start') is None or (live.get('tokens') and tokens < live['tokens'] * 0.6):
+        live = dict(live, start=tokens)                    # first size, or a compaction observe would see
+    return joined_limit(capped, live)
+
+
 def limit_for_session(threshold, start):
     """The point at which this session should hand off; 0 when handoff is off."""
     if not threshold:
@@ -401,10 +653,11 @@ def tail_lines(path, limit=TAIL_BYTES):
     return lines[1:] if size > limit else lines
 
 
-def measure_transcript(path):
-    """Latest context size in a Claude Code transcript or a Codex rollout file; None when unknown."""
+def measure_transcript(path, limit=TAIL_BYTES):
+    """Latest context size in a Claude Code transcript or a Codex rollout file; None when unknown. `limit`: how much
+    of the end is read (the tool-call hook tries a short end first, midturn.py)."""
     try:
-        lines = tail_lines(path)
+        lines = tail_lines(path, limit)
     except OSError:
         return None
     for line in reversed(lines):
@@ -633,7 +886,11 @@ def auto_checkpoint(store, task, trigger):
                              by='orbit', kind='auto')
 
 
-def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=None, spawn=None, during_turn=False):
+ASK_STATES = ('recommended', 'asked')  # past the point, no checkpoint for this handoff yet
+
+
+def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=None, spawn=None, during_turn=False,
+                 transcript=None):
     """Auto mode: the user's next request after a checkpointed handoff starts the fresh context by itself.
 
     The request is carried in the ledger, the prompt is blocked here, and a detached typist types /clear and one
@@ -643,19 +900,30 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
     Never during a turn: a prompt typed while the session works goes into that turn, and keys typed then wait in
     the host's input queue (2026-11-05: the blocked request was lost to that turn and the queued /clear ran four
     minutes later, after the typist had given up). The handoff waits for the first request after the turn ends.
+
+    Past the ceiling (past_ceiling) the first prompt at an idle input line hands off whatever it is: a question or an
+    unsure message travels with the end of the last answer it may refer to (carried_full gives both to the fresh
+    session beside its brief), and a missing checkpoint no longer holds it: Orbit writes one from the ledger. 2026-11-18:
+    a question at 17:00 and an unsure prompt at 17:13 were answered in a 511k+ context, and the session reached 677k.
+    During a turn it still waits (the 2026-11-05 rule above): the tool-call notice (midturn.py) ends that turn.
     Returns the hook reply, or None to let the prompt through."""
-    if closed or host not in ('claude', 'codex') or kind not in ('requirement', 'trivial') or handoff_mode(store) != 'auto':
+    if closed or host not in ('claude', 'codex') or handoff_mode(store) != 'auto':
         return None
     state = task['data'].get('handoff_state') or {}
-    if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
+    if state.get('session') != session:
+        return None
+    ceiling = past_ceiling(store, task['data'], session)
+    if kind not in ('requirement', 'trivial') and not (ceiling and kind in CEILING_KINDS):
+        return None
+    if state.get('state') not in READY_STATES and not (ceiling and state.get('state') in ASK_STATES):
         return None
     if during_turn:
         try:
             with store.lock('task:' + task['id']):
                 current = store.get(task['id'])
                 store.save(current, current['status'], 'handoff_deferred',
-                           {'reason': 'the prompt arrived during a turn; the next request after it hands off',
-                            'session': session, 'layer': 'context'})
+                           dict({'reason': 'the prompt arrived during a turn; the next request after it hands off',
+                                 'session': session, 'layer': 'context'}, **({'ceiling': True} if ceiling else {})))
         except (RuntimeError, ValueError):
             pass
         return None
@@ -664,21 +932,32 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
     mod = host == 'claude' and mod_present(store, session)
     if not terminal and not mod:
         return None
+    if ceiling and state.get('state') in ASK_STATES:
+        task = ceiling_checkpoint(store, task, 'prompt')
+    answer = last_answer(transcript, host) if ceiling else None
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
         data = task['data']
         state = data.get('handoff_state') or {}
-        if state.get('session') != session or state.get('state') not in ('checkpointed', 'told'):
+        if state.get('session') != session or state.get('state') not in READY_STATES:
             return None
         data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
+        if ceiling:
+            data['carried_prompt'].update(ceiling=True, kind=kind, answer=answer)
         state.update(state='auto', auto_at=now(), panel=(terminal or {}).get('target'))  # only this pane's session takes it
-        store.save(task, task['status'], 'handoff_auto', {'terminal': (terminal or {}).get('kind'), 'mod': mod,
-                                                          'layer': 'context'})
+        store.save(task, task['status'], 'handoff_auto', dict({'terminal': (terminal or {}).get('kind'), 'mod': mod,
+                                                               'layer': 'context'},
+                                                              **({'ceiling': True, 'kind': kind} if ceiling else {})))
     steps = typist.handoff_steps(host, typist.clear_presses(text), expect=text.split('\n')[0][:60],
                                  mod_grace=MOD_GRACE_SECONDS if mod else 0)
     (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'])
     # Codex keeps its prompt hook's block (measured 0.166); its typist confirms the pane by the block on screen
     live = data.get('context_live') or {}
+    if ceiling:
+        return {'decision': 'block', 'reason': (
+            HANDOFF_PREFIX + ' (context %s tokens, past its ceiling; handoff point %s). Your message is carried over '
+            'word for word with the end of the last answer, and is answered there by itself; there is nothing to retype.'
+            % (_k(live.get('tokens')), _k(state.get('limit'))))}
     return {'decision': 'block', 'reason': (
         HANDOFF_PREFIX + ' (context %s tokens >= handoff point %s). Your request is carried over '
         'and runs there by itself; there is nothing to retype.' % (_k(live.get('tokens')), _k(state.get('limit'))))}
@@ -916,11 +1195,12 @@ def release_adoption(store, task_id, session, root):
     return True
 
 
-def mark_carried_served(store, task, session, turn=False):
+def mark_carried_served(store, task, session, turn=False, full=False):
     """The session has received the carried request in its brief: no other session receives it again. `turn`: it
-    arrived with a prompt, so that prompt's turn is the one that does it (see carried_turn)."""
+    arrived with a prompt, so that prompt's turn is the one that does it (see carried_turn). `full`: the whole message
+    went with it (carried_full), which is given once."""
     carried = task['data'].get('carried_prompt') or {}
-    if not carried.get('text') or not session or carried.get('served_to'):
+    if not carried.get('text') or not session or (carried.get('served_to') and not full):
         return
     if session == carried.get('from_session') and not held_back(task['data'], session):
         return
@@ -928,11 +1208,20 @@ def mark_carried_served(store, task, session, turn=False):
         with store.lock('task:' + task['id']):
             current = store.get(task['id'])
             row = current['data'].get('carried_prompt') or {}
-            if row.get('at') == carried.get('at') and not row.get('served_to'):
+            if row.get('at') != carried.get('at'):
+                return
+            changed = False
+            if full and row.get('served_to') in (None, session) and not row.get('full_to'):
+                row['full_to'] = session
+                changed = True
+            if not row.get('served_to'):
                 row['served_to'] = session
                 if turn:
                     row['turn_at'] = now()
-                store.save(current, current['status'], 'carried_prompt_served', {'session': session, 'layer': 'context'})
+                changed = True
+            if changed:
+                store.save(current, current['status'], 'carried_prompt_served',
+                           dict({'session': session, 'layer': 'context'}, **({'full': True} if full else {})))
     except (RuntimeError, ValueError):
         pass
 
@@ -1000,6 +1289,11 @@ def handoff_lines(data, prefix, tid, closed=False, digest=False):
     if carried.get('consumed_at') and not digest:
         carried = {}                                     # the turn that did it is over (carried_turn)
     if carried.get('text') and not closed and current and current != carried.get('from_session') \
+            and carried.get('served_to') in (None, current) and carried.get('ceiling'):
+        lines.append('CARRIED OVER (the message the user sent just before this fresh context, past the handoff ceiling; '
+                     'it may refer to the previous answer - both follow in full after this brief; answer or do it now): '
+                     + _one(carried['text'], 1200))
+    elif carried.get('text') and not closed and current and current != carried.get('from_session') \
             and carried.get('served_to') in (None, current):
         lines.append('CARRIED OVER (the request the user made just before this fresh context; do it now): '
                      + _one(carried['text'], 1200))

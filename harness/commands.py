@@ -13,6 +13,12 @@ GROUPS = [
          'Mid-task handoff point, same three scopes as on/off (built-in 350k). Stored in <home>/settings.json (section "handoff"): '
          'the command writes it, a hand edit applies at the next hook event, reset removes a stored point. Without a value: '
          'the point, where it came from, the settings file and the live context here.'),
+        ('cosmos-orbit context midturn on|off|block|reset   ·   cosmos-orbit context ceiling 1.5x|450k|off|reset   [--session [ID] | --global]',
+         'During a turn: at each shell call past the handoff point the session is told once (again every 50k, firmer at the '
+         'ceiling) to finish the step, record a checkpoint and end the turn (midturn, built in on; block = past the ceiling '
+         'only Orbit\'s own commands run). Past the ceiling (built in 1.5x the point: 300k -> 450k) no gate defers the '
+         'handoff: a question or an unsure message is handed over too, with the end of the last answer. This session '
+         '(default) or --global; ORBIT_HANDOFF_MIDTURN / ORBIT_HANDOFF_CEILING for one terminal; shown by cosmos-orbit context.'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',

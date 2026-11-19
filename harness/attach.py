@@ -1757,10 +1757,12 @@ def _handle(store, event, payload, host):
             supervision.reset_turn(store, task['id'], session)
         except (RuntimeError, ValueError):
             pass
-        brief = serve_brief(store, store.get(task['id']), 'session-start', session)
-        continuity.mark_carried_served(store, task, session)
+        current = store.get(task['id'])
+        brief = serve_brief(store, current, 'session-start', session)
+        full = continuity.carried_full(current['data'], session)  # a message carried past the ceiling, whole
+        continuity.mark_carried_served(store, task, session, full=bool(full))
         continuity.resume_carried(store, store.get(task['id']), session, host)  # no typist waits after a failed one
-        return _context('SessionStart', brief)
+        return _context('SessionStart', '\n'.join(part for part in (brief, full) if part))
     if event == 'pre-compact':
         if task is None or task['status'] in CLOSED:
             return None
@@ -1883,12 +1885,16 @@ def _handle(store, event, payload, host):
                 hook_log(store, 'prompt not recorded (task busy) ' + task['id'])
         task = watched(task)
         handed = continuity.auto_handoff(store, task, session, text, classify(text, learned(store)), host,
-                                         closed=task['status'] in CLOSED, during_turn=during_turn)
+                                         closed=task['status'] in CLOSED, during_turn=during_turn,
+                                         transcript=payload.get('transcript_path'))
         if handed:
             return refused(handed)
         task = continuity.carried_turn(store, task, session)
         brief = serve_brief(store, task, 'prompt', session)
-        continuity.mark_carried_served(store, task, session, turn=True)
+        full = continuity.carried_full(task['data'], session)
+        continuity.mark_carried_served(store, task, session, turn=True, full=bool(full))
+        if full:
+            brief = (brief + '\n' if brief else '') + full
         if suggested:
             brief = (brief + '\n' if brief else '') + suggested  # one line, never a link
         return _context('UserPromptSubmit', brief)
@@ -2010,6 +2016,15 @@ def stop_decision(store, task, payload):
             % (_one_line(task['prompt'], 200), prefix, task['id'], prefix, task['id']))}
     pending = data.get('requirements_pending')
     if pending and not pending.get('asked') and not pending.get('unsure') and task['status'] not in CLOSED:
+        from .continuity import ceiling_takes_over
+        if ceiling_takes_over(store, task):
+            # 2026-11-18 17:41: a change typed mid-turn at 500k+ sent the session back to work in that context. Past the
+            # ceiling the turn ends into the handoff instead; the change stays pending (not asked), so the fresh
+            # session's brief shows it and its own first Stop asks for the revision - nothing is lost or skipped.
+            with store.db:
+                store._event(task['id'], 'requirement_to_fresh_context', {'rev': pending.get('rev'), 'layer': 'control',
+                             'tokens': (data.get('context_live') or {}).get('tokens')})
+            return None
         try:
             with store.lock('task:' + task['id']):
                 task = store.get(task['id'])
@@ -2057,6 +2072,21 @@ def context_decision(store, task, settle=False, message_only=False):
         return None
     prefix = orbit_command(store)
     closed = task['status'] in CLOSED or settle
+    if state.get('state') == 'asked':
+        # Asked once and no checkpoint came, so nothing tells the user and no handoff starts: an open state with no
+        # end (2026-11-18 analysis). Below the ceiling that stays as it was; past it Orbit writes the checkpoint from
+        # the ledger, or after a claim (the ledger holds the state) tells at once, as for a recommendation.
+        from .continuity import ceiling_checkpoint, past_ceiling
+        if past_ceiling(store, data, live.get('session')):
+            if closed:
+                state = dict(state, state='recommended')
+            else:
+                try:
+                    task = ceiling_checkpoint(store, task, 'stop')
+                except (RuntimeError, ValueError):
+                    return None
+                data = task['data']
+                state = data.get('handoff_state') or {}
     if state.get('state') == 'recommended' and not closed:
         from .consolidate import request_text
         reply = {'decision': 'block', 'reason': (
