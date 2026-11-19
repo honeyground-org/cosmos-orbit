@@ -49,7 +49,14 @@ def assess(answer, done, closed_ids=()):
                    or not isinstance(row['id'], str) for row in rows)
             or len({row['id'] for row in rows}) != len(expected)
             or {row['id'] for row in rows} != set(expected)):
-        raise ValueError('Verifier must assess every completion ID exactly once')
+        # Which IDs, so the stop says what the reviewer left out (2026-11-19: it skipped 24 withdrawals awaiting
+        # judgement, and all anyone saw was the bare sentence below).
+        given = [row.get('id') for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        named = [('missing', [i for i in expected if i not in given]),
+                 ('unexpected', sorted({str(i) for i in given if i not in expected})),
+                 ('repeated', sorted({str(i) for i in given if given.count(i) > 1}))]
+        detail = '; '.join('%s: %s' % (label, ', '.join(ids[:30]) + (' …' if len(ids) > 30 else '')) for label, ids in named if ids)
+        raise ValueError('Verifier must assess every completion ID exactly once' + (' (%s)' % detail if detail else ''))
     result = copy.deepcopy(answer)
     for row in result['items']:
         if (row['status'] not in ('met', 'unmet', 'unclear')
@@ -417,14 +424,18 @@ def evaluate(engine, task, lease_fds=()):
         'State material limits in the evidence and never claim exhaustive mathematical correctness. '
         'The task list changes while the work runs; the goal does not. objective is the current one-line statement of '
         'what is being completed; it never narrows the original request or the corrections. closed lists items earlier '
-        'reviews found met (approved withdrawals too): do not reassess them, but when you observe that a closed met '
-        'item no longer holds, put it in reopen with that observation. done items whose text starts with WITHDRAWN '
+        'reviews found met and withdrawals a review already approved: do not reassess those, but when you observe that '
+        'a closed met item no longer holds, put it in reopen with that observation. A withdrawal no review has judged '
+        'yet is in closed too (without approved; read its user_words and because there) and in done as WITHDRAWN: it '
+        'is a done ID, so it gets a row in items like every other. done items whose text starts with WITHDRAWN '
         'were dropped or superseded by the executor: mark met only if the user\'s own words (user_words in closed) '
         'withdrew it or its replacement fully covers it, otherwise unmet — the obligation returns. '
         'observations.host_observations are commands Orbit itself ran on the host when the executor recorded evidence: '
         'the output is what that command printed at that time, but the executor chose the command, so judge whether '
         'it actually tests the item. '
-        'Reply in the user request language.\n' + json.dumps(payload, ensure_ascii=False))
+        + ('items must hold exactly these %d IDs, each once (a reply that leaves one out is rejected and the review is '
+           'lost): %s. ' % (len(done), ', '.join(item['id'] for item in done)))
+        + 'Reply in the user request language.\n' + json.dumps(payload, ensure_ascii=False))
     alias = task['provider'] + ':verifier'
     saved = recovery.owned_record(store, task)
     reused = False
@@ -466,7 +477,10 @@ def evaluate(engine, task, lease_fds=()):
     try:
         result, outcome = assess(answer, done, {d['id'] for d in requirements.closed_items(task['data'], 'met')})
     except ValueError as error:
-        if why:
+        # Only a moved request or failing checks explain away a reply that cannot be read. Files moving in a shared
+        # folder do not (see below): observed 2026-11-19, two reviews that left out the withdrawals were reported as
+        # "the request changed during the review", and the executor was told to claim again into the same rejection.
+        if why in ('request', 'checks'):
             raise ChangedDuringReview(why) from error
         task['data']['reason_code'] = 'verifier_rejected'
         store.save(task, 'verifying', 'verifier_rejected',
