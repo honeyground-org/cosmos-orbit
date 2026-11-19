@@ -559,6 +559,17 @@ additions, each with its own off switch:
   waits for a running review, which holds the task for its whole run, so a fresh session could not take the task
   over before it ends (after the verdict, unfinished work hands off at once, as before).
 
+- **The name stays (`title`, on by default; Claude Code).** A handoff starts a new session: `/clear` gives it a new
+  session id, and Claude Code names a session after its first prompt and shows the name as the terminal's title (cmux
+  puts it on the tab). That first prompt is the line Orbit submits, so the fresh session used to be called
+  "Orbit 이전 요청 이어서" whatever the pane was called before (measured 2026-11-19: 11 of the 14 latest sessions of
+  one folder). Now the prompt hook answers that line with the name the leaving session had — the title the user gave
+  it (`/rename`) or an earlier handoff carried, else the one Claude Code generated from the user's own first prompt —
+  and Claude Code keeps it as the session's title. A session that began with Orbit's line and was never named has
+  nothing to hand on; the sessions the task had before it are asked instead. Nothing found: Claude Code names the
+  session as before, and one `/rename` settles it for every handoff after. `cosmos-orbit context title off` turns it
+  off (`--session`, `--global`, `ORBIT_HANDOFF_TITLE=off`). Codex takes no title from a hook.
+
 | Scope | Set | Off | Show |
 |---|---|---|---|
 | This session (default) | `cosmos-orbit context ceiling 500k` · `cosmos-orbit context midturn block` | `cosmos-orbit context ceiling off` · `cosmos-orbit context midturn off` | `cosmos-orbit context` |
