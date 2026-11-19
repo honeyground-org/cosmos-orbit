@@ -852,9 +852,10 @@ def _texts(content):
                      if isinstance(p, dict) and p.get('type') in ('text', 'Text', 'input_text', 'output_text')).strip()
 
 
-def conversation(path, host, turns=TURNS):
+def conversation(path, host, turns=TURNS, size=TURN_CHARS):
     """(turns, files) of a session from its own transcript: the last `turns` messages [[role, text]] the user and the
-    model exchanged (oldest first, consecutive ones of one side joined) and the files the session changed."""
+    model exchanged (oldest first, consecutive ones of one side joined, each cut to `size`, None: whole) and the files
+    the session changed."""
     from .requirements import classify
     said, files = [], []
 
@@ -919,7 +920,7 @@ def conversation(path, host, turns=TURNS):
             for changed in re.findall(r'^\*\*\* (?:Add|Update|Delete) File: (.+)$',
                                       str(payload.get('input') or payload.get('arguments') or ''), re.M):
                 touched(changed.strip())
-    return [[role, _cut(text)] for role, text in said[-turns:]], files[-FILES:]
+    return [[role, _cut(text, size) if size else text] for role, text in said[-turns:]], files[-FILES:]
 
 
 def make_capsule(store, session, host, to_route, model, state, task, transcript, cwd, at=None, environ=None,
