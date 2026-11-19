@@ -262,10 +262,10 @@ def set_handoff_mode(store, mode):
 # Two answers, each with an off switch: the tool-call hook measures during a turn (midturn.py), and past the ceiling
 # (built in: 1.5 x the session's handoff point, 300k -> 450k) no gate defers the handoff any more.
 
-LIMIT_KEYS = ('midturn', 'ceiling')
+LIMIT_KEYS = ('midturn', 'ceiling', 'title')
 MIDTURN_MODES = ('off', 'advise', 'block')     # block: past the ceiling a shell call other than Orbit's own is refused
-BUILT_IN_LIMITS = {'midturn': 'advise', 'ceiling': '1.5x'}
-LIMIT_ENV = {'midturn': 'ORBIT_HANDOFF_MIDTURN', 'ceiling': 'ORBIT_HANDOFF_CEILING'}
+BUILT_IN_LIMITS = {'midturn': 'advise', 'ceiling': '1.5x', 'title': 'keep'}   # title: title.py
+LIMIT_ENV = {'midturn': 'ORBIT_HANDOFF_MIDTURN', 'ceiling': 'ORBIT_HANDOFF_CEILING', 'title': 'ORBIT_HANDOFF_TITLE'}
 LIMIT_TABLE = 'handoff_sessions'
 CEILING_KINDS = ('question', 'unsure')          # handed over too past the ceiling, with the end of the last answer
 
@@ -305,15 +305,17 @@ def ceiling_text(spec):
 
 
 def limits_effective(store, session=None, environ=None, data=None):
-    """The mid-turn mode and the ceiling that apply to a session, each with where it came from. Winner first, as for
-    offload: this session (`cosmos-orbit context midturn|ceiling … --session`) → ORBIT_HANDOFF_MIDTURN /
-    ORBIT_HANDOFF_CEILING → settings.json "handoff" (`--global`) → built in (advise, 1.5x)."""
+    """The mid-turn mode, the ceiling and whether a fresh session keeps the name, as they apply to a session, each
+    with where it came from. Winner first, as for offload: this session (`cosmos-orbit context midturn|ceiling|title …
+    --session`) → ORBIT_HANDOFF_MIDTURN / ORBIT_HANDOFF_CEILING / ORBIT_HANDOFF_TITLE → settings.json "handoff"
+    (`--global`) → built in (advise, 1.5x, keep)."""
     from .offload import session_override
+    from .title import mode_value as title_value
     env = os.environ if environ is None else environ
     section = _section(read_settings(store)[0] if data is None else data)
     override = session_override(store, session, LIMIT_TABLE)
     result = {}
-    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value)):
+    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value), ('title', title_value)):
         candidates = [(read(override.get(key)), 'session'), (read(env.get(LIMIT_ENV[key]) or None), 'environment'),
                       (read(section.get(key)), 'global'), (read(BUILT_IN_LIMITS[key]), 'built-in')]
         result[key], result[key + '_source'] = next((v, s) for v, s in candidates if v is not None)
@@ -331,15 +333,21 @@ def ceiling_tokens(limit, spec):
 
 
 def set_limit(store, key, value, scope, session=None):
-    """Write the mid-turn mode or the ceiling at one scope ('session' or 'global'); 'reset' removes it there."""
+    """Write the mid-turn mode, the ceiling or the title setting at one scope ('session' or 'global'); 'reset'
+    removes it there."""
     if key not in LIMIT_KEYS:
-        raise ValueError('The setting is midturn or ceiling')
+        raise ValueError('The setting is midturn, ceiling or title')
     reset = str(value).strip().lower() == 'reset'
     if not reset:
         if key == 'midturn':
             if midturn_value(value) is None:
                 raise ValueError('The mid-turn notice is on, off, advise or block')
             value = midturn_value(value)
+        elif key == 'title':
+            from .title import mode_value as title_value
+            if title_value(value) is None:
+                raise ValueError('The title setting is keep (on) or off')
+            value = title_value(value)
         else:
             spec = ceiling_value(value)
             if spec is None:
@@ -385,6 +393,10 @@ def limits_view(store, session=None, how=None, host=None, root=None, environ=Non
                         'session': override.get('ceiling'), 'environment': env.get(LIMIT_ENV['ceiling']),
                         'global': section.get('ceiling'), 'built_in': BUILT_IN_LIMITS['ceiling'],
                         'set': 'cosmos-orbit context ceiling 1.5x|450k|off|reset [--session [ID] | --global]'},
+            'title': {'here': here['title'], 'source': here['title_source'], 'session': override.get('title'),
+                      'environment': env.get(LIMIT_ENV['title']), 'global': section.get('title'),
+                      'built_in': BUILT_IN_LIMITS['title'],
+                      'set': 'cosmos-orbit context title keep|off|reset [--session [ID] | --global]'},
             'session': session, 'session_from': how}
 
 
@@ -395,7 +407,10 @@ def limit_problems(section, environ=None):
         problems.append('handoff.midturn = %r is not on, off, advise or block (ignored)' % (section.get('midturn'),))
     if section.get('ceiling') is not None and ceiling_value(section.get('ceiling')) is None:
         problems.append('handoff.ceiling = %r is not a factor (1.5x), a token count or off (ignored)' % (section.get('ceiling'),))
-    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value)):
+    from .title import mode_value as title_value
+    if section.get('title') is not None and title_value(section.get('title')) is None:
+        problems.append('handoff.title = %r is not keep or off (ignored)' % (section.get('title'),))
+    for key, read in (('midturn', midturn_value), ('ceiling', ceiling_value), ('title', title_value)):
         if env.get(LIMIT_ENV[key]) and read(env.get(LIMIT_ENV[key])) is None:
             problems.append('%s=%r is not readable (ignored)' % (LIMIT_ENV[key], env.get(LIMIT_ENV[key])))
     return problems
@@ -558,7 +573,7 @@ def threshold_view(store, root, host=None, session=None, how=None):
         session, _, how = here_session(store)
     limits = limits_view(store, session, how, host or 'claude', root)
     return {'here': {'handoff_at': tokens, 'source': source, 'off': tokens == 0, 'host': host}, 'hosts': hosts,
-            'midturn': limits['midturn'], 'ceiling': limits['ceiling'],
+            'midturn': limits['midturn'], 'ceiling': limits['ceiling'], 'title': limits['title'],
             'session': {'id': limits['session'], 'from': limits['session_from']},
             'default': default if default is not None else DEFAULT_HANDOFF_AT, 'built_in': DEFAULT_HANDOFF_AT,
             'settings_file': {'path': str(path), 'exists': path.exists(), 'problems': problems},

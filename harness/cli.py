@@ -217,14 +217,15 @@ def main(argv=None):
     context_cmd = sub.add_parser('context', help='Show or set the mid-task handoff point: 350k | on | off | reset [PATH] [--global | --host claude|codex] · '
                                                  'auto | tell (who types /clear) · background on|off (the Claude Code mod) · '
                                                  'midturn on|off|block|reset (the notice at tool calls past the point) · '
-                                                 'ceiling 1.5x|450k|off|reset (past it no gate defers the handoff), each '
+                                                 'ceiling 1.5x|450k|off|reset (past it no gate defers the handoff) · '
+                                                 'title keep|off|reset (the fresh session keeps the name), each '
                                                  'for this session (default) or --global · '
                                                  'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
     context_cmd.add_argument('--global', dest='global_default', action='store_true')
     context_cmd.add_argument('--session', nargs='?', const='', default=None, metavar='ID',
-                             help='midturn, ceiling: this session (default when one is found here) or the session ID given')
+                             help='midturn, ceiling, title: this session (default when one is found here) or the session ID given')
     context_cmd.add_argument('--host', choices=('claude', 'codex'), default=None,
                              help='the point for every session of one host (built in: claude 300k, codex 250k; Claude Code is capped at 300k, Codex at 80%% of its window)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
@@ -672,7 +673,7 @@ def main(argv=None):
             session, _, how = here_session(store, args.session or None)
             limit_change = None
             if args.value in continuity.LIMIT_KEYS:
-                # `context midturn|ceiling [VALUE] [--session [ID] | --global]`: the scopes of offload's settings
+                # `context midturn|ceiling|title [VALUE] [--session [ID] | --global]`: the scopes of offload's settings
                 if args.global_default and args.session is not None:
                     raise ValueError('Choose --session or --global, not both')
                 if args.path is not None:
@@ -686,7 +687,7 @@ def main(argv=None):
                     limit_change = continuity.set_limit(store, args.value, args.path, scope, session)
                 args.value, args.path = None, None
             elif args.session is not None and args.value is not None:
-                raise ValueError('--session goes with context midturn or context ceiling (or alone, to show that session)')
+                raise ValueError('--session goes with context midturn, ceiling or title (or alone, to show that session)')
             if args.value is not None and args.path is None and ('/' in args.value or Path(args.value).expanduser().is_dir()):
                 args.path, args.value = args.value, None  # `cosmos-orbit context PATH` shows that project
             root = project_root(args.path)[0]

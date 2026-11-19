@@ -19,6 +19,10 @@ GROUPS = [
          'only Orbit\'s own commands run). Past the ceiling (built in 1.5x the point: 300k -> 450k) no gate defers the '
          'handoff: a question or an unsure message is handed over too, with the end of the last answer. This session '
          '(default) or --global; ORBIT_HANDOFF_MIDTURN / ORBIT_HANDOFF_CEILING for one terminal; shown by cosmos-orbit context.'),
+        ('cosmos-orbit context title keep|off|reset [--session [ID] | --global]',
+         'After a handoff the fresh Claude Code session keeps the name of the session it follows (the title the user gave '
+         'it, else the one Claude Code generated from the user\'s first prompt), so the terminal tab is not renamed after '
+         'the line Orbit submits. Built in keep; ORBIT_HANDOFF_TITLE for one terminal.'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',

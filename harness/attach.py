@@ -1605,6 +1605,12 @@ def handle(store, event, payload, host):
                 context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')
                 output = _context('SessionStart' if event == 'session-start' else 'UserPromptSubmit',
                                   '\n'.join(notes) + ('\n' + context if context else ''))
+        if event == 'prompt':
+            try:  # the fresh session of a handoff keeps the name of the one it follows (title.py)
+                from .title import keep
+                output = keep(store, payload, output, host)
+            except Exception as error:  # noqa: BLE001 - a name is never worth the reply
+                hook_log(store, 'title not kept: ' + repr(error)[:200])
         return output
     except Exception as error:  # a hook must not break the user's session
         import traceback
