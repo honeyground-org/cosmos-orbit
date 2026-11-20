@@ -511,6 +511,11 @@ def main(argv=None):
             result = show(task)
             result['done_rev'] = task['data'].get('done_rev')
             result['revision'] = (task['data'].get('done_history') or [None])[-1]
+            from .requirements import guide_notice
+            notice = guide_notice(result['revision'], args.id)
+            if notice:                             # advice only: the revision above is saved either way
+                print(notice, file=sys.stderr)
+                result['warning'] = notice         # on stdout too, where the executor reads
         elif args.command == 'evidence':
             from .attach import record_evidence, evidence_hints
             entry = record_evidence(store, args.id, args.item, args.note, args.argv_json, args.file, cwd=args.cwd)
@@ -526,6 +531,11 @@ def main(argv=None):
             concepts = [parse_concept(raw) for raw in args.concept]
             task = claim(store, args.id, args.summary, args.remaining, args.question, settle=settle, concepts=concepts)
             from .attach import blind_items, REVIEW_HINT
+            from .requirements import guide_notice
+            # the claim's own --add revision is the latest row; advice only, the claim went through
+            guide = guide_notice((task['data'].get('done_history') or [None])[-1], args.id) if args.add else None
+            if guide:
+                print(guide, file=sys.stderr)
             blind = blind_items(task)
             blind_warning = None
             if blind:
@@ -538,8 +548,8 @@ def main(argv=None):
                     ensure_worker(store, idle_exit=90)
                     print('Fixed checks passed; the independent review runs in the background worker.', file=sys.stderr)
             result = show(task)
-            if blind_warning:
-                result['warning'] = blind_warning  # on stdout too: a stderr-only line was filtered away (2026-11-08)
+            if blind_warning or guide:           # on stdout too: a stderr-only line was filtered away (2026-11-08)
+                result['warning'] = '\n'.join(w for w in (blind_warning, guide) if w)
         elif args.command == 'followup':
             from . import followup
             from .attach import current_task, project_root

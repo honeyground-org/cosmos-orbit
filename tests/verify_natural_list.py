@@ -2,7 +2,8 @@
 """Model-free check that the list follows a conversation without friction, measured on this Mac's own sessions.
 
 N1 a `codex exec` run a Claude Code session launched is that session's sub-task, not a task of its own.
-N2 items the last review found met no longer take one of the 12 places.
+N2 the guide of 12 items to prove (24 open in all) is advice: a revision past it is saved and the executor is told;
+   items the last review found met, or that a passing command Orbit ran backs, do not count toward it.
 N3 the executor confirms or extends the list in the same command that claims.
 N4 the claim names the items only a note backs (the reviewer cannot see this machine).
 Every rule has a control.
@@ -92,86 +93,108 @@ def run(base, store):
     attach.handle(store, 'prompt', dict(payload, cwd=str(root_b), session_id='person-1'), 'codex')
     check('control: the same run without Claude marks attaches', attach.current_task(store, root_b) is not None)
 
-    print('N2 items the last review found met leave the 12 places')
+    print('N2 the guide of 12 refuses nothing; items the last review found met do not count toward it')
     root = make_repo(base, 'repo-n2')
     tid = attach.create(store, root, 'Ship the report', 'claude', checks=['["python3","verify.py"]'])['id']
     attach.set_done(store, tid, ['item %d works' % n for n in range(1, 13)])
-    try:
-        attach.set_done(store, tid, ['item 13 works'], add=True)
-        refused = ''
-    except ValueError as error:
-        refused = str(error)
-    check('control: 12 open items with no review → a 13th is refused, naming each item', 'D1 open' in refused, refused[:200])
+
+    def add(text, task_id=None):
+        """Add one item. Returns (open D ids, the revision's over_guide or None, the advice or '')."""
+        task = attach.set_done(store, task_id or tid, [text], add=True)
+        row = task['data']['done_history'][-1]
+        return ([d['id'] for d in task['data']['done'] if d['id'].startswith('D')], row.get('over_guide'),
+                requirements.guide_notice(row, task_id or tid) or '')
+    ids, over, notice = add('item 13 works')
+    check('12 items to prove, no review → a 13th is saved and keeps a new ID (2026-11-20: it was refused)',
+          ids[-1] == 'D13' and len(ids) == 13, ids)
+    check('…the revision records that it passed the guide, and the advice says so with the way to shorten the list',
+          over == {'to_prove': 13, 'open': 13} and '13 items still to prove (guide 12)' in notice
+          and 'nothing is refused' in notice and 'done %s --replace' % tid in notice, (over, notice[:200]))
     with store.lock('task:' + tid):
         task = store.get(tid)
         met_verdict(task, ['D%d' % n for n in range(1, 7)])
         store.save(task, task['status'], 'test_setup', {})
-    task = attach.set_done(store, tid, ['item 13 works'], add=True)
-    ids = [d['id'] for d in task['data']['done'] if d['id'].startswith('D')]
-    check('6 met → the 13th is added and keeps a new ID', ids[-1] == 'D13' and len(ids) == 13, ids)
-    check('…met items stay open (only a clean review closes them)', 'D1' in ids and not task['data'].get('done_closed'))
+    ids, over, notice = add('item 14 works')
+    check('6 met → 8 still to prove: the next item brings no advice', len(ids) == 14 and over is None and notice == '', (over, notice))
+    check('…met items stay open (only a clean review closes them)', 'D1' in ids and not store.get(tid)['data'].get('done_closed'))
     with store.lock('task:' + tid):
         task = store.get(tid)
-        met_verdict(task, ['D%d' % n for n in range(1, 14)], status='unclear')
+        met_verdict(task, ['D%d' % n for n in range(1, 15)], status='unclear')
         store.save(task, task['status'], 'test_setup', {})
-    try:
-        attach.set_done(store, tid, ['item 14 works'], add=True)
-        later = ''
-    except ValueError as error:
-        later = str(error)
-    check('control: a later review that found them unclear counts them again', 'At most 12' in later, later[:120])
+    ids, over, notice = add('item 15 works')
+    check('control: a later review that found them unclear counts them again',
+          over == {'to_prove': 15, 'open': 15} and len(ids) == 15, over)
 
     with store.lock('task:' + tid):
         task = store.get(tid)
-        met_verdict(task, ['D%d' % n for n in range(1, 14)])
+        met_verdict(task, ['D%d' % n for n in range(1, 16)])
         task['data']['verdicts'][-1]['superseded'] = 'own_files'
         store.save(task, task['status'], 'test_setup', {})
-    try:
-        attach.set_done(store, tid, ['item 14 works'], add=True)
-        set_aside = ''
-    except ValueError as error:
-        set_aside = str(error)
-    check('control: a verdict set aside (superseded) vouches for nothing', 'At most 12' in set_aside, set_aside[:120])
+    ids, over, notice = add('item 16 works')
+    check('control: a verdict set aside (superseded) vouches for nothing',
+          over == {'to_prove': 16, 'open': 16} and len(ids) == 16, over)
+    task = attach.set_done(store, tid, [], keep=True)
+    check('control: a revision that adds nothing brings no advice, however long the list is',
+          requirements.guide_notice(task['data']['done_history'][-1], tid) is None, task['data']['done_history'][-1])
 
-    print('N2b items backed by a passing command Orbit ran leave the 12 places (no review needed yet)')
+    print('N2b items backed by a passing command Orbit ran do not count toward the guide (no review needed yet)')
     # 2026-11-08: every claim in a session ended in a question, so no review ran; eight items already backed by
-    # passing commands kept two new requests out of the list.
+    # passing commands kept two new requests out of the list (the 12 was a limit then).
     root = make_repo(base, 'repo-n2b')
     tid = attach.create(store, root, 'Ship the report', 'claude', checks=['["python3","verify.py"]'])['id']
     attach.set_done(store, tid, ['item %d works' % n for n in range(1, 13)])
-
-    def add(text):
-        try:
-            attach.set_done(store, tid, [text], add=True)
-            return ''
-        except ValueError as error:
-            return str(error)
     for n in range(1, 9):
         attach.record_evidence(store, tid, 'D%d' % n, note='by hand')
-    check('control: notes alone free no place (the reviewer cannot check them)', 'At most 12' in add('item 13 works'))
+    ids, over, notice = add('item 13 works')
+    check('control: notes alone count as still to prove (the reviewer cannot check them)',
+          over == {'to_prove': 13, 'open': 13} and len(ids) == 13, over)
     for n in range(1, 8):
         attach.record_evidence(store, tid, 'D%d' % n, command='["true"]')
     (root / 'report.txt').write_text('ok\n')
     attach.record_evidence(store, tid, 'D8', file='report.txt')
-    refused = add('item 13 works')
-    check('7 passing commands + 1 file → a 13th item is added', refused == '', refused[:200])
-    check('…and a 14th', add('item 14 works') == '')
-    ids = [d['id'] for d in store.get(tid)['data']['done'] if d['id'].startswith('D')]
+    ids, over, notice = add('item 14 works')
+    check('7 passing commands + 1 file → 6 still to prove: a 14th item brings no advice', over is None and notice == '', over)
     check('…proven items stay open for the review', 'D1' in ids and len(ids) == 14, ids)
-    for n in range(1, 7):                   # 6 failing + D9..D14 unproven = 12; a 13th to prove is refused
+    for n in range(1, 7):                   # 6 failing + D9..D14 unproven = 12; one more makes 13 to prove
         attach.record_evidence(store, tid, 'D%d' % n, command='["false"]')
-    over = add('item 15 works')
-    check('control: an item whose latest command failed counts again', 'At most 12' in over and 'D1 open' in over
-          and 'D7 proven' in over, over[:300])
-    for n in range(1, 15):
+    ids, over, notice = add('item 15 works')
+    check('control: an item whose latest command failed counts again', over == {'to_prove': 13, 'open': 15}, over)
+    for n in range(1, 16):
         attach.record_evidence(store, tid, 'D%d' % n, command='["true"]')
-    for n in range(15, 25):
-        check_text = add('item %d works' % n)
-        if check_text:
-            break
-    check('24 open items in all, every one proven, are accepted', not check_text, check_text[:200])
-    total = add('item 25 works')
-    check('control: a 25th is refused even when every item is proven (24 in all)', 'and 24 open in all' in total, total[:200])
+    quiet = []
+    for n in range(16, 25):
+        ids, over, notice = add('item %d works' % n)
+        quiet.append(over)
+    check('24 open items in all, at most 9 of them still to prove: no advice', len(ids) == 24 and not any(quiet), quiet)
+    ids, over, notice = add('item 25 works')
+    check('a 25th is saved too; the advice names the guide of 24 open in all (10 to prove is within the 12)',
+          len(ids) == 25 and over == {'to_prove': 10, 'open': 25} and '25 open in all (guide 24)' in notice, (over, notice[:200]))
+
+    print('N2c the advice reaches the executor on stdout, and the command still succeeds')
+    orbit = [sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(store.home)]
+    grown = subprocess.run(orbit + ['done', tid, '--add', 'item 26 works'], capture_output=True, text=True)
+    out = json.loads(grown.stdout) if grown.returncode == 0 else {}
+    check('done --add past the guide exits 0, saves the item and carries the advice as `warning`',
+          grown.returncode == 0 and out.get('done_rev') == store.get(tid)['data']['done_rev']
+          and any(d['text'] == 'item 26 works' for d in store.get(tid)['data']['done'])
+          and 'past its guide' in (out.get('warning') or '') and 'past its guide' in grown.stderr, grown.stderr[-300:])
+    root_c = make_repo(base, 'repo-n2c')
+    small = attach.create(store, root_c, 'Ship the note', 'claude', checks=['["python3","verify.py"]'])['id']
+    attach.set_done(store, small, ['the note exists'])
+    short = subprocess.run(orbit + ['done', small, '--add', 'the note is signed'], capture_output=True, text=True)
+    check('control: under the guide the same command prints no advice',
+          short.returncode == 0 and 'warning' not in json.loads(short.stdout) and 'guide' not in short.stderr, short.stderr[-200:])
+    many = subprocess.run(orbit + ['claim', small, '--summary', 'done', '--remaining', 'the review follows later']
+                          + [arg for n in range(3, 15) for arg in ('--add', 'part %d holds' % n)], capture_output=True, text=True)
+    out = json.loads(many.stdout) if many.returncode == 0 else {}
+    open_small = [d['id'] for d in store.get(small)['data']['done'] if d['id'].startswith('D')]
+    check('claim --add past the guide goes through (14 open) and carries the advice',
+          many.returncode == 0 and len(open_small) == 14 and store.get(small)['data'].get('claimed_at')
+          and '14 items still to prove (guide 12)' in (out.get('warning') or ''), (many.stderr[-300:], open_small))
+    wide = attach.create(store, make_repo(base, 'repo-n2d'), 'Ship the atlas', 'claude',
+                         done=['page %d renders' % n for n in range(1, 21)])
+    check('a list given whole at the start is not limited to twelve either (20 items)',
+          len([d for d in wide['data']['done'] if d['id'].startswith('D')]) == 20, len(wide['data']['done']))
 
     print('N3 confirm or extend the list in the claim itself')
     root = make_repo(base, 'repo-n3')
@@ -214,13 +237,14 @@ def run(base, store):
           busy.returncode != 0 and task['data']['done_rev'] == rev and task['data'].get('requirements_pending'),
           (busy.returncode, task['data']['done_rev'], rev))
     try:
-        attach.claim(store, tid, 'done', settle={'add': ['item %d' % n for n in range(20)]})
-        capped = ''
+        attach.claim(store, tid, 'done', settle={'add': ['x' * 2001]})
+        invalid = ''
     except ValueError as error:
-        capped = str(error)
+        invalid = str(error)
     task = store.get(tid)
-    check('a revision the claim cannot make (over the limit) refuses the claim too',
-          'At most 12' in capped and task['data']['done_rev'] == rev and task['data'].get('requirements_pending'))
+    check('a revision the claim cannot make (an item over 2000 characters) refuses the claim too',
+          'at most 2000 characters' in invalid and task['data']['done_rev'] == rev and task['data'].get('requirements_pending'),
+          invalid[:120])
     full = attach.claim(store, tid, 'done', settle={'add': ['Totals row is shown']})
     check('a finished one-step claim queues the independent review', full['data'].get('verification_pending')
           and not full['data'].get('requirements_pending') and full['data']['done_rev'] == rev + 1)

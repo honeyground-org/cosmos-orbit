@@ -212,26 +212,30 @@ def run(base, store, engine):
         store.db.execute('UPDATE inbox SET consumed=1 WHERE task_id=?', (tid,))
     FakeReviewer.during = None
 
-    print('⑤ the limit is on open items; closed ones do not count')
+    print('⑤ the guide of 12 is on open items; closed ones do not count, and past it nothing is refused')
     t2 = attach.create(store, root, 'Twelve-step migration', 'claude', checks=['["python3","verify.py"]'])['id']
     attach.set_done(store, t2, ['step %d' % i for i in range(1, 13)])
     task = review(engine, store, t2, answer({'D12': 'unmet'}))
     check('eleven met items closed, one open', len(open_ids(task)) == 1 and len(closed(task)) == 11, open_ids(task))
     user_says(store, t2, 'add eleven more steps')
     task = attach.set_done(store, t2, ['more %d' % i for i in range(1, 12)], add=True)
-    check('twelve open after closing eleven is allowed', len(open_ids(task)) == 12)
+    check('twelve open after closing eleven: within the guide, no advice',
+          len(open_ids(task)) == 12 and 'over_guide' not in task['data']['done_history'][-1], task['data']['done_history'][-1])
     user_says(store, t2, 'and one more')
-    try:
-        attach.set_done(store, t2, ['one too many'], add=True)
-        check('control: a thirteenth open item is refused', False)
-    except ValueError:
-        check('control: a thirteenth open item is refused', True)
+    task = attach.set_done(store, t2, ['one past the guide'], add=True)
+    row = task['data']['done_history'][-1]
+    check('a thirteenth open item is saved; its revision records that the list passed the guide',
+          len(open_ids(task)) == 13 and row.get('over_guide') == {'to_prove': 13, 'open': 13}
+          and not task['data'].get('requirements_pending'), row)
+    check('…and the advice for that revision names the count and refuses nothing',
+          '13 items still to prove (guide 12)' in (requirements.guide_notice(row, t2) or ''), requirements.guide_notice(row, t2))
     with store.lock('task:' + t2):
         task = store.get(t2)
         requirements.reopen(task['data'], 'D1', ['regressed'])
         store.save(task, task['status'], 'test_reopen', {})
     task = attach.set_done(store, t2, [], keep=True)
-    check('a reopened item may exceed the limit, and --keep still works', len(open_ids(task)) == 13, len(open_ids(task)))
+    check('a reopened item joins the list, --keep still works, and a revision that adds nothing brings no advice',
+          len(open_ids(task)) == 14 and requirements.guide_notice(task['data']['done_history'][-1], t2) is None, len(open_ids(task)))
     with store.lock('task:' + t2):
         task = store.get(t2)
         for n in range(100, 162):
@@ -239,7 +243,7 @@ def run(base, store, engine):
             requirements.reopen(task['data'], 'D%d' % n, ['regressed'])
         store.save(task, task['status'], 'test_reopen', {})
     task = attach.set_done(store, t2, [], keep=True)
-    check('…even with 75 open after many reopens', len(open_ids(task)) == 75, len(open_ids(task)))
+    check('…even with 76 open after many reopens', len(open_ids(task)) == 76, len(open_ids(task)))
 
     print('⑥ reductions and the objective need the user\'s words')
     t3 = attach.create(store, root, 'Ship the onboarding flow', 'claude', checks=['["python3","verify.py"]'])['id']
