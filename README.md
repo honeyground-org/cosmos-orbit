@@ -272,7 +272,8 @@ a habit:
    ```
 
 3. Fixed checks can only be added, never replaced or removed. Definitions the user fixed can be
-   extended with `--add` but not rewritten by the executor. Up to twelve **open** items.
+   extended with `--add` but not rewritten by the executor. The number of items is never a reason to
+   refuse a revision; twelve still to prove is a guide (see below).
 
    **The goal stays; the list moves.** In an attached session the list is a living checklist:
 
@@ -293,11 +294,15 @@ a habit:
      is closed (G0 and the fixed checks remain), and `handoff --write` lists the closed items.
    - Evidence commands (`evidence --command`) run by Orbit on the host reach the reviewer as host
      observations (argv, exit code, time, output); notes and file fingerprints stay claims.
-   - The limit of 12 counts items still to prove: one the latest review found met, or whose latest
-     command evidence Orbit ran and saw pass (or a file in the workspace), stays open (and is reviewed)
-     but no longer takes a place — a session whose every stop is a question never gets a review, and
-     its finished items used to fill the list. A note alone still counts. At most 24 items are open in
-     all. A refusal lists each item (open · proven · met) and how to supersede one.
+   - The list has a guide, not a limit: 12 items still to prove, 24 open in all. A revision that grows
+     the list past either number is saved like any other, and the command says so once (`warning` in its
+     JSON, and on stderr) with the three ways to shorten the list: record a command Orbit runs for
+     finished items, merge items that test the same behaviour, or supersede one with `--replace`. An
+     item the latest review found met, or whose latest command evidence Orbit ran and saw pass (or a
+     file in the workspace), stays open (and is reviewed) but does not count as still to prove; a note
+     alone still counts. Both numbers were limits until 2026-11-20: a ledger holding 41 open items
+     refused every new one, and a session replaced one of its own items with the user's new request to
+     get it recorded.
    - The list is settled in the claim itself: `claim <task> --summary '…' --keep 'why the items still
      cover it'` or `--add 'D…'` (repeatable). The claim also names items only a note backs, since the
      reviewer cannot see this machine; record a command Orbit runs for them.
@@ -866,7 +871,7 @@ the completion claim; it does not pretend that a test suite was configured.
 
 1. Keep the **original request and every correction**. The mandatory G0 criterion checks the whole
    request even when an executor's proposed checklist misses something.
-2. Freeze up to twelve explicit `--done` items, or obtain them from the executor (its first response
+2. Freeze explicit `--done` items (about twelve reads well; more are accepted), or obtain them from the executor (its first response
    unattended, `cosmos-orbit done` attached). There is no separate planner call. A later
    `feedback --done` explicitly replaces the checklist.
 3. Resume the owned native session while work remains (unattended), or hand the brief back to the

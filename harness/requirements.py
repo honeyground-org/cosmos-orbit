@@ -15,8 +15,13 @@ import re
 
 from .store import now
 
-MAX_ITEMS = 12
-MAX_TOTAL = 24   # every open D item, proven or not: the list never grows without bound
+# A guide, never a refusal. Both were limits until 2026-11-20: a ledger holding 41 open items (reopened items never
+# counted as growth, so a list could pass 24) refused every new item, and a session replaced one of its own memo
+# items (D10) with the user's new request (D43) to get it recorded at all. A long list costs reading; a refused
+# revision costs the request. A revision that grows the list past either number is saved and the executor is told
+# (`guide_notice`).
+GUIDE_ITEMS = 12   # items still to prove
+GUIDE_TOTAL = 24   # every open D item, proven or not
 _TRIVIAL = {
     'ok', 'okay', 'k', 'yes', 'yep', 'go', 'go on', 'continue', 'proceed', 'thanks', 'thank you', 'next', 'done',
     '계속', '계속해', '계속해줘', '계속 진행', '계속 진행해', '진행', '진행해', '진행해줘', '진행해 줘', '이어서', '이어서 진행',
@@ -268,8 +273,8 @@ def _match_ids(existing, texts, issue):
 
 def last_met(data):
     """IDs the latest review judged met. They stay open (the next review sees them again, and only a clean review
-    closes them), but they no longer take one of the 12 places: on 2026-11-08 eleven items already met kept a new
-    request out of the list twice in a row."""
+    closes them), but they no longer count as still to prove (the guide of 12): on 2026-11-08, when that number was
+    a limit, eleven items already met kept a new request out of the list twice in a row."""
     verdicts = data.get('verdicts') or []
     if not verdicts or verdicts[-1].get('superseded'):
         return set()                     # a verdict set aside (files moved under it) vouches for nothing
@@ -278,10 +283,10 @@ def last_met(data):
 
 def orbit_proven(data):
     """IDs whose latest command or file evidence Orbit recorded itself and that passed (exit 0, or a file
-    fingerprint). Like `last_met` they stay open for the review, but they no longer take one of the 12 places: on
-    2026-11-08 eight items already backed by passing commands kept two new requests out of the list, because every
-    claim in that session ended in a question and no review had run yet. A note alone still counts — the
-    reviewer cannot check it."""
+    fingerprint). Like `last_met` they stay open for the review, but they no longer count as still to prove (the
+    guide of 12): on 2026-11-08, when that number was a limit, eight items already backed by passing commands kept
+    two new requests out of the list, because every claim in that session ended in a question and no review had run
+    yet. A note alone still counts — the reviewer cannot check it."""
     proven = set()
     for item_id, rows in (data.get('done_evidence') or {}).items():
         solid = [r for r in rows or [] if r.get('kind') in ('command', 'file')]
@@ -533,16 +538,10 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
     met = last_met(data) if numbered else set()
     proven = orbit_proven(data) if numbered else set()
     counted = [i for i in (ids or [None] * len(final)) if i not in met and i not in proven]
-    growing = len(final) > len(existing)                          # reopened items may exceed a limit; new ones may not
-    if growing and (len(counted) > MAX_ITEMS or len([t for t in final if t]) > MAX_TOTAL):
-        states = ' · '.join('%s %s' % (d['id'], 'met' if d['id'] in met else 'proven' if d['id'] in proven else 'open')
-                            for d in existing)
-        raise ValueError('At most %d open completion definitions still to prove (and %d open in all); this revision would make '
-                         '%d to prove, %d in all. Nothing was saved: the %d current items stand (%s). Items the last review '
-                         'found met, or backed by a passing command Orbit ran, do not count toward the %d. Record such '
-                         'evidence for finished items, merge items that test the same behaviour, or supersede one: '
-                         'cosmos-orbit done <task> --replace D<n> \'…\''
-                         % (MAX_ITEMS, MAX_TOTAL, len(counted), len(final), len(existing), states, MAX_ITEMS))
+    growing = len(final) > len(existing)       # only a revision that adds is worth a word; one that reopens or keeps is not
+    over = None
+    if growing and (len(counted) > GUIDE_ITEMS or len(final) > GUIDE_TOTAL):
+        over = {'to_prove': len(counted), 'open': len(final)}     # recorded with the revision; nothing is refused
     items = completion_items(final, commands, origin, ids)
     for item, item_origin in zip([i for i in items if i['id'].startswith('D')], origins):
         item['origin'] = item_origin
@@ -570,6 +569,8 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
            'checks_added': added_checks, 'items': len(after), 'checks': len(commands)}
     if changes:
         row['changes'] = changes
+    if over:
+        row['over_guide'] = over
     data['development']['checks'] = commands
     data['done'] = items
     data['done_rev'] = revision
@@ -581,6 +582,19 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
     data.pop('requirements_pending', None)
     data.pop('done_stale', None)
     return row
+
+
+def guide_notice(row, task_id='<task>'):
+    """What to tell the executor when the revision `row` grew the list past the guide; None when it did not. The
+    revision is already saved: this is advice on keeping the list readable, and it names the three ways to do that."""
+    over = (row or {}).get('over_guide')
+    if not over:
+        return None
+    return ('The list is past its guide: %d items still to prove (guide %d), %d open in all (guide %d). The revision was '
+            'saved; nothing is refused. To keep the list readable when it suits the work: record a command Orbit runs '
+            'for finished items (those no longer count as still to prove), merge items that test the same behaviour, '
+            'or supersede one: cosmos-orbit done %s --replace D<n> \'…\''
+            % (over['to_prove'], GUIDE_ITEMS, over['open'], GUIDE_TOTAL, task_id))
 
 
 def pending_line(data, prefix, tid):
