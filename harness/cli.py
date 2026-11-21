@@ -68,6 +68,11 @@ def main(argv=None):
     list_cmd = sub.add_parser('list', help='Tasks, newest first; --closed: the closed tasks you can continue')
     list_cmd.add_argument('--closed', action='store_true', help='Closed tasks: goal, when and why it closed, last checkpoint')
     list_cmd.add_argument('--workspace', help='Only this folder (with --closed)')
+    sessions_cmd = sub.add_parser('sessions', help='After a restart: the sessions that never ended, when each last worked, '
+                                                    'and the command that resumes it')
+    sessions_cmd.add_argument('--days', type=int, default=7, help='Only sessions active in the last N days (0: all; default 7)')
+    sessions_cmd.add_argument('--followed', action='store_true', help='Also sessions a newer session replaced in the same pane')
+    sessions_cmd.add_argument('--json', action='store_true')
     continue_cmd = sub.add_parser('continue', help='Take a closed (or verified) task back: this session works on it again, '
                                                     'or, from a plain shell, the next new session in its folder')
     continue_cmd.add_argument('id')
@@ -741,6 +746,14 @@ def main(argv=None):
                 result = closed_tasks(store, args.workspace)
             else:
                 result = store.list()
+        elif args.command == 'sessions':
+            from . import restore
+            here = os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CODEX_THREAD_ID') or None
+            found = restore.sessions(store, days=max(0, args.days), current=here, followed=args.followed)
+            if not args.json:
+                print(restore.text(found))
+                return 0
+            result = found
         elif args.command == 'continue':
             from .attach import _pane
             from .lifecycle import reopen

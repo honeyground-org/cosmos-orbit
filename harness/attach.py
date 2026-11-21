@@ -1598,6 +1598,12 @@ def handle(store, event, payload, host):
             from .routes import capsule_note, prompt_note
             # A session a route switch started: where the session it replaces was, once, task or not, any host.
             notes = [capsule_note(store, payload.get('session_id'))]
+            if event == 'session-start':
+                try:  # the first session after a restart hears what the restart cut off, once (restore.py)
+                    from .restore import notice
+                    notes.append(notice(store, payload.get('session_id')))
+                except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                    hook_log(store, 'restore notice skipped: ' + repr(error)[:200])
             if event == 'prompt':
                 notes.append(prompt_note(store, payload, host))   # its route: the way back, or its end day
             notes = [n for n in notes if n]

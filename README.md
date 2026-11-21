@@ -238,6 +238,29 @@ old task keeps a record of what moved. It prints the plan; `--apply` does it.
   to a closed task by itself. When a new request looks like one (shared words with its goal or last checkpoints, closed within 7 days, or
   the same session), the brief names it in one line, as a suggestion.
 
+### After a restart: the sessions it cut off
+
+A restart ends every open session at once, with no SessionEnd. Orbit keeps the last hook of every session it serves,
+so it always knows when each one last worked. `cosmos-orbit sessions [--days 7] [--followed] [--json]` lists the
+sessions that never ended, newest first, grouped as *cut off by the restart* (last activity before this boot),
+*closed without ending* (no host runs it now) and *open now* (a host still runs it: its session ID, or its pane
+running a host while it is that pane's newest session). Each line has the folder, the task and its next step (or the
+last request), and the command that takes it up again, ready to paste:
+
+```
+  2026-11-21 08:55  claude  /Users/me/projects
+      task 3f2a9c1e7b40 (working): Ship the PDF app to the stores
+      next: wait for review; then the landing page
+      $ cd /Users/me/projects && claude --resume 2b7e4c1a-9d3f-4e8a-b6c2-5f1d0a7e3c94
+```
+
+The command runs in the folder the session started in, read from its own transcript (Claude Code finds a session to
+resume by that folder; a session that cd'd elsewhere would not be found from there), and Codex sessions resume with
+`codex resume ID`. Last activity is the newer of the last hook and the transcript, so a turn the restart cut mid-way
+counts. A session a newer one followed in the same pane (a /clear, a handoff) is left out; `--followed` shows it.
+The first session that starts after a restart is told once how many sessions it cut off and to run
+`cosmos-orbit sessions`. A Claude Code session started in Code Mode resumes only with Code Mode on.
+
 ## When the request changes
 
 Real work keeps growing: a case is added, a feature widens, a rule changes. Every such change has to
