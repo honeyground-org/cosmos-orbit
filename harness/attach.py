@@ -1593,6 +1593,21 @@ def hook_log(store, message):
 def handle(store, event, payload, host):
     """Return the JSON object the host expects, or None for silence. Never raises."""
     try:
+        if event == 'prompt':
+            # "세션 목록 보여줘": the sessions to take up, numbered; a number typed next reopens one (§restore.on_prompt).
+            # Asked before anything else and wherever Orbit is on: the session asking is often a fresh one, opened
+            # after a restart in the folder that holds the repositories, where no task binds it yet and the rest of
+            # this hook stays silent (§hook_root).
+            try:
+                cwd = payload.get('cwd') or os.getcwd()
+                if resolve(store, cwd)[0] == 'on' or hook_root(store, cwd, payload.get('session_id'), event,
+                                                               payload.get('prompt')):
+                    from .restore import on_prompt as sessions_asked
+                    reply = sessions_asked(store, payload, host)
+                    if reply:
+                        return reply
+            except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                hook_log(store, 'session list skipped: ' + repr(error)[:200])
         output = _handle(store, event, payload, host)
         if event in ('session-start', 'prompt') and not (output or {}).get('decision'):
             from .routes import capsule_note, prompt_note

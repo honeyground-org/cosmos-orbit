@@ -12,6 +12,10 @@ with controls.
 ⑥ the first session to start after a restart is told once per boot, through the real SessionStart hook; a second
    start is not told again, a new boot is, and a boot that cut nothing off says nothing (controls)
 ⑦ the command line: text with the commands, and --json
+⑧ asked in words ("세션 목록 보여줘"), the prompt hook answers with the list numbered and runs no turn; a number typed
+   next reopens that session in a new cmux tab in the folder it started in (an open one: its tab is brought forward);
+   "전부" reopens every cut-off and closed one; controls: a request for work that names sessions, words about this
+   session, the same words sent again, and anything else typed after the list all go to the session
 """
 import datetime
 import json
@@ -134,6 +138,12 @@ def main():
     at(store, 'G', NOW - 10 * 86400)                     # older than the window
     at(store, 'N', NOW - 300)                            # since boot, its own ID still carried
     pane(store, 'N', 'PANE-N')
+    hook('session-start', 'H', source='startup')
+    at(store, 'H', BOOT - 3000)                          # cut off in a pane whose name comes back after the restart
+    pane(store, 'H', 'PANE-H')
+    hook('session-start', 'I', source='startup')
+    at(store, 'I', NOW - 1200)                           # the first session in that pane after the restart
+    pane(store, 'I', 'PANE-H')
 
     env = ['/bin/zsh TERM=x CMUX_PANEL_ID=PANE-C',                              # a shell alone: no host
            'node mcp.js CLAUDE_CODE_SESSION_ID=OLD-ID CMUX_PANEL_ID=PANE-B',   # a host under its first ID
@@ -155,6 +165,8 @@ def main():
     check('② control: processes not read: since boot, neither open nor closed',
           unknown.get('B', {}).get('state') == 'since_boot', unknown.get('B'))
     check('③ a session followed in its pane is not listed', 'D' not in got and 'E' in got, sorted(got))
+    check('③ a pane name reused after the restart: the session cut off there is still listed, as cut off',
+          got.get('H', {}).get('state') == 'interrupted' and 'I' in got, (got.get('H'), sorted(got)))
     followed = rows(restore.sessions(store, boot=BOOT, now=NOW, running=running, followed=True))
     check('③ … it is with --followed', followed.get('D', {}).get('state') == 'followed', followed.get('D'))
     check('the window: a session older than 7 days is not listed', 'G' not in got, sorted(got))
@@ -188,10 +200,16 @@ def main():
     real_boot = restore.boot_time
     try:
         restore.boot_time = lambda: BOOT
-        reply = hook('session-start', 'S1', source='startup')
+        real_pane = attach._pane
+        attach._pane = lambda: {'kind': 'cmux', 'cli': '/fake/cmux', 'target': 'PANE-H'}   # opened where H was cut off
+        try:
+            reply = hook('session-start', 'S1', source='startup')
+        finally:
+            attach._pane = real_pane
         context = ((reply or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
-        check('⑥ the first session after a restart is told', 'cut off 3 sessions' in context and 'cosmos-orbit sessions'
-              in context, context[:400])
+        check('⑥ the first session after a restart is told, counting the one cut off in its own pane',
+              'cut off 4 sessions' in context and 'cosmos-orbit sessions' in context and '세션 목록 보여줘' in context,
+              context[:400])
         reply = hook('session-start', 'S2', source='startup')
         context = ((reply or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
         check('⑥ control: the next start is not told again', 'cut off' not in context, context[:300])
@@ -215,6 +233,91 @@ def main():
     out = subprocess.run([sys.executable, str(ROOT / 'bin' / 'cosmos-orbit'), '--home', str(base / 'home'), 'sessions',
                           '--days', '0'], capture_output=True, text=True, env=dict(os.environ))
     check('⑦ cosmos-orbit sessions (text)', out.returncode == 0 and 'claude --resume A' in out.stdout, out.stderr[-300:])
+
+    # ⑧ asked in words, through the real prompt hook
+    for words in ('세션 목록 보여줘', '세션 리스트 보여줘', '세션을 이어서 하고 싶어 세션 내용을 다 보여줘', '끊긴 세션 다시 열어줘',
+                  '세션 이어서 하고 싶어', 'show my sessions', '세션들 보여줘'):
+        check('⑧ asks: ' + words, restore.asks(words))
+    for words in ('세션 목록 기능 만들어줘', '이 세션에서 이어서 해줘', 'Build the session list page', '이어서 해줘',
+                  '세션 목록을 보여 주는 화면을 고쳐줘', '세션 ' * 30 + '목록 보여줘'):
+        check('⑧ control: not asking: ' + words[:30], not restore.asks(words))
+    calls = []
+    cmux = {'kind': 'cmux', 'cli': '/fake/cmux', 'target': 'PANE-Q'}
+    saved = (restore.live, restore.boot_time, restore._terminal, restore._run)
+    try:
+        restore.live = lambda environments=None: running
+        restore.boot_time = lambda: BOOT
+        restore._terminal = lambda: cmux
+        restore._run = lambda argv: (calls.append(argv) or (0, 'OK workspace:9'))
+
+        def ask(words, session='Q'):
+            return hook('prompt', session, prompt=words) or {}
+
+        def offered(session='Q'):
+            return [r['session'] for r in (json.loads(store.preference(restore.OFFER_KEY + session) or 'null') or {}).get('rows', [])]
+
+        reply = ask('세션 목록 보여줘')
+        reason = reply.get('reason') or ''
+        order = offered()
+        check('⑧ the list answers in plain Korean and runs no turn', reply.get('decision') == 'block' and
+              '재부팅으로 끊긴 세션' in reason and '번호를 입력하면' in reason and ' 1  ' in reason, reason[:500])
+        check('⑧ the list starts no task', not (store.session_task('Q') or {'task_id': ''})['task_id'],
+              store.session_task('Q'))
+        check('⑧ the ones to reopen come first, the open ones last, this session not at all',
+              order and order[-1] in ('B', 'N') and order[0] in ('A', 'F') and 'Q' not in order and 'D' not in order, order)
+        number = order.index('A') + 1
+        reply = ask('세션 목록 보여줘%d' % number)          # Claude Code put the blocked words back; the number after them
+        made = [c for c in calls if 'new-workspace' in c]
+        check('⑧ a number reopens it in a new cmux tab, in the folder it started in',
+              made and made[-1][made[-1].index('--cwd') + 1] == str(started)
+              and made[-1][made[-1].index('--command') + 1] == 'claude --resume A', made)
+        check('⑧ … and says so', '새 탭에서 열었습니다' in (reply.get('reason') or ''), reply.get('reason'))
+        calls.clear()
+        ask('세션 목록 보여줘')
+        reply = ask(str(offered().index('B') + 1) if 'B' in offered() else '0')
+        check('⑧ an open session is not opened twice: its tab comes forward',
+              calls and calls[-1][1:] == ['focus-panel', '--panel', 'PANE-B'] and
+              not any('new-workspace' in c for c in calls), calls)
+        calls.clear()
+        ask('세션 목록 보여줘')
+        listed = json.loads(store.preference(restore.OFFER_KEY + 'Q'))['rows']
+        reply = ask('전부')
+        made = [c for c in calls if 'new-workspace' in c]
+        opened = sorted(c[c.index('--command') + 1].split()[-1] for c in made)
+        meant = sorted(r['session'] for r in listed if r['state'] != 'open')
+        check('⑧ "전부" reopens every cut-off and closed one, and no open one',
+              opened == meant and {'A', 'C', 'F'} <= set(opened) and not {'B', 'N'} & set(opened), (opened, meant))
+        check('⑧ … only the last takes the focus',
+              [c[c.index('--focus') + 1] for c in made] == ['false'] * (len(made) - 1) + ['true'], made)
+        calls.clear()
+        ask('세션 목록 보여줘')
+        check('⑧ control: the same words again go to the session', not ask('세션 목록 보여줘').get('decision'))
+        ask('세션 목록 보여줘')
+        check('⑧ control: anything else after the list goes to the session', not ask('그냥 계속 해줘').get('decision'))
+        check('⑧ control: … and a number after that is no pick', not ask('1').get('decision') and not calls, calls)
+        plain = base / 'folder-of-repos'                  # where the hosts are launched: not a repository
+        plain.mkdir()
+        fresh = lambda: attach.handle(store, 'prompt', {'cwd': str(plain), 'session_id': 'P', 'prompt': '세션 목록 보여줘'},
+                                      'claude') or {}
+        check('⑧ control: a folder Orbit is off for stays silent', not fresh().get('decision'))
+        attach.set_switch(store, 'on', plain)
+        reply = fresh()
+        check('⑧ a fresh session outside any repository, with no task yet, is answered too (after a restart)',
+              reply.get('decision') == 'block' and '재부팅으로 끊긴 세션' in (reply.get('reason') or ''), reply)
+        restore._terminal = lambda: None
+        reply = ask('show my sessions', session='R')
+        check('⑧ in English when asked in English', 'Cut off by the restart' in (reply.get('reason') or ''), reply)
+        reply = ask(str(offered('R').index('A') + 1), session='R')
+        check('⑧ no terminal to open a tab in: the command to paste', 'cd %s && claude --resume A' % started
+              in (reply.get('reason') or '') and not calls, reply)
+        restore._terminal = lambda: cmux
+        restore._run = lambda argv: (1, 'socket refused')
+        ask('세션 목록 보여줘', session='T')
+        reply = ask(str(offered('T').index('A') + 1), session='T')
+        check('⑧ cmux refuses: told, with the command to run by hand', 'socket refused' in (reply.get('reason') or '')
+              and 'claude --resume A' in (reply.get('reason') or ''), reply)
+    finally:
+        restore.live, restore.boot_time, restore._terminal, restore._run = saved
 
     store.close()
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))

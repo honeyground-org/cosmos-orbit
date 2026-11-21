@@ -261,6 +261,30 @@ counts. A session a newer one followed in the same pane (a /clear, a handoff) is
 The first session that starts after a restart is told once how many sessions it cut off and to run
 `cosmos-orbit sessions`. A Claude Code session started in Code Mode resumes only with Code Mode on.
 
+Or just ask in your own session, in words: "세션 목록 보여줘", "세션 이어서 하고 싶어", "show my sessions". The prompt
+hook answers with the same list, numbered and in plain words (in the language you asked in), and no turn runs:
+
+```
+Orbit: 이어서 할 수 있는 세션 3개 (최근 7일 · 이번 부팅 2026-11-21 08:40)
+번호를 입력하면 그 세션이 새 탭에서 이어서 열립니다. 여러 개는 "1 3", 끊긴·닫힌 세션 전부는 "전부".
+
+[재부팅으로 끊긴 세션]
+  1  11-21 08:12 · ~/projects
+     하던 일: Ship the PDF app to the stores
+     다음: wait for review; then the landing page
+  2  11-20 23:40 · ~/projects/site · Codex
+     하던 일: port the parser
+[지금 열려 있는 세션 (번호를 고르면 그 탭으로 이동)]
+  3  11-21 09:02 · ~/projects
+```
+
+Type a number and Orbit takes that session up: in cmux a new workspace opens in the folder the session started in and
+runs its resume command; in tmux a new window does; elsewhere you get the command to paste. A session that is still
+open is not opened twice: its tab is brought forward. `1 3` opens several, `전부` (or `all`) every cut-off and
+closed one. Anything else typed after the list, or the same words sent again, goes to the session as usual. A request
+for work that mentions sessions ("세션 목록 기능 만들어줘") or words about this very session ("이 세션에서 이어서 해줘")
+are not taken for the question. In a reopened session, say "이어서 해줘" (continue) to go on with its work.
+
 ## When the request changes
 
 Real work keeps growing: a case is added, a feature widens, a rule changes. Every such change has to

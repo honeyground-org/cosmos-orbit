@@ -75,7 +75,9 @@ GROUPS = [
         ('cosmos-orbit sessions [--days 7] [--followed] [--json]',
          'After a restart: the sessions that never ended, newest first (cut off by the restart, closed without ending, '
          'open now), each with its folder, task, next step and the command that resumes it in the folder it started in '
-         '(claude --resume ID · codex resume ID). The first session after a restart is told once.'),
+         '(claude --resume ID · codex resume ID). The first session after a restart is told once. Or ask in words in any '
+         'session ("세션 목록 보여줘", "show my sessions"): the list comes numbered, and a number reopens that session in '
+         'a new cmux tab or tmux window (an open one: its tab comes forward).'),
         ('cosmos-orbit verify TASK_ID', 'Recheck a claimed result now: fixed checks plus one independent review. Missing evidence is not completion.'),
         ('cosmos-orbit lessons', 'Corrections repeated across tasks: candidates for a guard rule, counted from the ledger.'),
         ('cosmos-orbit evolve   ·   cosmos-orbit evolve --reset-learned', 'What this installation learned locally from the executor\'s decisions (never in the code), or forget it.'),
