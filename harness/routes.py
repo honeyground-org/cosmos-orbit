@@ -77,6 +77,7 @@ ASKED_TEXT = ('Continue the unfinished task on this route. The user switched to 
               'they left is in this session\'s brief. They asked nothing new.')
 MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
 CAPSULE_ENV = 'COSMOS_ORBIT_CAPSULE'  # set by `route run --capsule ID`: the context the session it starts receives
+CODE_MODE_ENV = 'CLAUDE_CODE_EXPERIMENTAL_CODE_MODE'   # Claude Code's Code Mode, decided when the session starts
 CAPSULE_KEY = 'route-capsule:'     # + id: where the session left was (JSON), served once to the session started
 ASKED_TTL = 1800                   # an offer the user asked for is answered by the next prompt, within this time
 ASK_LENGTH = 120                   # a prompt longer than this, or of several lines, is work, never a switch request
@@ -947,7 +948,7 @@ def make_capsule(store, session, host, to_route, model, state, task, transcript,
                'asked': asked, 'held': held, 'from_route': state.get('route') or host, 'from_host': host,
                'from_session': session, 'to_route': to_route, 'model': model, 'cwd': cwd,
                'task': task['id'] if task and task.get('status') not in CLOSED else None, 'turns': turns, 'files': files,
-               'mode': mode, 'served_to': None}
+               'mode': mode, 'code_mode': state.get('code_mode'), 'served_to': None}
     store.preference(CAPSULE_KEY + capsule['id'], json.dumps(capsule, ensure_ascii=False))
     return capsule
 
@@ -958,14 +959,24 @@ def capsule_text(store, capsule):
     when = datetime.datetime.fromtimestamp(stamp).strftime('%m-%d %H:%M') if stamp else '?'
     why = ('the user chose to switch (they typed "%s")' % capsule['asked']) if capsule.get('reason') == 'asked' else \
         'the previous session stopped at its usage limit and the user chose this route'
-    lines = ['[orbit] Carried over by a route switch at %s: the previous session ran on route %s (%s); this one runs on '
-             'route %s (%s%s). Why: %s.' % (when, capsule['from_route'], capsule['from_host'], capsule['to_route'],
-                                            to['label'], (' · model ' + capsule['model']) if capsule.get('model') else '',
-                                            why),
-             'Folder: %s · Orbit task: %s' % (capsule.get('cwd') or '?', (capsule['task'] + ' (its brief has the goal, '
-                                              'corrections and checkpoint)') if capsule.get('task') else 'none')]
+    if capsule.get('code_mode') in ('on', 'off'):
+        lines = ['[orbit] Carried over by a Code Mode switch at %s: the user asked for Code Mode %s (they typed "%s"), '
+                 'and Code Mode is decided when a session starts, so Orbit ended the previous session and started this '
+                 'one in the same pane, with Code Mode %s. %s' % (
+                     when, capsule['code_mode'], capsule.get('asked') or '', capsule['code_mode'],
+                     'Browser tools (Claude in Chrome) and computer use work here.' if capsule['code_mode'] == 'off' else
+                     'Scripts run through Code Mode here; Claude in Chrome and computer use do not.')]
+    else:
+        lines = ['[orbit] Carried over by a route switch at %s: the previous session ran on route %s (%s); this one runs '
+                 'on route %s (%s%s). Why: %s.' % (when, capsule['from_route'], capsule['from_host'], capsule['to_route'],
+                                                   to['label'], (' · model ' + capsule['model']) if capsule.get('model')
+                                                   else '', why)]
+    lines.append('Folder: %s · Orbit task: %s' % (capsule.get('cwd') or '?', (capsule['task'] + ' (its brief has the '
+                 'goal, corrections and checkpoint)') if capsule.get('task') else 'none'))
     if capsule.get('held'):
-        lines.append('The user\'s request carried over (it was blocked by the limit, never run): "%s"' % _cut(capsule['held'], 4000))
+        lines.append('The user\'s request carried over (%s, never run): "%s"' % (
+            'asked together with the switch' if capsule.get('code_mode') else 'it was blocked by the limit',
+            _cut(capsule['held'], 4000)))
     if capsule.get('turns'):
         lines.append('Where the previous session was — its last turns, oldest first, in its own words:')
         lines += ['  [%s] %s' % (role, text.replace('\n', '\n    ')) for role, text in capsule['turns']]
@@ -1294,7 +1305,7 @@ def switch_steps(host, presses, pid, run_line):
 
 
 def switch(store, session, host, task, name, state, text, environ=None, at=None, terminal=None, spawn=None, pid=None,
-           which=None, runner=None, transcript=None, cwd=None, mode=None):
+           which=None, runner=None, transcript=None, cwd=None, mode=None, code_mode=None):
     """Start route `name` in this session's pane with this session's context (a capsule), carrying the held request
     (or a continuation) to the task when one is attached. `mode`: this session's permission mode (session_mode),
     which the new session starts in."""
@@ -1328,9 +1339,10 @@ def switch(store, session, host, task, name, state, text, environ=None, at=None,
                            transcript or store.preference(_transcript_key() + session), cwd, at, environ=environ,
                            mode=mode)
     left_route = state.get('route') or host
-    run_line = '%s route run %s%s --carry --capsule %s%s' % (
+    run_line = '%s route run %s%s --carry --capsule %s%s%s' % (
         _orbit(store), name, (' --model ' + _shell_word(model)) if model else '', capsule['id'],
-        ' --from ' + left_route if left_route != name else '')
+        ' --from ' + left_route if left_route != name else '',
+        (' --code-mode ' + code_mode) if code_mode in ('on', 'off') else '')
     # What the next prompt here needs if this session is still there: the pick again, and the command by hand.
     state = dict(state, offer=[], switched=name, switched_at=now(), capsule=capsule['id'], run_line=run_line,
                  picked_from=list(state.get('offer') or state.get('picked_from') or []), typed=bool(terminal),
@@ -1475,7 +1487,7 @@ def _toml(value):
 
 
 def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, force=False, at=None,
-        which=None, out=sys.stderr, came_from=None, model=None, capsule=None):
+        which=None, out=sys.stderr, came_from=None, model=None, capsule=None, code_mode=None):
     """Start route `name` in this terminal: the host program with the route's endpoint, key and model (the
     route's default, or `model`: any model its service serves, listed or not). `capsule`: the context a switch
     carried, handed to the new session at its start."""
@@ -1515,6 +1527,17 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
     own = any(arg.partition('=')[0] in PERMISSION_OPTIONS for arg in extra)
     carried_mode = mode_args(mode, route['host']) if mode_carried(store) and not own else []
     argv = [route['host']] + carried_mode
+    settings = {}                         # one --settings for everything this run sets (Claude Code takes one)
+    if code_mode in ('on', 'off') and route['host'] == 'claude':
+        # Code Mode is decided when Claude Code starts and cannot change in a running session. Both are set: the
+        # environment is what the user's own shell would say (measured 2026-11-21, 2.1.330: `CODE_MODE=0 claude`
+        # starts without it although settings.json says 1), the flag settings what a settings file would say.
+        value = '1' if code_mode == 'on' else '0'
+        environ[CODE_MODE_ENV] = value
+        settings['env'] = {CODE_MODE_ENV: value}
+        if code_mode == 'off' and '--chrome' not in extra and '--no-chrome' not in extra:
+            argv.append('--chrome')       # what Code Mode keeps out: the browser
+    settings_at = len(argv)               # where --settings goes: ahead of the model, as it always stood
     if name in BUILTIN:
         if model:                         # the host's own account, on a model the user picked
             argv += ['--model', model] if route['host'] == 'claude' else ['-c', 'model=' + _toml(model)]
@@ -1540,18 +1563,21 @@ def run(store, name, carry=False, extra=(), environ=None, execvpe=os.execvpe, fo
                 environ[KEY_ENV] = key
                 environ.pop('ANTHROPIC_AUTH_TOKEN', None)
                 environ.pop('ANTHROPIC_API_KEY', None)
-                argv += ['--settings', json.dumps({'apiKeyHelper': 'printenv ' + KEY_ENV})]
+                settings['apiKeyHelper'] = 'printenv ' + KEY_ENV
             else:
                 environ.update(ANTHROPIC_AUTH_TOKEN=key, ANTHROPIC_API_KEY='')
             for var in MODEL_VARS:
                 environ[var] = model
             argv += ['--model', model]
+    if settings:
+        argv[settings_at:settings_at] = ['--settings', json.dumps(settings)]
     argv += list(extra)
     if carry:
         argv.append(CARRY_LINE)
     limit = route_limit(store, name)
-    print('Orbit: starting %s on route %s (%s%s%s)%s%s' % (
+    print('Orbit: starting %s on route %s (%s%s%s%s)%s%s' % (
         route['host'], name, route['label'], (' · model ' + model) if model else '', _until_note(route, at),
+        (' · Code Mode ' + code_mode) if settings.get('env') else '',
         (' · in the permission mode of the session left: ' + mode_words(mode)) if carried_mode else '',
         (' — note: ' + _limited_text(limit, at)) if active(limit, at) else ''), file=out, flush=True)
     if hasattr(store, 'close'):

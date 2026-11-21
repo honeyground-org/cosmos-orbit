@@ -828,6 +828,15 @@ does not bring it back. Claude Code and Codex both: Claude Code records such a 4
 ends the turn on it. A 401 for a wrong key or a network error is not taken for one. `--until` stays for an end you do
 know.
 
+**Code Mode on or off, in words, with the conversation.** Claude Code decides Code Mode once, when a session starts,
+and keeps Claude in Chrome and computer use out of it, so a check in the browser needs a session started without it;
+and a session started in Code Mode resumes only with Code Mode on. Say `코드모드 꺼줘` (or `코드모드 켜줘`, `turn off
+code mode`) and no turn runs: like a route switch, the session quits in its pane and Claude Code starts there again
+with Code Mode the other way (off adds `--chrome`), carrying the conversation, the task, the permission mode and a
+request asked with it (`코드모드 끄고 로그인 화면을 브라우저로 확인해줘`). `cosmos-orbit route run claude --code-mode
+off|on` does the same by hand. A question about it (`코드모드 끌 수 있어?`) or work on such a feature goes to the session;
+already that way, a Codex session, or turning it on for a route on another service is answered in one line.
+
 ## Messages between sessions: an idle session wakes up by itself
 
 Sessions can talk to each other: Codex to Claude Code, Claude Code to Claude Code, through a mailbox
