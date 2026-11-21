@@ -1606,6 +1606,12 @@ def handle(store, event, payload, host):
                     reply = sessions_asked(store, payload, host)
                     if reply:
                         return reply
+                    # "코드모드 꺼줘" / "켜줘": Code Mode is decided when a session starts, so the session is started
+                    # again the other way in its pane, with this conversation carried (§codemode).
+                    from .codemode import on_prompt as code_mode_asked
+                    reply = code_mode_asked(store, payload, host)
+                    if reply:
+                        return reply
             except Exception as error:  # noqa: BLE001 - never at the cost of the hook
                 hook_log(store, 'session list skipped: ' + repr(error)[:200])
         output = _handle(store, event, payload, host)

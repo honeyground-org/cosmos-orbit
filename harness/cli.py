@@ -283,6 +283,8 @@ def main(argv=None):
     route_cmd.add_argument('--carry', action='store_true', help='run: start on the carry line: the new session '
                                                                 'continues the task or the context handed over')
     route_cmd.add_argument('--capsule', help='run: the context a switch carried (its id), given to the new session')
+    route_cmd.add_argument('--code-mode', choices=('on', 'off'),
+                           help='run: start Claude Code with Code Mode on or off (off adds --chrome)')
     route_cmd.add_argument('--from', dest='came_from', help='run: the route left, offered back once its limit resets')
     route_cmd.add_argument('--force', action='store_true', help='run: start a route past its last day anyway')
     route_cmd.add_argument('--json', action='store_true', help='list: as JSON')
@@ -804,7 +806,8 @@ def main(argv=None):
                     return 2
                 try:
                     routes.run(store, args.name, carry=args.carry, extra=passthrough, force=args.force,
-                               came_from=args.came_from, model=args.model, capsule=args.capsule)
+                               came_from=args.came_from, model=args.model, capsule=args.capsule,
+                               code_mode=args.code_mode)
                 except ValueError as error:
                     print('Orbit: ' + str(error), file=sys.stderr)
                     return 2

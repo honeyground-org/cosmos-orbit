@@ -35,8 +35,8 @@ GROUPS = [
          'Put your own key for a route into your macOS keychain (typed without echo, piped, or from the clipboard), or delete it. Never printed; each user keeps their own.'),
         ('cosmos-orbit route on|off [NAME]',
          'The switches. Without NAME: the whole offer (off = a limited session is left alone). With NAME: one route, built-in or added, kept out of the offer and of route run.'),
-        ('cosmos-orbit route run NAME [--model MODEL] [--carry] [-- ARGS]',
-         'Start that route in this terminal, on its default model or the one you name. A session stopped at its limit offers the usable routes (and each other model of theirs) at your next prompt, numbered; so does a session where you ask for it ("kimi로 바꿔줘", "다른 모델로", "switch to codex"). Type a number or a name and Orbit quits it and runs this in the same pane, carrying the conversation\'s context (and your request) to the new session, Claude Code or Codex.'),
+        ('cosmos-orbit route run NAME [--model MODEL] [--carry] [--code-mode on|off] [-- ARGS]',
+         'Start that route in this terminal, on its default model or the one you name. A session stopped at its limit offers the usable routes (and each other model of theirs) at your next prompt, numbered; so does a session where you ask for it ("kimi로 바꿔줘", "다른 모델로", "switch to codex"). Type a number or a name and Orbit quits it and runs this in the same pane, carrying the conversation\'s context (and your request) to the new session, Claude Code or Codex. Code Mode the same way: say "코드모드 꺼줘" / "켜줘" (or --code-mode off|on; off adds the browser).'),
         ('cosmos-orbit offload run [--cwd DIR] [--timeout SEC] [--label NAME] -- ARGV…   ·   cosmos-orbit offload run --shell \'PIPELINE\'',
          'Run a test suite outside the conversation, with no model: a summary of at most 40 lines comes back (verdict, '
          'exit code, totals for pytest, unittest, go, cargo, jest, vitest, TAP and these verify scripts, the failing '
