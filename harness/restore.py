@@ -219,8 +219,11 @@ def sessions(store, days=DAYS, boot=None, now=None, current=None, followed=False
         hook_at = _epoch(row['at'])
         if hook_at is None:
             continue
+        # Followed: a newer session in the same pane, within the same boot. Pane names come back after a restart
+        # (tmux numbers its panes from %0 again; cmux restores its panes under their old IDs), so the first session
+        # opened in a pane after a restart does not follow the one the restart cut off there.
         later = [r for r in rows if r['session'] != row['session'] and row['target'] and r['target'] == row['target']
-                 and (_epoch(r['at']) or 0) > hook_at]
+                 and (_epoch(r['at']) or 0) > hook_at and not (boot and hook_at < boot <= (_epoch(r['at']) or 0))]
         if later and not followed:
             continue
         host = row['host'] or 'claude'

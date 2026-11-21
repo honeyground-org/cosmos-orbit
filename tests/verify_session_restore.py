@@ -138,6 +138,12 @@ def main():
     at(store, 'G', NOW - 10 * 86400)                     # older than the window
     at(store, 'N', NOW - 300)                            # since boot, its own ID still carried
     pane(store, 'N', 'PANE-N')
+    hook('session-start', 'H', source='startup')
+    at(store, 'H', BOOT - 3000)                          # cut off in a pane whose name comes back after the restart
+    pane(store, 'H', 'PANE-H')
+    hook('session-start', 'I', source='startup')
+    at(store, 'I', NOW - 1200)                           # the first session in that pane after the restart
+    pane(store, 'I', 'PANE-H')
 
     env = ['/bin/zsh TERM=x CMUX_PANEL_ID=PANE-C',                              # a shell alone: no host
            'node mcp.js CLAUDE_CODE_SESSION_ID=OLD-ID CMUX_PANEL_ID=PANE-B',   # a host under its first ID
@@ -159,6 +165,8 @@ def main():
     check('② control: processes not read: since boot, neither open nor closed',
           unknown.get('B', {}).get('state') == 'since_boot', unknown.get('B'))
     check('③ a session followed in its pane is not listed', 'D' not in got and 'E' in got, sorted(got))
+    check('③ a pane name reused after the restart: the session cut off there is still listed, as cut off',
+          got.get('H', {}).get('state') == 'interrupted' and 'I' in got, (got.get('H'), sorted(got)))
     followed = rows(restore.sessions(store, boot=BOOT, now=NOW, running=running, followed=True))
     check('③ … it is with --followed', followed.get('D', {}).get('state') == 'followed', followed.get('D'))
     check('the window: a session older than 7 days is not listed', 'G' not in got, sorted(got))
@@ -192,10 +200,16 @@ def main():
     real_boot = restore.boot_time
     try:
         restore.boot_time = lambda: BOOT
-        reply = hook('session-start', 'S1', source='startup')
+        real_pane = attach._pane
+        attach._pane = lambda: {'kind': 'cmux', 'cli': '/fake/cmux', 'target': 'PANE-H'}   # opened where H was cut off
+        try:
+            reply = hook('session-start', 'S1', source='startup')
+        finally:
+            attach._pane = real_pane
         context = ((reply or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
-        check('⑥ the first session after a restart is told', 'cut off 3 sessions' in context and 'cosmos-orbit sessions'
-              in context, context[:400])
+        check('⑥ the first session after a restart is told, counting the one cut off in its own pane',
+              'cut off 4 sessions' in context and 'cosmos-orbit sessions' in context and '세션 목록 보여줘' in context,
+              context[:400])
         reply = hook('session-start', 'S2', source='startup')
         context = ((reply or {}).get('hookSpecificOutput') or {}).get('additionalContext') or ''
         check('⑥ control: the next start is not told again', 'cut off' not in context, context[:300])
