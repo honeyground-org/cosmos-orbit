@@ -668,9 +668,10 @@ def tail_lines(path, limit=TAIL_BYTES):
     return lines[1:] if size > limit else lines
 
 
-def measure_transcript(path, limit=TAIL_BYTES):
+def measure_transcript(path, limit=TAIL_BYTES, sidechain=False):
     """Latest context size in a Claude Code transcript or a Codex rollout file; None when unknown. `limit`: how much
-    of the end is read (the tool-call hook tries a short end first, midturn.py)."""
+    of the end is read (the tool-call hook tries a short end first, midturn.py). `sidechain`: the file is a
+    subagent's own transcript, where every line is marked isSidechain (teammates.py)."""
     try:
         lines = tail_lines(path, limit)
     except OSError:
@@ -691,7 +692,7 @@ def measure_transcript(path, limit=TAIL_BYTES):
                 event = json.loads(line)
             except ValueError:
                 continue
-            if event.get('type') != 'assistant' or event.get('isSidechain'):
+            if event.get('type') != 'assistant' or (event.get('isSidechain') and not sidechain):
                 continue
             message = event.get('message') or {}
             usage = message.get('usage') or {}
