@@ -6,9 +6,11 @@ Two definitions, on macOS as launchd LaunchAgents (``~/Library/LaunchAgents``), 
 - ``dashboard`` runs ``cosmos-orbit dashboard --no-open`` on a fixed port. It starts at login and again whenever it
   exits. Observation never starts model work. It also runs Orbit's round every minute (patrol.py): a question waiting
   for the user is told, an idle session with work left is sent back.
-- ``recover`` runs ``cosmos-orbit worker --idle-exit 120`` once at login. It continues only work that was already
-  authorised before the shutdown (a review a completion claim requested, a call the shutdown interrupted, an unattended
-  task that was running) and exits when quiet. It is deliberately not a resident worker: Orbit's hooks, dashboard and
+- ``recover`` runs ``cosmos-orbit worker --idle-exit 120 --when-calm`` once at login. It first waits until the machine
+  has settled (3 minutes after boot and a 1-minute load below one per core, at most 20 minutes: §recovery.wait_until_calm;
+  2026-11-23 it started beside nine agent sessions reopened at once, at a 5-minute load of 78 on 12 cores). Then it
+  continues only work that was already authorised before the shutdown (a review a completion claim requested, a call
+  the shutdown interrupted, an unattended task that was running) and exits when quiet. It is deliberately not a resident worker: Orbit's hooks, dashboard and
   ``start``/``resume`` already start a worker when work appears, and a resident one re-reads every task every 3 s
   (35 ms of CPU a pass with 55 tasks, measured 2026-11-11) to wait for work that is started on demand anyway.
 
@@ -60,7 +62,7 @@ def _commands(home, port, lang):
     program, env = _program()
     base = program + ['--home', str(home)]
     return {'dashboard': base + ['dashboard', '--port', str(port), '--lang', lang, '--no-open'],
-            'recover': base + ['worker', '--idle-exit', str(RECOVER_IDLE_EXIT)]}, env
+            'recover': base + ['worker', '--idle-exit', str(RECOVER_IDLE_EXIT), '--when-calm']}, env
 
 
 def _option(arguments, name):
