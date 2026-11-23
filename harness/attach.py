@@ -1751,7 +1751,7 @@ def _handle(store, event, payload, host):
     if event != 'pre-compact':
         try:
             from .wake import note
-            note(store, session, host, event, _pane())  # where this session can be woken (§wake)
+            note(store, session, host, event, _pane(), payload.get('reason'))  # where it can be woken (§wake)
         except Exception as error:  # noqa: BLE001 - never at the cost of the hook
             hook_log(store, 'terminal not recorded: ' + repr(error)[:200])
     if session and payload.get('transcript_path') and event != 'session-end':

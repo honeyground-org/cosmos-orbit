@@ -4,12 +4,16 @@ The user, 2026-11-21: a reboot ends every open session at once, so Orbit should 
 worked and have the command ready that takes it up again.
 
 What Orbit already has: every hook event of a session it serves writes that session's row in `terminals` (§wake.note:
-host, pane, time), and only SessionEnd deletes it. A restart kills the hosts without a SessionEnd, so the rows of the
-sessions it cut off stay. This module reads them:
+host, pane, time), and only SessionEnd deletes it. A power cut kills the hosts without a SessionEnd, so the rows of the
+sessions it cut off stay. A restart from the menu, a closed terminal or a quit app signals them instead, and Claude Code
+reports SessionEnd with reason `other` (measured 2026-11-23: the session working before that day's restart reported it
+42 s before the new boot); such a row moves to `ended_terminals` and is read here too, as ended by the signal, not by
+the user (/exit reports `prompt_input_exit` and its row is gone). This module reads both:
 
   - interrupted: the session's last activity is older than this boot (the machine went down while it was open);
   - open: a host still runs it (§live: its session ID, or its pane running a host while it is the pane's newest);
-  - closed: it worked after this boot and never ended, and no host runs it now (its terminal was closed hard);
+  - closed: it worked after this boot and never ended, and no host runs it now (its terminal was closed hard), or a
+    signal ended it after this boot (its terminal was closed, its app quit);
   - followed: a newer session started in the same pane (a /clear, a handoff): not listed, its successor is.
 
 The resume command runs in the folder the session ★started in★, read from the first record of its own transcript
@@ -213,7 +217,10 @@ def sessions(store, days=DAYS, boot=None, now=None, current=None, followed=False
     now = time.time() if now is None else now
     boot = boot_time() if boot is None else boot
     running = live() if running is None else (running or None)
-    rows = [dict(r) for r in store.db.execute('SELECT * FROM terminals')]
+    rows = [dict(r, ended=None) for r in store.db.execute('SELECT * FROM terminals')]
+    seen = {r['session'] for r in rows}
+    rows += [dict(r, state='ended', ended=r['reason']) for r in store.db.execute('SELECT * FROM ended_terminals')
+             if r['session'] not in seen]     # a signal ended it (§wake.note); a row in terminals is newer
     out = []
     for row in rows:
         hook_at = _epoch(row['at'])
@@ -241,6 +248,8 @@ def sessions(store, days=DAYS, boot=None, now=None, current=None, followed=False
         folder = (started_in(path, host) if path else None) or (task or {}).get('workspace')
         if boot and last < boot:
             state = 'interrupted'
+        elif row['ended']:
+            state = 'closed'                    # its host reported the signal that ended it: no process can carry it
         elif running is None:
             state = 'since_boot'
         else:

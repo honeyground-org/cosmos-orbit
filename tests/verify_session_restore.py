@@ -16,6 +16,10 @@ with controls.
    next reopens that session in a new cmux tab in the folder it started in (an open one: its tab is brought forward);
    "전부" reopens every cut-off and closed one; controls: a request for work that names sessions, words about this
    session, the same words sent again, and anything else typed after the list all go to the session
+⑨ a session a signal ended (SessionEnd reason `other`: a restart from the menu, a closed terminal) is still listed,
+   through the real SessionEnd hook: ended before this boot it is cut off and counted in the notice, ended since it is
+   closed; controls: /exit (`prompt_input_exit`) is not listed, a signal-ended session resumed later is listed once,
+   the pane lookup that wakes sessions does not see a signal-ended one, and its row is dropped after 30 days
 """
 import datetime
 import json
@@ -318,6 +322,72 @@ def main():
               and 'claude --resume A' in (reply.get('reason') or ''), reply)
     finally:
         restore.live, restore.boot_time, restore._terminal, restore._run = saved
+
+    # ⑨ a signal ended it: SessionEnd with reason `other` (2026-11-23: the session working before the restart was
+    # signalled 42 s before the new boot and was missing from the list)
+    store9 = Store(base / 'home9')
+    attach.set_switch(store9, 'on', moved)
+
+    def hook9(event, session, **payload):
+        return attach.handle(store9, event, dict(payload, cwd=str(moved), session_id=session), 'claude')
+
+    def ended_at(session, epoch):
+        stamp = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat()
+        try:
+            with store9.db:
+                store9.db.execute('UPDATE ended_terminals SET at=? WHERE session=?', (stamp, session))
+        except Exception:          # noqa: BLE001 - before the change there is no such table: the checks below fail
+            pass
+
+    real_pane = attach._pane
+    try:
+        for name, target in (('SIG', 'PANE-S'), ('EXIT', 'PANE-X'), ('SIG2', 'PANE-S2'), ('BACK', 'PANE-K'), ('OLD', 'PANE-O')):
+            attach._pane = lambda target=target: {'kind': 'cmux', 'cli': '/fake/cmux', 'target': target}
+            hook9('session-start', name, source='startup')
+            hook9('prompt', name, prompt='work in ' + name)
+        hook9('session-end', 'SIG', reason='other')
+        ended_at('SIG', BOOT - 42)                       # the shutdown signalled it 42 s before the new boot
+        hook9('session-end', 'EXIT', reason='prompt_input_exit')
+        hook9('session-end', 'SIG2', reason='other')
+        ended_at('SIG2', NOW - 600)                      # since this boot: its terminal was closed
+        hook9('session-end', 'BACK', reason='other')
+        ended_at('BACK', BOOT - 100)
+        attach._pane = lambda: {'kind': 'cmux', 'cli': '/fake/cmux', 'target': 'PANE-K2'}
+        hook9('session-start', 'BACK', source='resume')  # the user resumed it after the restart
+    finally:
+        attach._pane = real_pane
+    got9 = rows(restore.sessions(store9, boot=BOOT, now=NOW, running=({'BACK'}, set())))
+    check('⑨ a signal ended it before this boot: listed as cut off', got9.get('SIG', {}).get('state') == 'interrupted',
+          (got9.get('SIG'), sorted(got9)))
+    check('⑨ … with its folder and resume command', (got9.get('SIG') or {}).get('resume', '').endswith('claude --resume SIG')
+          and (got9.get('SIG') or {}).get('pane') == 'PANE-S', got9.get('SIG'))
+    check('⑨ a signal ended it since this boot: closed', got9.get('SIG2', {}).get('state') == 'closed', got9.get('SIG2'))
+    unknown9 = rows(restore.sessions(store9, boot=BOOT, now=NOW, running=False))
+    check('⑨ … closed even when processes are not read (its host reported the end)',
+          unknown9.get('SIG2', {}).get('state') == 'closed', unknown9.get('SIG2'))
+    check('⑨ control: /exit is the user\'s own end: not listed', 'EXIT' not in got9, sorted(got9))
+    check('⑨ control: resumed after the signal: listed once, as open in its new pane',
+          got9.get('BACK', {}).get('state') == 'open' and got9.get('BACK', {}).get('pane') == 'PANE-K2', got9.get('BACK'))
+    told = restore.notice(store9, 'Z', boot=BOOT, now=NOW)
+    check('⑨ the notice after the restart counts it', 'cut off 1 session' in told, told[:300])
+    from harness import wake
+    found = wake.resolve(store9, session='SIG')
+    check('⑨ control: waking does not see a signal-ended session', not found[0], found)
+    check('⑨ control: nor does the pane lookup', not wake.resolve(store9, surface='PANE-S')[0])
+    hook9('session-end', 'OLD', reason='other')
+    ended_at('OLD', NOW - 31 * 86400)
+    attach._pane = lambda: {'kind': 'cmux', 'cli': '/fake/cmux', 'target': 'PANE-Y'}
+    try:
+        hook9('session-start', 'LATER', source='startup')
+        hook9('session-end', 'LATER', reason='other')    # any later end drops rows older than 30 days
+    finally:
+        attach._pane = real_pane
+    try:
+        kept = [r[0] for r in store9.db.execute('SELECT session FROM ended_terminals')]
+    except Exception:              # noqa: BLE001 - before the change there is no such table
+        kept = []
+    check('⑨ a signal-ended row is dropped after 30 days', 'OLD' not in kept and 'SIG' in kept and 'LATER' in kept, kept)
+    store9.close()
 
     store.close()
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
