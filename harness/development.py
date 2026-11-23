@@ -21,6 +21,35 @@ def git(root, *args):
 
 _SNAPSHOTS = {}       # (root, fingerprint) -> {entry: digest}: the last trees this process hashed, to tell what moved
 _SNAPSHOTS_KEPT = 6
+CACHE_TAG = 'CACHEDIR.TAG'                                       # bford.info/cachedir: Cargo target/, uv .venv, ruff
+CACHE_SIGNATURE = b'Signature: 8a477f597d28d172789f06886806bc55'  # the tag's first line, which tools must check
+CACHE_SUFFIX = '.noindex'                                        # macOS: kept from Spotlight; Xcode's derived data
+
+
+def cache_folders(root, untracked):
+    """The folders whose untracked files are a build cache, by the marks the tools themselves leave: a CACHEDIR.TAG
+    that starts with its signature, a folder named *.noindex, and the folder that holds one (Xcode's derived data keeps
+    Build/Products, Logs and info.plist beside its .noindex folders). The repository root is never one."""
+    found = set()
+    for raw in untracked:
+        parts = os.fsdecode(raw).split('/')
+        if parts[-1] == CACHE_TAG and len(parts) > 1:
+            try:
+                with open(os.path.join(str(root), *parts), 'rb') as stream:
+                    if stream.read(len(CACHE_SIGNATURE)) == CACHE_SIGNATURE:
+                        found.add('/'.join(parts[:-1]))
+            except OSError:
+                pass
+        for index, part in enumerate(parts[:-1]):
+            if part.endswith(CACHE_SUFFIX):
+                found.add('/'.join(parts[:max(index, 1)]))
+                break
+    return found
+
+
+def _inside(name, folders):
+    parts = name.split('/')
+    return any('/'.join(parts[:depth]) in folders for depth in range(1, len(parts)))
 
 
 def snapshot(root):
@@ -29,9 +58,16 @@ def snapshot(root):
     The fingerprint is unchanged (the same bytes in the same order), so trees recorded before stay comparable. The
     entries say which paths moved between two trees: in a folder other sessions share, a moved tree alone cannot tell
     this task's change from someone else's (2026-11-09: a review was refused 0.6 s after its checks because another
-    session's test run rewrote a cache file in the same folder)."""
+    session's test run rewrote a cache file in the same folder).
+
+    An untracked file inside a build cache (§cache_folders) is hashed by its size and modification time, not read: a
+    change there still moves the tree, without reading gigabytes on every claim. 2026-11-23: an Xcode derived-data folder
+    of evidence (31 GB, 112,843 untracked files) was read in full on every claim in the projects folder, a fingerprint
+    took 1 to 2.5 minutes and the load rose to 61 on 12 cores. A tree without a cache keeps the same fingerprint."""
     names = set(git(root, 'ls-files', '-z').split(b'\0'))
-    names.update(git(root, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0'))
+    untracked = set(git(root, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0')) - names - {b''}
+    names.update(untracked)
+    caches = cache_folders(root, untracked)
     result = hashlib.sha256()
     entries = {}
     for raw in sorted(names - {b''}):
@@ -43,13 +79,19 @@ def snapshot(root):
             result.update(data)
             entry.update(data)
         elif path.is_file():
-            mode = str(path.stat().st_mode).encode()
+            status = path.stat()
+            mode = str(status.st_mode).encode()
             result.update(mode)
             entry.update(mode)
-            with path.open('rb') as stream:
-                for chunk in iter(lambda: stream.read(65536), b''):
-                    result.update(chunk)
-                    entry.update(chunk)
+            if caches and raw in untracked and _inside(os.fsdecode(raw), caches):
+                data = b'cache:%d:%d' % (status.st_size, status.st_mtime_ns)
+                result.update(data)
+                entry.update(data)
+            else:
+                with path.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(65536), b''):
+                        result.update(chunk)
+                        entry.update(chunk)
         else:
             result.update(b'missing')
             entry.update(b'missing')
