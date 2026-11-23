@@ -785,8 +785,9 @@ def message(store, tokens, settings):
 def pre_tool_main(home, host, stdin=None):
     """`cosmos-orbit hook pre-tool`: stdin carries the event, stdout one JSON object or nothing. Exit 0 always.
 
-    Two independent answers share the hook: offload's (a suite run in a large conversation) and the mid-turn notice
-    (midturn.py: the conversation is past its handoff point). One failing never silences the other."""
+    Three independent answers share the hook: offload's (a suite run in a large conversation), the mid-turn notice
+    (midturn.py: the conversation is past its handoff point) and the teammates' (teammates.py: a subagent's own
+    conversation is past the point, told to it and to the lead). One failing never silences the others."""
     stdin = sys.stdin if stdin is None else stdin
     home = Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()
 
@@ -813,6 +814,12 @@ def pre_tool_main(home, host, stdin=None):
     try:
         from .midturn import decide as midturn_decide, merge
         output = merge(output, midturn_decide(home, host, payload))
+    except Exception as error:  # noqa: BLE001
+        logged(error)
+    try:
+        from .midturn import merge
+        from .teammates import decide as teammates_decide
+        output = merge(output, teammates_decide(home, host, payload))
     except Exception as error:  # noqa: BLE001
         logged(error)
     if output:

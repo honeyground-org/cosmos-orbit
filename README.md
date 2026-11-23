@@ -622,6 +622,20 @@ additions, each with its own off switch:
   session as before, and one `/rename` settles it for every handoff after. `cosmos-orbit context title off` turns it
   off (`--session`, `--global`, `ORBIT_HANDOFF_TITLE=off`). Codex takes no title from a hook.
 
+- **Teammates (Claude Code).** A session's named subagents (teammates, started with the Agent tool) are not attached
+  sessions, so nothing handed them off: measured 2026-11-23, they worked on at 450–610k, at most 700–800k, while the
+  session itself was handed off at 300k. Orbit now reads each teammate's own transcript
+  (`<session>/subagents/agent-<id>.jsonl`, the size of its latest request). Past the point (built in: the host's
+  handoff point; `cosmos-orbit context teammates 300k|off|reset`, settings.json `handoff.teammates`) the lead's
+  prompt brief and its next shell call carry one line — each teammate past it, its size, and what to do: when it has
+  finished the step in hand, have it write a handoff note and replace it with a new teammate given only that note —
+  once, and again after 100k of growth. The teammate itself is told at its own shell calls (the hook's input carries
+  its `agent_id`): finish the step, write the note (what it did · code locations · branch · open PRs · what
+  remains), send its path to the lead and ask to be replaced. A teammate that left its team (Claude Code's
+  `teams/<team>/config.json`), was started again under the same name, or, with no team to ask, wrote nothing for 30
+  minutes is not counted; a size that cannot be read is unknown, never past anything. Advice only, nothing refused.
+  `cosmos-orbit context teammates` shows the point and this session's teammates as measured.
+
 | Scope | Set | Off | Show |
 |---|---|---|---|
 | This session (default) | `cosmos-orbit context ceiling 500k` · `cosmos-orbit context midturn block` | `cosmos-orbit context ceiling off` · `cosmos-orbit context midturn off` | `cosmos-orbit context` |

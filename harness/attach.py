@@ -1627,6 +1627,11 @@ def handle(store, event, payload, host):
                     hook_log(store, 'restore notice skipped: ' + repr(error)[:200])
             if event == 'prompt':
                 notes.append(prompt_note(store, payload, host))   # its route: the way back, or its end day
+                try:  # a teammate past the handoff point, told to the lead once per crossing (teammates.py)
+                    from .teammates import lead_reply
+                    notes.append(lead_reply(store, payload, host))
+                except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                    hook_log(store, 'teammates skipped: ' + repr(error)[:200])
             notes = [n for n in notes if n]
             if notes:
                 context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')

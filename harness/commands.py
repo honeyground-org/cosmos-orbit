@@ -23,6 +23,11 @@ GROUPS = [
          'After a handoff the fresh Claude Code session keeps the name of the session it follows (the title the user gave '
          'it, else the one Claude Code generated from the user\'s first prompt), so the terminal tab is not renamed after '
          'the line Orbit submits. Built in keep; ORBIT_HANDOFF_TITLE for one terminal.'),
+        ('cosmos-orbit context teammates [300k | off | reset] [--session [ID]]',
+         'Teammates (Claude Code subagents started with a name) are not handed off like the session: past the point (built '
+         'in: the host\'s handoff point, 300k) the lead\'s brief names each one with its size, once, again every 100k, and '
+         'the teammate is told at its own shell calls to finish the step, write a handoff note and ask to be replaced. '
+         'Advice only. Without a value: the point and this session\'s teammates as measured (unknown when unreadable).'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',

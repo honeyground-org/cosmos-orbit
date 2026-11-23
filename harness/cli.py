@@ -225,6 +225,8 @@ def main(argv=None):
                                                  'ceiling 1.5x|450k|off|reset (past it no gate defers the handoff) · '
                                                  'title keep|off|reset (the fresh session keeps the name), each '
                                                  'for this session (default) or --global · '
+                                                 'teammates 300k|off|reset (the point for Claude Code subagents; '
+                                                 'built in: the handoff point) · '
                                                  'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
@@ -688,6 +690,11 @@ def main(argv=None):
                 return 0
             from .offload import here_session
             session, _, how = here_session(store, args.session or None)
+            if args.value == 'teammates':
+                # `context teammates [300k|off|reset] [--session [ID]]`: the point for subagents, and this session's
+                from . import teammates
+                print(json.dumps(teammates.view(store, args.path, session, how), ensure_ascii=False, indent=2))
+                return 0
             limit_change = None
             if args.value in continuity.LIMIT_KEYS:
                 # `context midturn|ceiling|title [VALUE] [--session [ID] | --global]`: the scopes of offload's settings
@@ -723,6 +730,9 @@ def main(argv=None):
                           task=task['id'] if task else None,
                           measured=continuity.context_view(task['data']) if task else None,
                           checkpoints=len(task['data'].get('checkpoints') or []) if task else 0)
+            from .teammates import point as teammate_point
+            at, source = teammate_point(store.home, 'claude')
+            result['teammates'] = {'at': at, 'source': source, 'show': 'cosmos-orbit context teammates'}
             if result['measured'] and result['measured'].get('limit'):
                 live_session = result['measured'].get('session')
                 result['measured']['ceiling'] = continuity.ceiling_tokens(
