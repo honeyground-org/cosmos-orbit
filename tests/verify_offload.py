@@ -453,7 +453,7 @@ def install(env, base, repo, store):
     check('control: the user\'s own PreToolUse hook is kept', foreign in claude.get('PreToolUse', []))
     counts = {k: len([e for e in v if ours(e)]) for k, v in claude.items()}
     check('installed twice with --home: every event holds exactly one of ours (no duplicates)',
-          len(counts) == 7 and set(counts.values()) == {1}, counts)
+          len(counts) == 8 and set(counts.values()) == {1}, counts)   # 8: SubagentStart since 2026-11-23
     check('control: the other events keep matcher ""', all(e['matcher'] == '' for k, v in claude.items() if k != 'PreToolUse'
                                                           for e in v if ours(e)))
     codex_ours = [e for e in codex.get('PreToolUse', []) if ours(e)]

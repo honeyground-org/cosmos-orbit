@@ -84,7 +84,7 @@ Install once:
 git clone https://github.com/honeyground-org/cosmos-orbit.git
 cd cosmos-orbit
 ./install.sh
-cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop · PreCompact · PreToolUse on shell calls (+ SessionEnd for Claude Code)
+cosmos-orbit hooks install        # SessionStart · UserPromptSubmit · Stop · PreCompact · PreToolUse on shell calls (+ SessionEnd · StopFailure · SubagentStart for Claude Code)
 ```
 
 The hooks are inert until something is switched on. Then use your normal command: `claude`,
@@ -635,6 +635,17 @@ additions, each with its own off switch:
   `teams/<team>/config.json`), was started again under the same name, or, with no team to ask, wrote nothing for 30
   minutes is not counted; a size that cannot be read is unknown, never past anything. Advice only, nothing refused.
   `cosmos-orbit context teammates` shows the point and this session's teammates as measured.
+
+  Past the point is late: the tokens are spent by then. Measured on the same session's 12 teammates (25 minutes), one
+  teammate's 72 requests read 13.2M tokens in total, from 47k to 316k: the size it started at was a quarter of that, the
+  rest was the conversation growing, about 3.8k a request, each addition read again by every later request. So Orbit
+  now steps in earlier, in three places. Every subagent Claude Code starts (named or not) is given the token rules by
+  the SubagentStart hook: each call re-reads the whole conversation, so several steps go in one call and what comes
+  back stays small (screenshots and long output to files, only the one or two needed opened, a summary rather than a
+  log). A teammate is told its own numbers once at half the point (how many calls, the size it started at, how much
+  each call added, how many times its first a call now costs). The lead's line names each teammate's calls and total
+  read. A request is counted once: Claude Code writes a line per block of a reply and lines of its own for a REPL
+  script's shell calls (the 72 requests above were 400 lines). `cosmos-orbit context teammates off` turns all of it off.
 
 | Scope | Set | Off | Show |
 |---|---|---|---|

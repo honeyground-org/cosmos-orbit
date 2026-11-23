@@ -6,7 +6,7 @@ from html import escape
 
 GROUPS = [
     ('Your own session (hooks)', [
-        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, PreToolUse on shell calls, and SessionEnd and StopFailure for Claude Code) once. Inert until something is switched on. Run it again after an update that adds a hook.'),
+        ('cosmos-orbit hooks install', 'Add the hooks (SessionStart, UserPromptSubmit, Stop, PreCompact, PreToolUse on shell calls, and SessionEnd, StopFailure and SubagentStart for Claude Code) once. Inert until something is switched on. Run it again after an update that adds a hook.'),
         ('cosmos-orbit on --global   ·   cosmos-orbit on   ·   export ORBIT=on',
          'Three scopes, each with off: every project (--global), this project (Git root), this terminal session (environment). Precedence: terminal → project → global → off. Stored switches persist.'),
         ('cosmos-orbit context [350k | on | off | reset] [--global]   ·   export ORBIT_HANDOFF_AT=250k',
@@ -25,9 +25,11 @@ GROUPS = [
          'the line Orbit submits. Built in keep; ORBIT_HANDOFF_TITLE for one terminal.'),
         ('cosmos-orbit context teammates [300k | off | reset] [--session [ID]]',
          'Teammates (Claude Code subagents started with a name) are not handed off like the session: past the point (built '
-         'in: the host\'s handoff point, 300k) the lead\'s brief names each one with its size, once, again every 100k, and '
-         'the teammate is told at its own shell calls to finish the step, write a handoff note and ask to be replaced. '
-         'Advice only. Without a value: the point and this session\'s teammates as measured (unknown when unreadable).'),
+         'in: the host\'s handoff point, 300k) the lead\'s brief names each one with its size, calls and total read, once, '
+         'again every 100k, and the teammate is told at its own shell calls to finish the step, write a handoff note and '
+         'ask to be replaced. Every subagent is given the token rules when it starts (fewer calls, small results), and a '
+         'teammate its own numbers once at half the point. Advice only; off turns all of it off. Without a value: the '
+         'point and this session\'s teammates as measured (size, calls, total read; unknown when unreadable).'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',

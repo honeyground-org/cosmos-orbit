@@ -18,6 +18,18 @@ model):
   one was replaced. Without a team to ask, a transcript written in the last 30 minutes counts as running.
 - The PreToolUse hook fires for a teammate's shell calls too. Its input carries `agent_id` (the transcript's name) and
   `agent_type` (a teammate's name); its `transcript_path` is the main session's.
+- Claude Code writes one transcript line per block of a reply (thinking, text, a tool call), each with the reply's usage,
+  and lines of its own (model <synthetic>, usage 0) for the shell calls a REPL script makes: a request is counted once,
+  by its message id (2026-11-23: one teammate's 400 assistant lines were 72 requests). What it read in total is the sum
+  of its requests.
+- SubagentStart's additionalContext reaches the subagent: Claude Code puts it in the subagent's first request
+  ("SubagentStart hook additional context: …", seen in its transcript).
+
+Where the tokens went (12 teammates of one session, 2026-11-23, 25 minutes): 72 requests read 13.2M in total, from 47k
+to 316k; the size it started at was a quarter of that, the rest was the conversation growing (3.8k a request), each
+addition read again by every later request. Fewer calls and smaller results are both the remedy, so every subagent is
+given the rules when it starts (SubagentStart), a teammate is told its own numbers when it reaches half the point
+(once), and the lead's line names each one's requests and total read.
 
 The point: settings.json "handoff.teammates" (`cosmos-orbit context teammates 300k|off|reset`), else the host's own
 handoff point as a session of that host gets it. Advice only: nothing is refused, no model is called, and nothing is
@@ -30,6 +42,8 @@ import re
 import time
 
 RENOTIFY = 100_000            # told again after this much growth (the teammate, and the lead about it)
+EARLY_SHARE = 0.5             # a teammate is told its numbers once at this share of the point
+EARLY_KEY = 'teammate-early:'     # + agent id: the early notice was given ({tokens, at})
 QUIET_SECONDS = 30 * 60       # no team to ask: a transcript written this recently still runs
 STALE_SECONDS = 24 * 3600     # a transcript not written for this long is not looked at
 TAIL_FIRST = 262_144          # the newest request ends the transcript; the 4 MB tail is read only if it is not here
@@ -43,6 +57,14 @@ SAFE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$')
 
 def _k(tokens):
     return '%dk' % round(tokens / 1000)
+
+
+def _k1(tokens):
+    return '%.1fk' % (tokens / 1000)
+
+
+def _amount(tokens):
+    return '%.1fM' % (tokens / 1_000_000) if tokens >= 1_000_000 else _k(tokens)
 
 
 def _json_file(path):
@@ -79,6 +101,37 @@ def measure(path):
     from .continuity import measure_transcript
     found = measure_transcript(path, TAIL_FIRST, sidechain=True) or measure_transcript(path, sidechain=True)
     return (found or {}).get('tokens')
+
+
+def usage(path):
+    """Every request in a subagent's transcript: how many (calls), the size of the first (start) and the latest, and
+    their sum (read: what it has read in total). Counted once per message id, Claude Code's own lines not at all. None
+    when there is no request yet. Reads the whole file: for the command and for a notice about to be given, never at
+    every tool call."""
+    sizes = {}
+    try:
+        with open(path, encoding='utf-8', errors='replace') as stream:
+            for number, line in enumerate(stream):
+                if '"usage"' not in line or '"assistant"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                message = event.get('message') if isinstance(event, dict) else None
+                if event.get('type') != 'assistant' or not isinstance(message, dict) or message.get('model') == '<synthetic>':
+                    continue
+                spent = message.get('usage') or {}
+                tokens = sum(spent.get(k) or 0 for k in ('input_tokens', 'cache_creation_input_tokens',
+                                                          'cache_read_input_tokens'))
+                if tokens > 0:
+                    sizes[message.get('id') or event.get('requestId') or ('line', number)] = tokens
+    except OSError:
+        return None
+    if not sizes:
+        return None
+    ordered = list(sizes.values())
+    return {'calls': len(ordered), 'start': ordered[0], 'latest': ordered[-1], 'read': sum(ordered)}
 
 
 def _name(stem, meta):
@@ -217,7 +270,8 @@ def lead_line(rows, at):
     head = '[orbit] TEAMMATES past the handoff point %s: ' % _k(at)
     tail = ('. When each has finished the step in hand, have it write a handoff note (what it did · code locations · '
             'branch · open PRs · what remains) and replace it with a new teammate given only that note.')
-    parts = ['%s %s' % (r['name'], _k(r['tokens'])) for r in sorted(rows, key=lambda r: -r['tokens'])]
+    parts = ['%s %s%s' % (r['name'], _k(r['tokens']), (' (%d calls, %s read)' % (r['calls'], _amount(r['read'])))
+                          if r.get('calls') else '') for r in sorted(rows, key=lambda r: -r['tokens'])]
     shown = list(parts)
     while len(shown) > 1 and len(head + ', '.join(shown) + tail) > LINE_CHARS:
         shown.pop()
@@ -247,9 +301,12 @@ def lead_reply(store, payload, host, environ=None, rows=None):
     if not any(_due(told.get(r['agent_id']), r['tokens']) for r in rows):
         return None                                    # told at these sizes already
     store.preference(LEAD_KEY + session, json.dumps({r['agent_id']: r['tokens'] for r in rows}, sort_keys=True))
+    for row in rows:                                   # what each has read so far: counted only now, when told
+        row.update({k: v for k, v in (usage(row['transcript']) or {}).items() if k in ('calls', 'read')})
     _record(store, session, 'teammates_over', {'at': at, 'session': session, 'layer': 'context',
                                                'teammates': [{'name': r['name'], 'agent_id': r['agent_id'],
-                                                              'tokens': r['tokens']} for r in rows]})
+                                                              'tokens': r['tokens'], 'calls': r.get('calls'),
+                                                              'read': r.get('read')} for r in rows]})
     return lead_line(rows, at)
 
 
@@ -260,9 +317,24 @@ def notice_text(tokens, at):
             'with a new teammate given only that note.' % (_k(tokens), _k(at)))
 
 
+def early_text(tokens, at, used):
+    """Half the point: the teammate's own numbers, what they cost, and what to do for the rest of the work."""
+    used = used or {}
+    calls, start = used.get('calls') or 1, used.get('start') or tokens
+    added = (tokens - start) / (calls - 1) if calls > 1 else 0
+    so_far = 'after %d call%s' % (calls, '' if calls == 1 else 's')
+    if added > 0:
+        so_far += ' (it started at %s, about %s added per call)' % (_k(start), _k1(added))
+    ratio = tokens / start if start else 1
+    return ('Orbit: your conversation is %s tokens %s and every call re-reads all of it%s. For the rest of this work '
+            'put several steps in each call and keep what comes back small (screenshots and long output to files, open '
+            'only what you need to decide). At %s you will be asked to hand off.'
+            % (_k(tokens), so_far, (': a call now costs %.1fx your first' % ratio) if ratio >= 1.5 else '', _k(at)))
+
+
 def notice(home, host, payload, environ=None):
-    """A teammate's own tool call: the notice past the point, once, then every RENOTIFY; None otherwise. Cheapest test
-    first: below the point (or unknown) it opens no store."""
+    """A teammate's own tool call: its numbers once at half the point (EARLY_SHARE), the notice past the point, once,
+    then every RENOTIFY; None otherwise. Cheapest test first: below half the point (or unknown) it opens no store."""
     agent, session, transcript = payload.get('agent_id'), payload.get('session_id'), payload.get('transcript_path')
     if host != 'claude' or not isinstance(agent, str) or not SAFE_ID.match(agent) or not transcript:
         return None
@@ -277,14 +349,24 @@ def notice(home, host, payload, environ=None):
     if not name:
         return None                                    # an anonymous subagent returns by itself
     tokens = measure(path)
-    if not tokens or tokens < at:
+    if not tokens or tokens < at * EARLY_SHARE:
         return None
     from .store import Store, now
     store = Store(home)
     try:
+        early = tokens < at
+        if early and store.preference(EARLY_KEY + agent):
+            return None                                # its numbers were given already, once is enough
         from .attach import hook_root
         if hook_root(store, payload.get('cwd') or os.getcwd(), session, 'pre-tool') is None:
             return None                                # Orbit is off where the teammate works
+        if early:
+            used = usage(path)
+            store.preference(EARLY_KEY + agent, json.dumps({'tokens': tokens, 'at': now()}))
+            _record(store, session, 'teammate_early', dict({'name': name, 'agent_id': agent, 'tokens': tokens, 'at': at,
+                                                            'session': session, 'layer': 'context'}, **(used or {})))
+            return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                                           'additionalContext': early_text(tokens, at, used)}}
         last = _json_text(store.preference(NOTICE_KEY + agent)) or {}
         if not _due(last.get('tokens'), tokens):
             return None                                # told for this stretch already
@@ -319,6 +401,62 @@ def decide(home, host, payload, environ=None):
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'additionalContext': text}} if text else None
 
 
+# ---------------------------------------------------------------- the rules, when a subagent starts
+
+RULES = ('Orbit, token rules for subagents: each of your tool calls re-reads this whole conversation, and whatever a '
+         'call adds is read again by every later call. So put several steps in one call (one script or one chained '
+         'command, not a call per step) and keep what comes back small: save screenshots and long output to files, open '
+         'only the one or two you need to decide, print a summary or the first lines rather than a whole log, and do '
+         'not open again what you have already read. When Orbit says you are past the handoff point, write one '
+         'handoff note.')
+
+
+def start(home, host, payload, environ=None):
+    """SubagentStart: the rules, once, for every subagent (named or not) where Orbit is on; none when the teammates'
+    point is off. The store is opened only to ask whether Orbit is on where the subagent works."""
+    if host != 'claude' or not isinstance(payload, dict):
+        return None
+    home = Path(home)
+    if not (home / 'tasks.sqlite3').is_file() or not point(home, host, environ)[0]:
+        return None                                    # no ledger here, or Orbit says nothing to subagents
+    from .store import Store
+    store = Store(home)
+    try:
+        from .attach import hook_root
+        session = payload.get('session_id')
+        if hook_root(store, payload.get('cwd') or os.getcwd(), session, 'pre-tool') is None:
+            return None                                # Orbit is off where the subagent works
+        agent = payload.get('agent_id')
+        _record(store, session, 'teammate_rules', {'agent_id': agent if isinstance(agent, str) and SAFE_ID.match(agent)
+                                                   else None, 'agent_type': str(payload.get('agent_type') or '')[:80],
+                                                   'session': session, 'layer': 'context'})
+        return {'hookSpecificOutput': {'hookEventName': 'SubagentStart', 'additionalContext': RULES}}
+    finally:
+        store.close()
+
+
+def start_main(home, host, stdin=None):
+    """`cosmos-orbit hook subagent-start`: stdin carries the event, stdout one JSON object or nothing. Exit 0 always."""
+    import sys
+    stdin = sys.stdin if stdin is None else stdin
+    home = Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()
+    try:
+        raw = stdin.read(400000) if not stdin.isatty() else ''
+        payload = json.loads(raw) if raw.strip() else {}
+        output = start(home, host, payload if isinstance(payload, dict) else {})
+    except Exception as error:  # noqa: BLE001 - a hook must not break the user's session
+        try:
+            from .store import now
+            with (home / 'hooks.log').open('a', encoding='utf-8') as handle:
+                handle.write(now() + ' subagent-start error: ' + repr(error)[:300] + '\n')
+        except OSError:
+            pass
+        return 0
+    if output:
+        print(json.dumps(output, ensure_ascii=False))
+    return 0
+
+
 # ---------------------------------------------------------------- the command
 
 def view(store, value=None, session=None, how=None, host='claude'):
@@ -334,9 +472,12 @@ def view(store, value=None, session=None, how=None, host='claude'):
             row = dict(row, written=time.strftime('%Y-%m-%d %H:%M', time.localtime(row['written'])))
             if row['running'] and row['tokens'] is None:
                 row['tokens'] = 'unknown'
+            used = usage(row['transcript']) or {}
+            row.update(calls=used.get('calls'), read=used.get('read'), started_at=used.get('start'))
             row['past'] = bool(at) and row['running'] and isinstance(row['tokens'], int) and row['tokens'] >= at
             measured.append(row)
     return {'teammates': {'at': at, 'off': not at, 'source': source, 'again_every': RENOTIFY,
+                          'numbers_at': int(at * EARLY_SHARE) if at else None, 'rules': RULES if at else None,
                           'set': 'cosmos-orbit context teammates 300k|off|reset (settings.json handoff.teammates)'},
             'changed': changed, 'session': session, 'session_from': how, 'transcript': transcript,
             'measured': measured if transcript else 'no transcript known for this session (its hooks have not run yet)'}

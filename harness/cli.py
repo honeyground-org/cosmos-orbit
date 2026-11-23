@@ -118,7 +118,7 @@ def main(argv=None):
         switch_cmd.add_argument('--global', dest='global_default', action='store_true')
     sub.add_parser('settings', help='Hook installation, default and per-project switches').add_argument('path', nargs='?')
     hooks_cmd = sub.add_parser('hooks', help='install | uninstall | status the hooks (SessionStart/UserPromptSubmit/Stop/PreCompact/'
-                                             'PreToolUse on Bash, and SessionEnd/StopFailure for Claude Code) in Claude Code and Codex')
+                                             'PreToolUse on Bash, and SessionEnd/StopFailure/SubagentStart for Claude Code) in Claude Code and Codex')
     hooks_cmd.add_argument('action', choices=('install', 'uninstall', 'status'))
     hooks_cmd.add_argument('--host', action='append', choices=('claude', 'codex'))
     service_cmd = sub.add_parser('service', help='install | uninstall | status: start Orbit again at login (the dashboard, '
@@ -237,7 +237,7 @@ def main(argv=None):
                              help='the point for every session of one host (built in: claude 300k, codex 250k; Claude Code is capped at 300k, Codex at 80%% of its window)')
     hook_cmd = sub.add_parser('hook', help=argparse.SUPPRESS)
     hook_cmd.add_argument('event', choices=('session-start', 'prompt', 'stop', 'pre-compact', 'session-end', 'stop-failure',
-                                            'pre-tool'))
+                                            'pre-tool', 'subagent-start'))
     hook_cmd.add_argument('--host', choices=('claude', 'codex'), default='claude')
     offload_cmd = sub.add_parser('offload', help='Run a test suite outside the conversation (run -- ARGV | run --shell CMD: '
                                                  'a short summary back, the full log on disk, no model) and the hook that '
@@ -358,6 +358,10 @@ def main(argv=None):
         # Every shell call runs this: decided before the store is opened, silent unless it matters (offload.py).
         from .offload import pre_tool_main
         return pre_tool_main(args.home, args.host)
+    if args.command == 'hook' and args.event == 'subagent-start':
+        # Every subagent Claude Code starts: the token rules, where Orbit is on (teammates.py).
+        from .teammates import start_main
+        return start_main(args.home, args.host)
     store = Store(args.home)
     if args.command == 'hook':
         # Host hook: stdin carries the event JSON; stdout carries one JSON object or nothing. Exit 0 always.

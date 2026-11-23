@@ -13,6 +13,9 @@ synthetic transcripts laid out as Claude Code 2.1.330 writes them (<session>/sub
   ③ the teammate: told at its own shell calls (agent_id), once per crossing, again after 100k or after a compaction;
     silent where it must be
   ④ the point: the host's handoff point, `cosmos-orbit context teammates 250k|off|reset`, and the measured list
+  ⑤ the rules: every subagent Claude Code starts is given them (SubagentStart), where Orbit is on; silent where it must be
+  ⑥ the numbers: requests counted once per message id (Claude Code's own lines not at all), the teammate told its own
+    numbers once at half the point, the lead's line and the measured list with calls and total read
 
 Nothing starts a model or touches the live Orbit home or host settings: the store and the Claude Code folder are
 temporary.
@@ -235,9 +238,15 @@ def teammate_notice(base, store):
     home = store.home
     pay, sub = lead(base, store, 'T1')
     team(base, ['gamma'])
-    g_id, g_path = mate(sub, 'gamma', 290_000, hexid='fedcba9876543210')
+    g_id, g_path = mate(sub, 'gamma', 140_000, hexid='fedcba9876543210')
     call = bash(pay, 'npm run build', agent_id=g_id, agent_type='gamma', cwd=pay['cwd'])
-    check('290k: silent', hook(base, home, call) is None)
+    check('140k (below half the point): silent', hook(base, home, call) is None)
+    say(g_path, 290_000, agent=g_id)
+    early = note(hook(base, home, call))
+    check('290k (past half the point): its numbers, once, not yet the handoff notice',
+          all(w in early for w in ('290k', 'after 2 calls', 'started at 140k', '150.0k added per call', '300k'))
+          and 'handoff note' not in early, early)
+    check('… told once: the next call at 290k is silent', hook(base, home, call) is None)
     say(g_path, 330_000, agent=g_id)
     out = hook(base, home, call)
     text = note(out)
@@ -291,7 +300,9 @@ def settings(base, store):
     team(base, ['delta'])
     d_id, d_path = mate(sub, 'delta', 260_000, hexid='2222222222222222')
     call = bash(pay, agent_id=d_id, agent_type='delta')
-    check('260k at the 300k point: silent', hook(base, home, call) is None)
+    first = note(hook(base, home, call))
+    check('260k at the 300k point: its numbers, not the handoff notice', '260k' in first and 'handoff note' not in first, first)
+    check('… and then silent', hook(base, home, call) is None)
     changed = context(base, home, 'teammates', '250k')
     check('context teammates 250k: stored, applies', changed['teammates']['at'] == 250_000
           and changed['teammates']['source'] == 'handoff.teammates', changed.get('teammates'))
@@ -319,10 +330,111 @@ def settings(base, store):
           and rows['echo']['past'] is False, rows.get('echo'))
 
 
+def start_hook(base, home, payload, host='claude', **extra):
+    out = run(base, home, ['hook', 'subagent-start', '--host', host], stdin=json.dumps(payload), **extra)
+    return (json.loads(out.stdout) if out.stdout.strip() else None), out
+
+
+def rules(base, store):
+    print('⑤ the rules')
+    home = store.home
+    pay, sub = lead(base, store, 'R1')
+    born = dict(pay, hook_event_name='SubagentStart', agent_id='arules-4444444444444444', agent_type='rules')
+    out, raw = start_hook(base, home, born)
+    spec = (out or {}).get('hookSpecificOutput') or {}
+    text = spec.get('additionalContext') or ''
+    check('a teammate starts: the rules, as SubagentStart additionalContext', spec.get('hookEventName') == 'SubagentStart'
+          and text == teammates.RULES and raw.returncode == 0, (out, raw.stderr[-300:]))
+    check('… which say why (every call re-reads it all) and what to do (several steps a call, small results, files)',
+          all(w in text for w in ('re-reads this whole conversation', 'several steps in one call', 'to files',
+                                  'one or two you need', 'one handoff note')) and len(text) <= 600, text)
+    anon, _ = start_hook(base, home, dict(born, agent_id='a5555555555555555', agent_type='Explore'))
+    check('an anonymous subagent is given them too', note(anon) == teammates.RULES, anon)
+    tid = attach.current_task(store, Path(pay['cwd']))['id']
+    given = [e['payload'] for e in store.events(tid) if e['kind'] == 'teammate_rules']
+    check('the ledger holds each one given (rules, Explore)', [g['agent_type'] for g in given] == ['rules', 'Explore'], given)
+    entries = attach.hook_entries('claude')
+    check('Claude Code gets the SubagentStart hook: every subagent, no status line',
+          entries.get('SubagentStart', {}).get('matcher') == '' and 'statusMessage' not in entries['SubagentStart']['hooks'][0]
+          and entries['SubagentStart']['hooks'][0]['command'].endswith('hook subagent-start --host claude'),
+          entries.get('SubagentStart'))
+    check('… Codex does not (it has no subagents to tell)', 'SubagentStart' not in attach.hook_entries('codex'))
+    check('… and an installed one is recognised as Orbit\'s (status, uninstall)', attach._is_ours(entries['SubagentStart']))
+    missing = base / 'no-home-rules'
+    for label, payload, extra in (
+            ('ORBIT=off in the terminal', born, {'ORBIT': 'off'}),
+            ('no ledger in the home (and the home is not created)', born, {'_home': missing}),
+            ('a Codex host', born, {'_host': 'codex'})):
+        out, raw = start_hook(base, extra.pop('_home', home), payload, host=extra.pop('_host', 'claude'), **extra)
+        check('silent: %s' % label, out is None and raw.returncode == 0, (out, raw.stderr[-200:]))
+    check('… the home stays absent', not missing.exists())
+    bad = run(base, home, ['hook', 'subagent-start', '--host', 'claude'], stdin='{not json')
+    check('a payload that is not JSON: exit 0, nothing printed', bad.returncode == 0 and not bad.stdout.strip(), bad.stderr[-200:])
+    attach.set_switch(store, 'off', Path(pay['cwd']))
+    out, _ = start_hook(base, home, born)
+    check('silent: Orbit off for the project', out is None, out)
+    attach.set_switch(store, 'on', Path(pay['cwd']))
+    context(base, home, 'teammates', 'off')
+    out, _ = start_hook(base, home, born)
+    check('silent: teammates off', out is None, out)
+    context(base, home, 'teammates', 'reset')
+    out, _ = start_hook(base, home, born)
+    check('control: the same start is given them again once on', note(out) == teammates.RULES, out)
+
+
+def reply(path, tokens, mid, blocks=1, agent=None):
+    """One request written as Claude Code writes it: a line per block (thinking, tool call), each with the same id and usage."""
+    usage = {'input_tokens': 5, 'cache_creation_input_tokens': 995, 'cache_read_input_tokens': tokens - 1000}
+    with open(path, 'a') as stream:
+        for block in range(blocks):
+            stream.write(json.dumps({'type': 'assistant', 'isSidechain': True, 'agentId': agent, 'requestId': 'req_' + mid,
+                                     'message': {'id': 'msg_' + mid, 'model': 'claude-test', 'role': 'assistant',
+                                                 'usage': usage, 'content': [{'type': 'thinking' if block == 0 and blocks > 1
+                                                                              else 'tool_use'}]}}) + '\n')
+
+
+def numbers(base, store):
+    print('⑥ the numbers')
+    home = store.home
+    pay, sub = lead(base, store, 'N2')
+    team(base, ['zeta'])
+    z_id, z_path = mate(sub, 'zeta', hexid='6666666666666666')
+    reply(z_path, 47_000, '1', blocks=2, agent=z_id)                 # thinking + tool call: one request, two lines
+    say(z_path, 1, agent=z_id, model='<synthetic>')                  # a REPL script's shell call: Claude Code's own line
+    say(z_path, 1, agent=z_id, model='<synthetic>')
+    reply(z_path, 90_000, '2', blocks=2, agent=z_id)
+    reply(z_path, 155_000, '3', agent=z_id)
+    used = teammates.usage(z_path)
+    check('7 assistant lines are 3 requests: counted once per message id, Claude Code\'s own lines not at all',
+          used == {'calls': 3, 'start': 47_000, 'latest': 155_000, 'read': 292_000}, used)
+    check('control: counting lines would have said 7 (the 2026-11-23 mistake: 400 lines, 72 requests)',
+          sum(1 for line in z_path.read_text().splitlines() if '"assistant"' in line) == 7)
+    check('no request yet: None', teammates.usage(mate(sub, 'empty', hexid='7777777777777777')[1]) is None)
+    call = bash(pay, agent_id=z_id, agent_type='zeta')
+    text = note(hook(base, home, call))
+    check('half the point (155k of 300k): the teammate told its own numbers',
+          all(w in text for w in ('155k', 'after 3 calls', 'started at 47k', '54.0k added per call', '3.3x your first',
+                                  'several steps in each call', '300k')), text)
+    tid = attach.current_task(store, Path(pay['cwd']))['id']
+    early = [e['payload'] for e in store.events(tid) if e['kind'] == 'teammate_early']
+    check('the ledger holds it, with calls and total read', len(early) == 1 and early[0]['calls'] == 3
+          and early[0]['read'] == 292_000, early)
+    reply(z_path, 1_200_000, '4', agent=z_id)
+    lines = teammate_lines(prompt(store, pay))
+    check('the lead\'s line: size, calls and total read', len(lines) == 1 and 'zeta 1200k (4 calls, 1.5M read)' in lines[0],
+          lines)
+    shown = context(base, home, 'teammates', '--session', 'N2')
+    rows = {r['name']: r for r in shown.get('measured') or []} if isinstance(shown.get('measured'), list) else {}
+    check('the measured list: calls, total read, the size it started at', rows.get('zeta', {}).get('calls') == 4
+          and rows['zeta']['read'] == 1_492_000 and rows['zeta']['started_at'] == 47_000, rows.get('zeta'))
+    check('… and the point\'s numbers and rules', shown['teammates'].get('numbers_at') == 150_000
+          and shown['teammates'].get('rules') == teammates.RULES, shown.get('teammates'))
+
+
 def main():
     base = Path(tempfile.mkdtemp(prefix='orbit-teammates-'))
     store = Store(base / 'home')
-    for section in (measurement, lead_line, teammate_notice, settings):
+    for section in (measurement, lead_line, teammate_notice, settings, rules, numbers):
         try:
             section(base, store)
         except Exception:  # noqa: BLE001 - a section that cannot finish fails as one check; the next still runs

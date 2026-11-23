@@ -26,10 +26,12 @@ HOOK_EVENTS = (('SessionStart', 'session-start', 20), ('UserPromptSubmit', 'prom
 # from its transcript at the next prompt. PreToolUse (shell calls only, offload.py): both hosts have it, with the same
 # output contract (Claude Code 2.1.327 hook docs; codex-cli 0.167.1's embedded pre-tool-use schema, matcher alias Bash).
 PRE_TOOL = ('PreToolUse', 'pre-tool', 5)
-HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10), PRE_TOOL),
+# SubagentStart (Claude Code only): every subagent is given the token rules when it starts (teammates.py).
+HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10), PRE_TOOL,
+                                        ('SubagentStart', 'subagent-start', 5)),
                'codex': HOOK_EVENTS + (PRE_TOOL,)}
 HOOK_MATCHERS = {'PreToolUse': 'Bash'}  # every other event takes every occurrence
-QUIET_EVENTS = ('PreToolUse',)          # runs on every shell call: no status line
+QUIET_EVENTS = ('PreToolUse', 'SubagentStart')   # on every shell call / every subagent: no status line
 CLOSED = ('verified', 'stalled', 'interrupted', 'closed')  # closed: untouched for 12 h, or continued elsewhere (lifecycle)
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
 # The claim words, negated in the same clause: '완료로 주장하지 않습니다', '완료로 기록한 건 없어요', 'not done yet'.
@@ -223,7 +225,7 @@ def hook_entries(host, home=None):
 # `hooks install --home H` writes `cosmos-orbit --home H hook …`, which HOOK_MARK alone does not find: such hooks were
 # installed again beside themselves, never uninstalled, and reported missing (found 2026-11-18 driving the CLI).
 HOOK_COMMAND = re.compile(r'cosmos-orbit\b.*\shook\s+(?:session-start|prompt|stop|pre-compact|session-end|stop-failure'
-                          r'|pre-tool)\b')
+                          r'|pre-tool|subagent-start)\b')
 
 
 def _is_ours(entry):
