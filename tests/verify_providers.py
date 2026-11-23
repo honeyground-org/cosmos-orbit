@@ -126,6 +126,33 @@ def main():
     argv, _ = argv_of('m-broken', read_only=True)
     check('control: unreadable settings → no --model, the call still runs', model_flag(argv) is None, argv)
 
+    print('④ the reviewer\'s shell runs inside its sandbox, not behind a prompt nobody can answer '
+          '(2026-11-20: its git and node commands were all denied, and reviews stopped as needs_input)')
+    work = base / 'workspace'
+    work.mkdir()
+
+    def settings_of(argv):
+        return json.loads(argv[argv.index('--settings') + 1])
+
+    def sandbox_of(argv):
+        return settings_of(argv)['sandbox']
+
+    argv, _ = argv_of('s-review', read_only=True, workspace=work)
+    box = sandbox_of(argv)
+    check('reviewer: a command the sandbox holds runs without a prompt', box.get('autoAllowBashIfSandboxed') is True, box)
+    check('reviewer: a command with a variable or several parts runs too (Bash allowed; the sandbox still holds it)',
+          settings_of(argv).get('permissions') == {'allow': ['Bash']}, settings_of(argv))
+    check('reviewer: no command runs outside the sandbox', box.get('enabled') is True and box.get('failIfUnavailable') is True
+          and box.get('allowUnsandboxedCommands') is False, box)
+    check('reviewer: no write to the workspace or to Orbit\'s home',
+          str(work.resolve()) in box['filesystem']['denyWrite'] and str(base / 'home') in box['filesystem']['denyWrite'], box)
+    check('reviewer: no network', box['network']['deniedDomains'] == ['*'] and box['network']['allowedDomains'] == [], box)
+    check('reviewer: still no prompts, and only the read tools and Bash',
+          argv[argv.index('--permission-prompts') + 1] == 'none' and argv[argv.index('--tools') + 1] == 'Read,Glob,Grep,Bash', argv)
+    argv, _ = argv_of('s-exec', workspace=work)
+    check('control: the executor keeps the person\'s own permission rules (no blanket allow added)',
+          'autoAllowBashIfSandboxed' not in sandbox_of(argv) and 'permissions' not in settings_of(argv), settings_of(argv))
+
     print('\n' + ('FAIL ' + ', '.join(FAILED) if FAILED else 'PASS') + ' · ' + str(base))
     return 1 if FAILED else 0
 

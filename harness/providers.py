@@ -127,7 +127,17 @@ class Provider:
                            'network': {'allowedDomains': [], 'deniedDomains': [] if getattr(self, 'public_web', False) else ['*']}}
                 if read_only:
                     sandbox['filesystem']['denyWrite'].append(str(Path(workspace).resolve()))
-                command += ['--settings', json.dumps({'sandbox': sandbox}),
+                    # Nobody can answer a permission prompt here (--permission-prompts none), so a shell command
+                    # outside the CLI's own short read-only list was denied before it ran, and a review left with
+                    # no successful observation stopped as needs_input. The sandbox already bounds every command:
+                    # no write to the workspace or to Orbit's home, no network, no command outside it. Sandboxed
+                    # commands are allowed, and so is Bash itself: a command with a variable or several parts
+                    # ("N=$(ls | wc -l); echo $N") still asked for approval with the first alone.
+                    sandbox['autoAllowBashIfSandboxed'] = True
+                settings = {'sandbox': sandbox}
+                if read_only:
+                    settings['permissions'] = {'allow': ['Bash']}
+                command += ['--settings', json.dumps(settings),
                             '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']
             else:
                 if not read_only:
