@@ -71,6 +71,7 @@ Everything else is left to the native CLI, and Orbit judges itself by one thing:
 | **The goal survives** | Your request and every correction are fixed in a ledger and re-presented after compaction and in the next session. | A compacted session no longer forgets what you asked for. |
 | **An independent review** | A completion claim needs evidence per item and passes one read-only review in a fresh context. | The session does not grade its own work. |
 | **Handoff at a measured point** | At 300k tokens in Claude Code, 250k in Codex (a setting) the work continues in a fresh session rebuilt from the ledger; **in cmux or tmux Orbit types `/clear` itself** and your next request runs there. | 31–51% fewer cost-equivalent tokens on 99 real sessions; nothing to retype ([details](#context-and-mid-task-handoff)). |
+| **Finished work closes in order** | When the review verifies a round you pick end, continue or keep; a session with no prompt for 3 days is closed the same way (handoff, memory with Brain, `/exit`), as complete or as stopped with work left. | Idle terminals no longer hold memory for days, and the session list says which work was finished ([details](#after-days-without-a-prompt-the-session-closes)). |
 | **Messages wake an idle session** | When another session (Codex or Claude Code) sends a message, **the receiving session is woken by itself** once its input line is empty. **Your own typing is never erased.** | No more typing "check it" into a session to make it read its mail ([details](#messages-between-sessions-an-idle-session-wakes-up-by-itself)). |
 | **Self-evolution in two layers** | **What your use teaches stays on your machine as data; only general fixes can reach the code**, through four gates. | Orbit improves without the code becoming personal ([details](#self-evolution-agent-orbit-improves-itself-without-making-the-code-personal)). |
 | **One view of all of it** | The engine room and `cosmos-orbit watch` show tasks, evidence, reviews, the handoff mode, the panes a message can wake and the self-evolution mode. | What Orbit did is visible, not assumed ([details](#observe-the-same-work)). |
@@ -167,7 +168,7 @@ What happens in an attached session:
    | A fixed check failed · the request changed | Fix the check · revise the goals, then continue |
    | Claimed, review running | Lets it stop; the supervisor waits and resumes it if the review comes back unmet |
    | A question for the user (`needs_input`) · paused · handoff | Lets it stop; nothing is resumed, no supervisor opens |
-   | Verified | Complete: the review passed against the goal; the task is closed |
+   | Verified | Complete: the review passed against the goal; the round is complete and the next Stop offers end, continue or keep |
 
    A progress report or `claim --remaining` is not a reason to stop. A question the user has already
    answered no longer counts as waiting, and the executor's `--remaining` list counts only until the
@@ -200,6 +201,8 @@ What happens in an attached session:
      still does not move, or one in a terminal Orbit cannot type into, is told to you once instead. Measured before:
      the supervisor left after 15 unchanged minutes 30 times in two weeks and nothing started it again, and about
      ten unfinished tasks sat until the 12-hour close.
+   - **A session nobody used for days is closed** — at most every 10 minutes, in order, as complete or as stopped
+     with work left ([After days without a prompt](#after-days-without-a-prompt-the-session-closes)).
    `cosmos-orbit patrol --once` runs one round by hand; `ORBIT_PATROL=off` keeps the dashboard from running it.
    When the pane a session's hooks named cannot be read (Codex can run hooks in its app-server daemon,
    which names the pane the first Codex of that home started in), the observer uses the one pane whose
@@ -220,9 +223,21 @@ old task keeps a record of what moved. It prints the plan; `--apply` does it.
 
 ### After the work: verified, reopened, closed, continued
 
-- **Verified is done.** If the session that did the work makes another substantial request while the task is
-  still open, the same task becomes `working` again and its goals are marked to revise (`REOPENED` in the brief).
-  A request from another terminal starts a new task.
+- **Verified is done, and stays done.** The review that verifies a task fixes that *round* complete: its goal and the
+  items it met stay recorded on the task. If the session that did the work makes another substantial request while the
+  task is still open, that request opens the next round of the same task: `working` again, its goals marked to revise
+  (`REOPENED` in the brief), and a review of its own. The brief then opens with the round being worked on
+  (`ROUND 2 (since …; 1 earlier round complete)`) and names the first request after it, and the reviewer of a later
+  round judges only that round, told which rounds were verified before. Measured 2026-11-24: one task had been verified
+  three times over three requests and its brief still opened with the first, so a fresh context took the first request
+  for the work to do. `handoff --write` lists the rounds. A request from another terminal starts a new task.
+- **A complete round asks you what next.** The notice names the round and how many goals were verified, and offers
+  three answers, each typed on a line of its own: `end` (`종료`), `continue` (`이어서`) or `keep` (`그대로 두기`). It
+  is shown with the review's outcome and once more at the session's next Stop. `end` closes the session in order: a
+  handoff checkpoint, memory when Brain is configured for the task, then `/exit` typed into the pane (cmux or tmux;
+  elsewhere you are asked to type it); the task closes as complete. After `continue` or `keep` the session stays open
+  and your next request opens the next round. The answer runs no turn, and the line Claude Code puts back into the
+  input after the hook blocked it is emptied.
 - **Untouched for 12 hours, a task closes** (status `closed`): a verified one (reason `verified`) and an
   unfinished one whose sessions went quiet (reason `idle`). "Untouched" counts both the task's own record and the
   last hook of every live session bound to it, so a terminal still in use keeps its task open; a task waiting for
@@ -231,16 +246,44 @@ old task keeps a record of what moved. It prints the plan; `--apply` does it.
 - **A closed task comes back only when you ask.** `cosmos-orbit list --closed [--workspace .]` lists closed tasks
   with their goal, when and why they closed, and their last checkpoint. `cosmos-orbit continue TASK_ID` takes one
   back: run inside Claude Code or Codex, that session works on it from its next prompt (`--session` names another),
-  and a task the session had just started for the same request closes and its requests move over. Run from a plain
+  and a task the session had just started for the same request closes and its requests move over; a task taken back
+  after a verified round opens its next round. Run from a plain
   shell, the next new session in the task's folder takes it. The one exception: the session that worked on a task
   closed for inactivity comes back with a go-ahead ("이어서 진행해", "continue") — the same conversation going on, so
   the task reopens by itself (a night with the computer off closes every open task). Orbit never links a new request
   to a closed task by itself. When a new request looks like one (shared words with its goal or last checkpoints, closed within 7 days, or
   the same session), the brief names it in one line, as a suggestion.
 
+### After days without a prompt: the session closes
+
+A task closes after 12 hours untouched, but its session goes on running: measured 2026-11-24, of five live Claude Code
+sessions two had had no input for 21–22 hours and held 558 MB and 237 MB of memory. So a session with no prompt from
+you for **3 days** (built in, on by default) is closed by Orbit in the same order as your own `end`: a handoff
+checkpoint, memory when Brain is configured for the task, then `/exit` typed into its pane. A task whose round was
+verified closes as complete; one with work left closes as stopped, with its open items counted; a task another live
+session still works on stays open, and only the idle session ends. Only sessions working on an Orbit task are
+considered, and the time counts from your last prompt in that session.
+
+Orbit's round (the dashboard service) runs it at most every 10 minutes and closes a session only where its pane shows
+an empty input line. It leaves a session alone while a turn runs, while text you typed and did not send is in the
+input, at a permission question or any screen it cannot read as an empty input, while a review runs, in a terminal
+Orbit cannot type into, and when you kept it. One limit: Claude Code's prompt suggestion (the grey text in the input
+after a turn) reads the same as typed text on a plain screen (cmux gives no colours; measured 2026-11-24 in a live
+pane), so a session showing one is left as well; `promptSuggestionEnabled: false` in Claude Code's settings lets those
+sessions close.
+
+```sh
+cosmos-orbit sessions --idle              # what would close now, and why the rest stays (nothing is closed)
+cosmos-orbit sessions --keep SESSION      # never close this session for being idle (--unkeep SESSION undoes it)
+cosmos-orbit context idle-close 3d        # or 12h · on · off · reset (settings.json "idle_close")
+```
+
+Closed tasks of the last 7 days appear in the session list asked for in words (below), as *stopped* (work left) or
+*complete*; a number takes that task back by handoff in a new tab.
+
 ### After a restart: the sessions it cut off
 
-A restart ends every open session at once, with no SessionEnd. Orbit keeps the last hook of every session it serves,
+A restart ends every open session at once. Orbit keeps the last hook of every session it serves,
 so it always knows when each one last worked. `cosmos-orbit sessions [--days 7] [--followed] [--json]` lists the
 sessions that never ended, newest first, grouped as *cut off by the restart* (last activity before this boot),
 *closed without ending* (no host runs it now) and *open now* (a host still runs it: its session ID, or its pane
@@ -261,6 +304,14 @@ counts. A session a newer one followed in the same pane (a /clear, a handoff) is
 The first session that starts after a restart is told once how many sessions it cut off and to run
 `cosmos-orbit sessions`. A Claude Code session started in Code Mode resumes only with Code Mode on.
 
+A power cut leaves no SessionEnd at all. A restart from the menu, a closed terminal or a quit app signals Claude Code
+instead, and it reports SessionEnd with reason `other` (measured on Claude Code 2.1.330: SIGHUP and SIGTERM report
+`other`, `/exit` reports `prompt_input_exit`). Orbit used to forget a session at any SessionEnd, so the session that
+was working before the 2026-11-23 restart (signalled 42 s before the new boot) was missing from the list and from the
+notice. A session a signal ended is now kept for this list only (nothing wakes it): ended before this boot it is cut
+off, ended since it is closed. A session you ended with `/exit` is not listed, one resumed since is listed once, and
+the kept records go after 30 days.
+
 Or just ask in your own session, in words: "세션 목록 보여줘", "세션 이어서 하고 싶어", "show my sessions". The prompt
 hook answers with the same list, numbered and in plain words (in the language you asked in), and no turn runs:
 
@@ -268,22 +319,26 @@ hook answers with the same list, numbered and in plain words (in the language yo
 Orbit: 이어서 할 수 있는 세션 3개 (최근 7일 · 이번 부팅 2026-11-21 08:40)
 번호를 입력하면 그 세션이 새 탭에서 이어서 열립니다. 여러 개는 "1 3", 끊긴·닫힌 세션 전부는 "전부".
 
-[재부팅으로 끊긴 세션]
+[진행 중 · 재부팅으로 끊긴 세션]
   1  11-21 08:12 · ~/projects
      하던 일: Ship the PDF app to the stores
-     다음: wait for review; then the landing page
+     다음 할 일: wait for review; then the landing page
   2  11-20 23:40 · ~/projects/site · Codex
      하던 일: port the parser
-[지금 열려 있는 세션 (번호를 고르면 그 탭으로 이동)]
+
+[진행 중 · 지금 열려 있는 세션 (번호를 고르면 그 탭으로 이동)]
   3  11-21 09:02 · ~/projects
 ```
 
 Type a number and Orbit takes that session up: in cmux a new workspace opens in the folder the session started in and
 runs its resume command; in tmux a new window does; elsewhere you get the command to paste. A session that is still
-open is not opened twice: its tab is brought forward. `1 3` opens several, `전부` (or `all`) every cut-off and
-closed one. Anything else typed after the list, or the same words sent again, goes to the session as usual. A request
-for work that mentions sessions ("세션 목록 기능 만들어줘") or words about this very session ("이 세션에서 이어서 해줘")
-are not taken for the question. In a reopened session, say "이어서 해줘" (continue) to go on with its work.
+open is not opened twice: its tab is brought forward. `1 3` opens several, `전부` (or `all`) every listed one that is
+not open now. Below the sessions in progress, the list shows the tasks closed in the last 7 days in two more groups,
+`[멈춤 · 남은 일이 있는 채 정리됨 …]` (stopped with work left, with the number of open items) and `[완결 · 끝내고 닫힘]`
+(complete); a number there takes the task back by handoff: in cmux or tmux a new tab starts a session in its folder
+that picks it up, elsewhere the next session you start there does. Anything else typed after the list, or the same
+words sent again, goes to the session as usual. A request for work that mentions sessions ("세션 목록 기능 만들어줘")
+or words about this very session ("이 세션에서 이어서 해줘") are not taken for the question. In a reopened session, say "이어서 해줘" (continue) to go on with its work.
 
 ## When the request changes
 
@@ -367,6 +422,14 @@ a habit:
    ends with a Stop after the review began, and that Stop alone is not work (measured 2026-11-06 in a
    real cmux Codex pane: before this, such a verdict was filed under the session's own changes, so a pass
    would have been dropped with "claim again"). Without a readable transcript any hook counts.
+
+   To tell what moved, Orbit fingerprints the workspace at each claim by reading every tracked and visible untracked
+   file. An untracked file inside a build cache is hashed by its size and modification time instead: a change there
+   still moves the fingerprint, and nothing is read. A cache is found by the marks the tools leave: a `CACHEDIR.TAG`
+   that starts with its signature, a folder named `*.noindex`, and the folder holding one (Xcode's derived data).
+   Tracked files are always read, and a tree without a cache keeps the fingerprint it had. Measured 2026-11-23: an
+   Xcode derived-data folder left in the workspace (31 GB, 112,843 untracked files) made each fingerprint take 1 to 2.5
+   minutes and raised the load to 61 on 12 cores, until the machine stopped answering and was restarted.
 
 Unattended work follows the same rule: a correction marks the definitions stale, the executor's next
 response proposes the revised set, and Orbit adopts it as a new revision. A completion claim made
@@ -521,7 +584,10 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      seconds for the mod, then types as before; without the mod there is no wait. The mod also empties the input,
      where Claude Code puts a blocked request back (left there, one Enter would run it twice). After the clear it
      submits the carry line only once a fresh session took the task over (`handoff-claim --taken-over TASK`,
-     polled up to 20 s); otherwise it submits nothing and says so, and the request stays carried. A fresh session
+     polled up to 20 s); otherwise it submits nothing and says so, and the request stays carried. When either goes
+     wrong (Claude Code refuses the `/clear`, or no fresh session takes over), the mod reports it at once with its
+     reason (`cosmos-orbit handoff-claim --session S --failed REASON`), so the next attempt need not wait for the
+     typist's 25 s timeout. A fresh session
      that starts outside any repository (the host was launched in a folder holding many, and the agent had cd'd
      into one) still takes over the handoff waiting in its own pane, and a bound session keeps its task while its
      shell is outside a repository (2026-11-07: four handoffs had failed this way). Measured end to
@@ -568,6 +634,24 @@ Code) or rollout (Codex) and hands the work over to a fresh session at a measure
      exactly once: by the old session if it runs another turn (its brief shows `HELD REQUEST`), or by
      the fresh session after your `/clear`, into which Orbit then types the carry line itself once
      its input line is empty.
+
+     **A failed attempt is tried again (2026-11-24).** One automatic `/clear` that did not take effect used to
+     leave the session asking you for `/clear` at every stop, until it had grown to 778k (point 300k). Now Orbit
+     tries again at the session's next stop with work left or at your next request, at most 3 attempts in all;
+     after the third, the brief has the session ask you to type `/clear`. Where there is a terminal to type into
+     (cmux, tmux) the retry types `/clear` itself instead of leaving it to the mod, whose attempt is the one that
+     failed. A request the
+     failed attempt carried and no session received goes with the retry, ahead of the new one. A message that reaches
+     the session while an automatic handoff is under way (started in the last 45 s) is blocked and goes with the
+     handoff as well, nothing to retype: that day a queued teammate message ran a turn 75 ms after the blocked
+     request, and the mod's `/clear` never took effect.
+
+   When a fresh Claude Code session took the task over (after your `/clear` or Orbit's), its first prompt (the carry
+   line or your own) shows once which task it took over, how large the previous conversation was, the checkpoint it
+   starts from and the request carried with it, or that nothing was carried. It comes with the first prompt because
+   Claude Code does not show a SessionStart message after `/clear` and does show a prompt hook's (measured on Claude
+   Code 2.1.331). Before, the screen after `/clear` showed only the carry line, or nothing at all after a `/clear`
+   typed by hand, and whether the handoff had worked could not be seen (2026-11-24).
 4. An open handoff that nobody took **expires after 12 hours** and closes on compaction, so it can
    never hand a task to an unrelated session opened later in the same folder. When several are open
    in one folder, **the pane decides**: a fresh session takes the handoff Orbit typed `/clear` for in
@@ -1049,8 +1133,13 @@ platform's own service manager (macOS launchd LaunchAgents in `~/Library/LaunchA
 
 - **dashboard** — `cosmos-orbit dashboard --no-open` on a fixed port (default 55050), started at login and again
   whenever it exits. Observation never starts model work. It also runs Orbit's round once a minute: questions
-  waiting for you are told, and idle sessions with work left are sent back (see the manager, item 7).
-- **recovery pass** — `cosmos-orbit worker --idle-exit 120`, once at login. It continues only work that was already
+  waiting for you are told, idle sessions with work left are sent back (see the manager, item 7), and sessions with
+  no prompt for days are closed ([After days without a prompt](#after-days-without-a-prompt-the-session-closes)).
+- **recovery pass** — `cosmos-orbit worker --idle-exit 120 --when-calm`, once at login. It first waits until the
+  machine has settled: 3 minutes after boot and a 1-minute load below one per core, looked at every 15 s. After 20
+  minutes it starts anyway, a load that cannot be read does not hold it, and a worker that started meanwhile is left
+  to run (2026-11-23, after a forced restart, it started beside nine agent sessions the terminal app reopened at the
+  same moment, at a 5-minute load of 78 on 12 cores). Then it continues only work that was already
   authorised before the shutdown (a review a completion claim requested, a call the shutdown interrupted, an
   unattended task that was running) and exits when quiet. It is not a resident worker: hooks, the dashboard and
   `start`/`resume` already start one when work appears, and a resident worker would re-read every task every
@@ -1059,7 +1148,8 @@ platform's own service manager (macOS launchd LaunchAgents in `~/Library/LaunchA
 Installing never runs the recovery pass, so installing or updating starts no model work; the dashboard starts at
 once. Both definitions keep the store (`--home`), and the `PATH` of the shell that installed them, because a service
 manager starts programs with a bare `PATH` where the provider CLIs are not found. Without `--port`/`--lang`, a
-reinstall keeps the registered values. A port already held by a dashboard started by hand is refused rather than
+reinstall keeps the registered values, and running `install.sh` again rewrites a registration made by an earlier
+version, so it gains `--when-calm`. A port already held by a dashboard started by hand is refused rather than
 fought over. Elsewhere (no launchd and no `systemctl --user`) the command prints the two commands to start at login
 with the system's own tool. Logs: `<home>/service-dashboard.log`, `<home>/service-recover.log`.
 
