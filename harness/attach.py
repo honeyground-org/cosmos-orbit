@@ -29,6 +29,9 @@ PRE_TOOL = ('PreToolUse', 'pre-tool', 5)
 HOST_EVENTS = {'claude': HOOK_EVENTS + (('SessionEnd', 'session-end', 10), ('StopFailure', 'stop-failure', 10), PRE_TOOL),
                'codex': HOOK_EVENTS + (PRE_TOOL,)}
 HOOK_MATCHERS = {'PreToolUse': 'Bash'}  # every other event takes every occurrence
+# Claude Code's PreToolUse also takes the Agent call (Task: its earlier name): subagents.py counts a session's subagents
+# there and refuses the one past the limit. Codex has no such call; its matcher stays the shell's.
+HOST_MATCHERS = {'claude': {'PreToolUse': 'Bash|Agent|Task'}}
 QUIET_EVENTS = ('PreToolUse',)          # runs on every shell call: no status line
 CLOSED = ('verified', 'stalled', 'interrupted', 'closed')  # closed: untouched for 12 h, or continued elsewhere (lifecycle)
 CLAIM_WORDS = re.compile(r'(완료|끝났|마쳤|구현했|수정했|반영했|\bdone\b|completed|finished|implemented|all set|\bfixed\b|verified)', re.I)
@@ -216,7 +219,7 @@ def hook_entries(host, home=None):
                 'command': base + ' hook ' + name + ' --host ' + host}
         if event in QUIET_EVENTS:
             hook.pop('statusMessage')
-        entries[event] = {'matcher': HOOK_MATCHERS.get(event, ''), 'hooks': [hook]}
+        entries[event] = {'matcher': HOST_MATCHERS.get(host, HOOK_MATCHERS).get(event, ''), 'hooks': [hook]}
     return entries
 
 
@@ -295,8 +298,16 @@ def hook_status(host):
         return {'file': str(path), 'installed': False, 'error': str(error)}
     wanted = HOST_EVENTS.get(host, HOOK_EVENTS)
     present = [event for event, _, _ in wanted if any(isinstance(e, dict) and _is_ours(e) for e in hooks.get(event) or [])]
-    status = {'file': str(path), 'installed': len(present) == len(wanted), 'events': present,
+    matchers = HOST_MATCHERS.get(host, HOOK_MATCHERS)
+    # An entry from before its matcher grew (PreToolUse took only Bash before the Agent call, 2026-11-24): present but
+    # deaf to part of what it should hear, so not installed until `hooks install` writes it again.
+    outdated = [event for event in present if event in matchers and not any(
+        isinstance(e, dict) and _is_ours(e) and e.get('matcher', '') == matchers[event] for e in hooks.get(event) or [])]
+    status = {'file': str(path), 'installed': len(present) == len(wanted) and not outdated, 'events': present,
               'cli': bool(shutil.which(host))}
+    if outdated:
+        status['outdated'] = outdated
+        status['fix'] = 'cosmos-orbit hooks install'
     if present and len(present) < len(wanted):
         # An installation from before a hook was added: true, and one command away (seen with PreToolUse, 2026-11-18).
         status['missing'] = [event for event, _, _ in wanted if event not in present]
@@ -1637,6 +1648,17 @@ def handle(store, event, payload, host):
                 context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')
                 output = _context('SessionStart' if event == 'session-start' else 'UserPromptSubmit',
                                   '\n'.join(notes) + ('\n' + context if context else ''))
+        if event == 'session-start' and not (output or {}).get('decision'):
+            try:  # a subagent is a whole new conversation: said at each start, after the rest (subagents.py)
+                from .subagents import guidance
+                line = guidance(store, payload, host)
+                spec = (output or {}).get('hookSpecificOutput') or {}
+                context = spec.get('additionalContext')
+                if line and (not context or len(context) + 1 + len(line) <= BRIEF_LIMIT):  # never past a full brief's budget
+                    output = dict(output or {}, hookSpecificOutput=dict(
+                        spec, hookEventName='SessionStart', additionalContext=(context + '\n' if context else '') + line))
+            except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                hook_log(store, 'subagent guidance skipped: ' + repr(error)[:200])
         if event == 'prompt':
             try:  # the fresh session of a handoff keeps the name of the one it follows (title.py)
                 from .title import keep
@@ -1767,6 +1789,11 @@ def _handle(store, event, payload, host):
     if event == 'session-end':
         if session:
             store.end_session(session)  # the event that frees its task for the next session
+            try:  # its subagents end with it (subagents.py)
+                from .subagents import session_ended
+                session_ended(store, session)
+            except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                hook_log(store, 'subagents not ended: ' + repr(error)[:200])
         return None
     if event == 'stop-failure':
         from .routes import on_stop_failure

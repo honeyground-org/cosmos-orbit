@@ -785,9 +785,10 @@ def message(store, tokens, settings):
 def pre_tool_main(home, host, stdin=None):
     """`cosmos-orbit hook pre-tool`: stdin carries the event, stdout one JSON object or nothing. Exit 0 always.
 
-    Three independent answers share the hook: offload's (a suite run in a large conversation), the mid-turn notice
-    (midturn.py: the conversation is past its handoff point) and the teammates' (teammates.py: a subagent's own
-    conversation is past the point, told to it and to the lead). One failing never silences the others."""
+    Three independent answers share the hook on a shell call: offload's (a suite run in a large conversation), the
+    mid-turn notice (midturn.py: the conversation is past its handoff point) and the teammates' (teammates.py: a
+    subagent's own conversation is past the point, told to it and to the lead). One failing never silences the others.
+    An Agent call (Claude Code) has one answer, the subagent gate's (subagents.py: at most 5 at once per session)."""
     stdin = sys.stdin if stdin is None else stdin
     home = Path(home or os.environ.get('HARNESS_HOME', '~/.local/share/local-harness')).expanduser()
 
@@ -807,6 +808,15 @@ def pre_tool_main(home, host, stdin=None):
         logged(error)
         return 0
     output = None
+    if payload.get('tool_name') in ('Agent', 'Task'):
+        try:
+            from .subagents import gate
+            output = gate(home, host, payload)
+        except Exception as error:  # noqa: BLE001 - a hook must not break the user's session
+            logged(error)
+        if output:
+            print(json.dumps(output, ensure_ascii=False))
+        return 0
     try:
         output = decide(home, host, payload)
     except Exception as error:  # noqa: BLE001

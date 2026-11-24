@@ -227,6 +227,8 @@ def main(argv=None):
                                                  'for this session (default) or --global · '
                                                  'teammates 300k|off|reset (the point for Claude Code subagents; '
                                                  'built in: the handoff point) · '
+                                                 'subagents 5|off|reset (at most this many at once per Claude Code '
+                                                 'session; built in: 5) · '
                                                  'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
@@ -692,6 +694,11 @@ def main(argv=None):
                 return 0
             from .offload import here_session
             session, _, how = here_session(store, args.session or None)
+            if args.value == 'subagents':
+                # `context subagents [5|off|reset] [--session [ID]]`: the limit, and this session's subagents
+                from . import subagents
+                print(json.dumps(subagents.view(store, args.path, session, how), ensure_ascii=False, indent=2))
+                return 0
             if args.value == 'teammates':
                 # `context teammates [300k|off|reset] [--session [ID]]`: the point for subagents, and this session's
                 from . import teammates
