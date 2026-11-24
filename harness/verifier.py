@@ -355,6 +355,11 @@ def executor_moved(store, task, since, moved=None, blamed=None):
     return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
 
 
+def _rounds_view(data, task):
+    from .rounds import review_view
+    return review_view(data, task)
+
+
 def evaluate(engine, task, lease_fds=()):
     """Review finished work once. Callers own task/workspace locks and continuation."""
     from .development import entries_of, moved_entries, snapshot
@@ -389,7 +394,7 @@ def evaluate(engine, task, lease_fds=()):
     binding = copy.deepcopy(binding)
     payload = dict(binding, observations=evidence_bundle(task),
                    objective=data.get('objective'), objective_history=(data.get('objective_history') or [])[-10:],
-                   closed=requirements.review_view(data),
+                   closed=requirements.review_view(data), rounds=_rounds_view(data, task),
                    executor_capabilities=providers.native_capabilities(
                        task['provider'], data['options'].get('public_web', False)))
     prompt = (
@@ -433,6 +438,8 @@ def evaluate(engine, task, lease_fds=()):
         'observations.host_observations are commands Orbit itself ran on the host when the executor recorded evidence: '
         'the output is what that command printed at that time, but the executor chose the command, so judge whether '
         'it actually tests the item. '
+        'rounds, when present: the rounds before were verified complete; judge the done items of the current round '
+        '(rounds.current.goal) with the original request and the corrections, without reassessing earlier rounds. '
         + ('items must hold exactly these %d IDs, each once (a reply that leaves one out is rejected and the review is '
            'lost): %s. ' % (len(done), ', '.join(item['id'] for item in done)))
         + 'Reply in the user request language.\n' + json.dumps(payload, ensure_ascii=False))
