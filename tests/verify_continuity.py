@@ -247,7 +247,10 @@ def main():
     rotated = [r['payload'] for r in store.events(tid) if r['kind'] == 'session_rotated']
     check('session_rotated: from s1 (peak 210k) to s2, checkpoint present', rotated and rotated[-1]['from_peak'] == 210_000 and rotated[-1]['checkpoint'] is True, rotated)
     check('session log: two sessions, second starts at 40k', [r['session'] for r in task['data']['session_log']] == ['s1', 's2'] and task['data']['session_log'][-1]['start'] == 40_000)
-    check('first prompt after session start does not repeat the brief', attach.handle(store, 'prompt', dict(pay2, prompt='go on with the tests'), 'claude') is None)
+    first = attach.handle(store, 'prompt', dict(pay2, prompt='go on with the tests'), 'claude')
+    # 2026-11-24: the first prompt of a conversation that took a task over shows the user one takeover line (D27)
+    check('first prompt after session start does not repeat the brief (only the takeover line the user sees)',
+          not ((first or {}).get('hookSpecificOutput') or {}).get('additionalContext') and set(first or {}) <= {'systemMessage'}, first)
 
     print('④-b stop after a block still measures; a claim settles the handoff without a checkpoint request')
     t6 = base / 's6.jsonl'

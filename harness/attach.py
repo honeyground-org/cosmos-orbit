@@ -1680,6 +1680,15 @@ def handle(store, event, payload, host):
                         spec, hookEventName='SessionStart', additionalContext=(context + '\n' if context else '') + line))
             except Exception as error:  # noqa: BLE001 - never at the cost of the hook
                 hook_log(store, 'subagent guidance skipped: ' + repr(error)[:200])
+        if event == 'prompt' and not (output or {}).get('decision'):
+            try:  # a fresh conversation that took a task over says so on screen, once (continuity.takeover_notice)
+                from .continuity import takeover_notice
+                line = takeover_notice(store, payload.get('session_id'), host)
+                if line:
+                    shown = (output or {}).get('systemMessage')
+                    output = dict(output or {}, systemMessage=(shown + '\n' if shown else '') + line)
+            except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                hook_log(store, 'takeover notice skipped: ' + repr(error)[:200])
         if event == 'prompt':
             try:  # the fresh session of a handoff keeps the name of the one it follows (title.py)
                 from .title import keep

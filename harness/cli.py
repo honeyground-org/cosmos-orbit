@@ -190,6 +190,8 @@ def main(argv=None):
     claim_cmd2.add_argument('--session', required=True)
     claim_cmd2.add_argument('--hello', action='store_true', help='Say the mod is loaded in this session')
     claim_cmd2.add_argument('--taken-over', metavar='TASK', help='Whether a fresh session took TASK over (exit 0) or not yet (exit 1)')
+    claim_cmd2.add_argument('--failed', metavar='REASON', help='The handoff this session took did not take effect: record '
+                                                               'why (Orbit tries again at the next stop)')
     move_cmd = sub.add_parser('move-session', help="Move a session's requests off a task it was bound to by mistake onto "
                                                     'its own new task (shows the plan; --apply does it)')
     move_cmd.add_argument('session')
@@ -604,6 +606,10 @@ def main(argv=None):
                 fresh = continuity.taken_over(store, args.taken_over)
                 print(json.dumps({'taken_over': bool(fresh), 'session': fresh}))
                 return 0 if fresh else 1
+            if args.failed:
+                failed_task = continuity.mod_failed(store, args.session, args.failed)
+                print(json.dumps({'recorded': bool(failed_task), 'task': failed_task}))
+                return 0 if failed_task else 1
             if args.hello:
                 continuity.mod_hello(store, args.session)
                 result = {'hello': True, 'handoff_prefix': continuity.HANDOFF_PREFIX,

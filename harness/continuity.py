@@ -453,7 +453,8 @@ def ceiling_takes_over(store, task):
     state = data.get('handoff_state') or {}
     session = live.get('session')
     if (handoff_mode(store) != 'auto' or data.get('host') not in ('claude', 'codex') or not session
-            or state.get('session') != session or state.get('state') not in READY_STATES + ASK_STATES):
+            or state.get('session') != session
+            or not (handoff_ready(state) or state.get('state') in ASK_STATES)):
         return False
     if not past_ceiling(store, data, session):
         return False
@@ -928,10 +929,12 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
     state = task['data'].get('handoff_state') or {}
     if state.get('session') != session:
         return None
+    if state.get('state') == 'auto' and not during_turn and _within(state.get('auto_at'), INFLIGHT_SECONDS):
+        return carry_inflight(store, task, session, text)
     ceiling = past_ceiling(store, task['data'], session)
     if kind not in ('requirement', 'trivial') and not (ceiling and kind in CEILING_KINDS):
         return None
-    if state.get('state') not in READY_STATES and not (ceiling and state.get('state') in ASK_STATES):
+    if not handoff_ready(state) and not (ceiling and state.get('state') in ASK_STATES):
         return None
     if during_turn:
         try:
@@ -945,7 +948,8 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         return None
     from . import typist
     terminal = typist.detect() if terminal is None else terminal
-    mod = host == 'claude' and mod_present(store, session)
+    # A retry types /clear itself where it can: the mod's attempt is the one that did not take effect (2026-11-24).
+    mod = host == 'claude' and mod_present(store, session) and not (retry_ready(state) and terminal)
     if not terminal and not mod:
         return None
     if ceiling and state.get('state') in ASK_STATES:
@@ -955,15 +959,18 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         task = store.get(task['id'])
         data = task['data']
         state = data.get('handoff_state') or {}
-        if state.get('session') != session or state.get('state') not in READY_STATES:
+        if state.get('session') != session or not handoff_ready(state):
             return None
-        data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
+        _carry(data, text, session)
         if ceiling:
             data['carried_prompt'].update(ceiling=True, kind=kind, answer=answer)
+        attempt = _start_attempt(state)
+        state.pop('by', None)
         state.update(state='auto', auto_at=now(), panel=(terminal or {}).get('target'))  # only this pane's session takes it
         store.save(task, task['status'], 'handoff_auto', dict({'terminal': (terminal or {}).get('kind'), 'mod': mod,
                                                                'layer': 'context'},
-                                                              **({'ceiling': True, 'kind': kind} if ceiling else {})))
+                                                              **({'ceiling': True, 'kind': kind} if ceiling else {}),
+                                                              **({'attempt': attempt} if attempt > 1 else {})))
     steps = typist.handoff_steps(host, typist.clear_presses(text), expect=text.split('\n')[0][:60],
                                  mod_grace=MOD_GRACE_SECONDS if mod else 0)
     (spawn or typist.spawn)(terminal, steps, store.home / 'hooks.log', home=store.home, task=task['id'])
@@ -980,6 +987,82 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
 
 
 READY_STATES = ('checkpointed', 'told')  # the handoff is ready and no one has started it yet
+RETRY_LIMIT = 3          # automatic attempts at one handoff, the first included; after them the user is asked to /clear
+INFLIGHT_SECONDS = 45    # an automatic handoff this recent is still under way (the typist gives up at 25 s, the mod at 20 s)
+# The reason a message is blocked with while a handoff is under way. Never HANDOFF_PREFIX: the mod reads that one as
+# "clear now" and would clear a second time.
+INFLIGHT_PREFIX = 'Orbit: a handoff to a fresh context is under way'
+
+
+def attempts(state):
+    """Automatic attempts made at this handoff so far (a record from before they were counted holds one)."""
+    if (state or {}).get('state') not in ('auto', 'auto_failed'):
+        return 0
+    return int(state.get('attempts') or 1)
+
+
+def retry_ready(state):
+    """A failed automatic /clear is tried again, RETRY_LIMIT attempts in all. 2026-11-24 14:15 KST: one failed attempt
+    left the session asking the user for /clear at every stop until it reached 778k tokens (handoff point 300k)."""
+    return (state or {}).get('state') == 'auto_failed' and attempts(state) < RETRY_LIMIT
+
+
+def handoff_ready(state):
+    """The handoff may start now: checkpointed or told and nobody started it, or it failed with attempts left."""
+    return (state or {}).get('state') in READY_STATES or retry_ready(state)
+
+
+def _start_attempt(state):
+    """Count the attempt that starts now and clear the last one's claim. Returns its number."""
+    attempt = attempts(state) + 1 if state.get('state') == 'auto_failed' else 1
+    for key in ('claimed_by', 'claimed_at'):
+        state.pop(key, None)                         # the mod or the typist claims each attempt anew
+    state['attempts'] = attempt
+    return attempt
+
+
+def _within(stamp, seconds):
+    from datetime import datetime, timezone
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() <= seconds
+    except (TypeError, ValueError):
+        return False
+
+
+def _carry(data, text, session, **extra):
+    """Carry `text` to the fresh session. A request an earlier failed attempt carried, which no session has received,
+    goes with it, ahead of the new one: a retry must not drop it."""
+    old = data.get('carried_prompt') or {}
+    state = data.get('handoff_state') or {}
+    if (state.get('state') == 'auto_failed' and old.get('text') and old.get('from_session') == session
+            and not old.get('served_to') and not old.get('consumed_at')):
+        text = old['text'] if not text or text == old['text'] else old['text'] + '\n\n' + text
+    data['carried_prompt'] = dict({'text': text[:4000], 'at': now(), 'from_session': session}, **extra)
+
+
+def carry_inflight(store, task, session, text):
+    """A message that reaches the session while its automatic handoff is under way goes with the handoff, and the
+    session stays idle. Let through, it starts a turn and the /clear lands in a busy session: 2026-11-24 14:15 KST,
+    Orbit blocked a queued agent message to hand off, the next queued teammate message ran a turn 75 ms later, and
+    the mod's /clear never took effect. Returns the hook reply, or None to let the message through."""
+    try:
+        with store.lock('task:' + task['id']):
+            current = store.get(task['id'])
+            data = current['data']
+            state = data.get('handoff_state') or {}
+            if state.get('state') != 'auto' or state.get('session') != session:
+                return None
+            carried = data.get('carried_prompt') or {}
+            if carried.get('text') and carried.get('from_session') == session and not carried.get('served_to'):
+                carried['text'] = (carried['text'] + '\n\n' + text)[:4000]
+            else:
+                data['carried_prompt'] = {'text': text[:4000], 'at': now(), 'from_session': session}
+            store.save(current, current['status'], 'handoff_inflight_carried',
+                       {'session': session, 'chars': len(text), 'layer': 'context'})
+    except (RuntimeError, ValueError):
+        return None
+    return {'decision': 'block', 'reason': INFLIGHT_PREFIX + '; this message goes with it to the fresh session. '
+                                          'There is nothing to retype.'}
 CONTINUE_TEXT = ('Continue the unfinished task. Orbit started this fresh context by itself because work remained '
                  'past the handoff point; the user asked nothing new.')
 
@@ -996,14 +1079,19 @@ def continue_in_fresh_context(store, task, session, host, terminal, spawn=None):
     data = task['data']
     state = data.get('handoff_state') or {}
     if (not terminal or host not in ('claude', 'codex') or handoff_mode(store) != 'auto'
-            or state.get('session') != session or state.get('state') not in READY_STATES):
+            or state.get('session') != session or not handoff_ready(state)):
         return False
     next_step = ((data.get('checkpoints') or [{}])[-1]).get('next')
-    data['carried_prompt'] = {'text': (CONTINUE_TEXT + (' Next step from the checkpoint: ' + next_step if next_step else ''))[:4000],
-                              'at': now(), 'from_session': session, 'by': 'supervisor'}
+    old = data.get('carried_prompt') or {}
+    if retry_ready(state) and old.get('text') and old.get('from_session') == session and not old.get('served_to'):
+        _carry(data, '', session, by='supervisor')   # the request the failed attempt carried is still the one to do
+    else:
+        data['carried_prompt'] = {'text': (CONTINUE_TEXT + (' Next step from the checkpoint: ' + next_step if next_step else ''))[:4000],
+                                  'at': now(), 'from_session': session, 'by': 'supervisor'}
+    attempt = _start_attempt(state)
     state.update(state='auto', auto_at=now(), panel=terminal.get('target'), by='supervisor')
-    store.save(task, task['status'], 'handoff_auto', {'terminal': terminal.get('kind'), 'mod': False, 'by': 'supervisor',
-                                                      'layer': 'context'})
+    store.save(task, task['status'], 'handoff_auto', dict({'terminal': terminal.get('kind'), 'mod': False, 'by': 'supervisor',
+                                                           'layer': 'context'}, **({'attempt': attempt} if attempt > 1 else {})))
     from . import typist
     # No ctrl+u: the input was just read empty, and erasing could only ever remove what the user began to type.
     steps = typist.handoff_steps(host, presses=0, settle=0.3, expect=None)
@@ -1084,9 +1172,29 @@ def auto_failed(store, task_id, reason):
             state = task['data'].get('handoff_state') or {}
             if state.get('state') == 'auto':
                 state.update(state='auto_failed', failed_at=now())
-                store.save(task, task['status'], 'handoff_auto_failed', {'reason': str(reason)[:200], 'layer': 'context'})
+                store.save(task, task['status'], 'handoff_auto_failed',
+                           {'reason': str(reason)[:200], 'attempt': attempts(state), 'retry': retry_ready(state),
+                            'layer': 'context'})
     except (RuntimeError, ValueError):
         pass
+
+
+def mod_failed(store, session, reason):
+    """The mod could not finish the handoff it took (its /clear was refused, or no fresh session took the task over):
+    recorded now with the mod's own reason, not 25 s later as the typist's timeout, so the next attempt can start at
+    the session's next stop. 2026-11-24 14:15 KST the ledger only said the takeover timed out. Returns the task id."""
+    binding = store.session_task(session) if session else None
+    if not binding or not binding.get('task_id'):
+        return None
+    try:
+        task = store.get(binding['task_id'])
+    except ValueError:
+        return None
+    state = task['data'].get('handoff_state') or {}
+    if state.get('state') != 'auto' or state.get('session') != session or state.get('claimed_by') != 'mod':
+        return None
+    auto_failed(store, task['id'], 'mod: ' + str(reason))
+    return task['id']
 
 
 ADOPT_GRACE_SECONDS = 3.0  # the fresh session's own hook decides first; the typist steps in only after it
@@ -1267,6 +1375,48 @@ def carried_turn(store, task, session):
         return task
 
 
+def takeover_notice(store, session, host):
+    """The lines the user sees once when a fresh conversation took a task over by a handoff: which task, from how
+    large a conversation, the checkpoint it starts from and the request that came with it. Without them the screen
+    after /clear showed only the carry line, or nothing at all after a manual /clear, and the user could not tell the
+    handoff had worked: 2026-11-24 15:56 KST they typed "이어 받았어." themselves to start the fresh session. Given at
+    the session's first prompt (the carry line, or the user's own): Claude Code 2.1.331 shows the systemMessage of a
+    prompt hook and of a Stop, but not of a SessionStart after /clear (measured: .orbit-evidence d27_shows_probe.sh).
+    Once per session; Codex is left as it was."""
+    if host != 'claude' or not session:
+        return None
+    binding = store.session_task(session)
+    if not binding or not binding.get('task_id'):
+        return None
+    try:
+        with store.lock('task:' + binding['task_id'], timeout=2.0):
+            task = store.get(binding['task_id'])
+            data = task['data']
+            state = data.get('handoff_state') or {}
+            if state.get('state') != 'adopted' or state.get('adopted_by') != session or state.get('announced_to') == session:
+                return None
+            log = data.get('session_log') or []
+            before = next((row for row in reversed(log) if row.get('session') == state.get('session')), {})
+            checkpoint = (data.get('checkpoints') or [None])[-1]
+            carried = data.get('carried_prompt') or {}
+            head = 'Orbit: this conversation took over task %s from the previous one' % task['id']
+            if before.get('peak'):
+                head += ' (%s tokens)' % _k(before['peak'])
+            lines = [head + '.']
+            if checkpoint:
+                lines.append('Checkpoint %s · next: %s' % (_local(checkpoint['at']), _one(checkpoint['next'], 160)))
+            if (carried.get('text') and not carried.get('consumed_at') and carried.get('from_session') != session
+                    and carried.get('served_to') in (None, session)):
+                lines.append('Carried over: ' + _one(carried['text'], 160))
+            else:
+                lines.append('Nothing was carried over; the task goes on from the checkpoint.')
+            state['announced_to'] = session
+            store.save(task, task['status'], 'takeover_announced', {'session': session, 'layer': 'context'})
+            return '\n'.join(lines)
+    except (RuntimeError, ValueError):
+        return None
+
+
 def handoff_lines(data, prefix, tid, closed=False, digest=False):
     """Brief lines about context and continuation; the numbers stay out of the brief digest. `digest`: lines for
     the digest, where a carried request that was done still counts as shown (its removal alone sends no brief)."""
@@ -1294,9 +1444,13 @@ def handoff_lines(data, prefix, tid, closed=False, digest=False):
                          "%s checkpoint %s --next '…' --notes '…' --now '…' --keep '…' [--shift '…'] [--file path]. A fresh "
                          "session then continues from the ledger instead of re-reading this context."
                          % (_k(live.get('tokens')), _k(state.get('limit')), prefix, tid))
+        elif retry_ready(state):
+            lines.append('HANDOFF READY, but automatic attempt %d of %d did not take effect. Orbit tries again when this '
+                         "session next stops with work left, or at the user's next request: finish the step at hand and "
+                         'end the turn. The user may also type /clear.' % (attempts(state), RETRY_LIMIT))
         elif state.get('state') == 'auto_failed':
-            lines.append('HANDOFF READY, but the automatic /clear did not take effect: ask the user to type /clear; '
-                         'the request they made is carried over to the fresh session.')
+            lines.append('HANDOFF READY, but the automatic /clear did not take effect (%d attempts): ask the user to type '
+                         '/clear; the request they made is carried over to the fresh session.' % attempts(state))
         elif state.get('state') in ('checkpointed', 'told'):
             lines.append('HANDOFF READY: checkpoint saved. Orbit cannot clear this session itself: the user types /clear '
                          '(Claude Code) or /new (Codex) and the fresh session takes this task over; otherwise the next '
