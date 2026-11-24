@@ -85,7 +85,8 @@ def main():
 
     print('② continuation rules: ended sessions, handoff invitation (one taker), /clear without invitation')
     start = attach.handle(store, 'session-start', {'cwd': str(root), 'session_id': 'A2', 'source': 'clear'}, 'claude')
-    check("/clear without an invitation does not take another live session's task (control)", task_of(store, root, 'A2') is None and start is None)
+    check("/clear without an invitation does not take another live session's task (control)", task_of(store, root, 'A2') is None
+          and '[orbit] task' not in str(start))   # (no brief; the subagent line alone may be there, subagents.py)
     c = task_of(store, root, 'C')
     check('a new terminal while B is live does not inherit B (control)', c is None)
     attach.handle(store, 'session-end', {'cwd': str(root), 'session_id': 'B'}, 'claude')

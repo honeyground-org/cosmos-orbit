@@ -445,8 +445,9 @@ def install(env, base, repo, store):
     claude = json.loads((base / 'claude' / 'settings.json').read_text())['hooks']
     codex = json.loads((base / 'codex' / 'hooks.json').read_text())['hooks']
     mine = [e for e in claude.get('PreToolUse', []) if ours(e)]
-    check('installed twice: one PreToolUse entry of ours, matcher Bash, command hook pre-tool', installed.returncode == 0
-          and len(mine) == 1 and mine[0]['matcher'] == 'Bash' and 'hook pre-tool --host claude' in mine[0]['hooks'][0]['command'],
+    check('installed twice: one PreToolUse entry of ours, matcher Bash|Agent|Task (the Agent call: subagents.py), command '
+          'hook pre-tool', installed.returncode == 0
+          and len(mine) == 1 and mine[0]['matcher'] == 'Bash|Agent|Task' and 'hook pre-tool --host claude' in mine[0]['hooks'][0]['command'],
           claude.get('PreToolUse'))
     check('… with a small timeout and no status line on every shell call', mine and mine[0]['hooks'][0]['timeout'] <= 10
           and 'statusMessage' not in mine[0]['hooks'][0], mine)

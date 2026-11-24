@@ -117,7 +117,7 @@ def main():
     check('compaction observed → the handoff is closed (state compacted)', state.get('state') == 'compacted', state)
     other = attach.handle(store, 'session-start', {'cwd': str(root), 'session_id': 'a2', 'source': 'startup'}, 'claude')
     check('an unrelated new session in the same folder does not take the task (the observed defect)',
-          (store.session_task('a2') or {}).get('task_id') != tid and not other, store.session_task('a2'))
+          (store.session_task('a2') or {}).get('task_id') != tid and '[orbit] task' not in str(other), store.session_task('a2'))
     turn(path, 150_000)
     attach.handle(store, 'prompt', dict(pay, prompt='keep going with the remaining tests'), 'claude')
     check('…below the point again after compaction: silent', store.get(tid)['data']['handoff_state']['state'] == 'compacted')

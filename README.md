@@ -635,6 +635,16 @@ additions, each with its own off switch:
   `teams/<team>/config.json`), was started again under the same name, or, with no team to ask, wrote nothing for 30
   minutes is not counted; a size that cannot be read is unknown, never past anything. Advice only, nothing refused.
   `cosmos-orbit context teammates` shows the point and this session's teammates as measured.
+- **Subagents (Claude Code): at most 5 at once per session.** A subagent is a new conversation: one asked only to reply
+  "OK" used 26,314 tokens (Claude Code 2.1.331, 2026-11-24). Orbit's PreToolUse hook also takes the Agent call: it
+  counts the session's running subagents from the folder Claude Code writes beside the transcript
+  (`subagents/agent-<id>.meta.json`: the call's toolUseId, and "finished" once an anonymous subagent returned; a
+  teammate while its team lists it), and refuses the call past the limit with the reason — how many run, which, and to
+  wait or do the step in the session's own conversation. Parallel calls are counted one at a time (their hooks run
+  together). Every start, refusal and end is recorded on the session's task, and each session is told when it starts to
+  keep the work in its own conversation unless it cannot. `cosmos-orbit context subagents 5|off|reset`
+  (settings.json `subagents.max`); without a value it shows the limit and this session's subagents. After updating,
+  run `cosmos-orbit hooks install` once: an entry that hears only Bash is reported outdated.
 
 | Scope | Set | Off | Show |
 |---|---|---|---|

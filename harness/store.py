@@ -54,6 +54,9 @@ class Store:
             target TEXT, surface TEXT, reason TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS offload_sessions (session TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS handoff_sessions (session TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS subagents (call TEXT PRIMARY KEY, session TEXT NOT NULL, agent TEXT, kind TEXT,
+            name TEXT, description TEXT, state TEXT NOT NULL, transcript TEXT, started TEXT NOT NULL, ended TEXT, why TEXT);
+          CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session, state);
         ''')
 
     def create(self, workspace, provider, prompt):

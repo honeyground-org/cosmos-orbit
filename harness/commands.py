@@ -28,6 +28,11 @@ GROUPS = [
          'in: the host\'s handoff point, 300k) the lead\'s brief names each one with its size, once, again every 100k, and '
          'the teammate is told at its own shell calls to finish the step, write a handoff note and ask to be replaced. '
          'Advice only. Without a value: the point and this session\'s teammates as measured (unknown when unreadable).'),
+        ('cosmos-orbit context subagents [5 | off | reset] [--session [ID]]',
+         'At most this many subagents at once in one Claude Code session (built in 5): the Agent call past it is refused '
+         'with the reason, and each start, refusal and end is recorded on the session\'s task. A session is told when it '
+         'starts that a subagent is a new conversation (about 26k tokens before any work, measured) and to keep the work '
+         'in its own conversation unless it cannot. Without a value: the limit and this session\'s subagents.'),
         ('cosmos-orbit context auto   ·   cosmos-orbit context tell',
          'Who types into a session\'s terminal (cmux, tmux): auto = Orbit types /clear at a handoff and wakes an idle session for a message; tell (default) = Orbit only tells.'),
         ('cosmos-orbit patrol --once   ·   cosmos-orbit supervision auto|tell',
