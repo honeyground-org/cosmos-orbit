@@ -24,6 +24,7 @@ Measured on screens of Claude Code 2.1 and Codex (2026-11-04, cmux read-screen, 
     colours, so only the placeholders found in its binary count as empty ("Ask Codex to do anything", "Ask a follow-up
     question"). Any other text there is treated as the user's: the safe direction.
 """
+import datetime
 import json
 import os
 from pathlib import Path
@@ -104,14 +105,33 @@ def read_state(screen):
     return 'unknown'
 
 
-def note(store, session, host, event, terminal):
-    """Remember the terminal a session runs in (every hook event); forget it when the session ends."""
+SIGNAL_END = 'other'      # Claude Code's SessionEnd reason when a signal ended it, not the user
+ENDED_KEPT = 30 * 86400   # a signal-ended session's row is dropped after this long
+
+
+def note(store, session, host, event, terminal, reason=None):
+    """Remember the terminal a session runs in (every hook event); forget it when the session ends.
+
+    A session that a signal ended (SessionEnd reason `other`: its terminal closed, its app quit, the machine shut
+    down) did not end by the user's choice. Its row moves to `ended_terminals`, which only the session list after a
+    restart reads (§restore); nothing else that reads `terminals` sees it. Measured 2026-11-23 (Claude Code 2.1.330):
+    SIGHUP and SIGTERM report `other`, /exit reports `prompt_input_exit`. A restart that day signalled the session that
+    was working 42 s before the new boot, and with its row deleted it was missing from the list of cut-off sessions."""
     if not session:
         return
     with store.db:
         if event == 'session-end':
+            row = store.db.execute('SELECT * FROM terminals WHERE session=?', (session,)).fetchone()
             store.db.execute('DELETE FROM terminals WHERE session=?', (session,))
+            store.db.execute('DELETE FROM ended_terminals WHERE session=?', (session,))
+            if row is not None and reason == SIGNAL_END:
+                store.db.execute('INSERT INTO ended_terminals VALUES(?,?,?,?,?,?,?,?)',
+                                 (session, row['host'], row['kind'], row['cli'], row['target'], row['surface'],
+                                  reason, _now()))
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=ENDED_KEPT)
+            store.db.execute('DELETE FROM ended_terminals WHERE at<?', (cutoff.isoformat(),))
             return
+        store.db.execute('DELETE FROM ended_terminals WHERE session=?', (session,))  # it runs again
         terminal = terminal or {}
         surface = os.environ.get('CMUX_SURFACE_ID') if terminal.get('kind') == 'cmux' else None
         store.db.execute('INSERT OR REPLACE INTO terminals VALUES(?,?,?,?,?,?,?,?)',

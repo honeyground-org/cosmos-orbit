@@ -50,6 +50,8 @@ class Store:
             UNIQUE(task_id,contract_hash,target,question));
           CREATE TABLE IF NOT EXISTS terminals (session TEXT PRIMARY KEY, host TEXT, kind TEXT, cli TEXT, target TEXT,
             surface TEXT, state TEXT NOT NULL, at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS ended_terminals (session TEXT PRIMARY KEY, host TEXT, kind TEXT, cli TEXT,
+            target TEXT, surface TEXT, reason TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS offload_sessions (session TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS handoff_sessions (session TEXT PRIMARY KEY, data TEXT NOT NULL, at TEXT NOT NULL);
         ''')
