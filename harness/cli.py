@@ -299,6 +299,8 @@ def main(argv=None):
     worker.add_argument('--background', action='store_true', help='Keep authorised work running after this terminal closes')
     worker.add_argument('--interval', type=float, default=3)
     worker.add_argument('--idle-exit', type=int, help='Exit after this many quiet seconds (transient worker for one pending review)')
+    worker.add_argument('--when-calm', action='store_true',
+                        help='First wait until the machine has settled after boot (the recovery pass at login)')
     watch = sub.add_parser('watch')
     watch.add_argument('--once', action='store_true')
     watch.add_argument('--task')
@@ -899,6 +901,12 @@ def main(argv=None):
                 # A transient worker (a pending review, the recovery pass at login) exists to make sure one runs.
                 print(json.dumps({'worker': 'already running'}))
                 return 0
+            if args.when_calm:
+                from . import recovery
+                recovery.wait_until_calm()
+                if store.locked('worker'):          # a hook or the dashboard started one while it waited
+                    print(json.dumps({'worker': 'already running'}))
+                    return 0
             with store.lock('worker'):
                 last_active = time.time()
                 while True:

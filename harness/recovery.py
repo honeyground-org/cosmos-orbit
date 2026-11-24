@@ -172,6 +172,44 @@ def resume_session(record):
     return session
 
 
+CALM_AFTER_BOOT = 180      # the recovery pass at login starts no sooner than this many seconds after boot
+CALM_LOAD = 1.0            # … and once the 1-minute load average per core is below this
+CALM_POLL = 15             # seconds between two looks at the load
+CALM_LONGEST = 20 * 60     # past this it starts anyway, and says so
+
+
+def wait_until_calm(boot=None, load=None, cores=None, clock=time.time, sleep=time.sleep, say=None):
+    """Hold the recovery pass at login until the machine has settled: CALM_AFTER_BOOT seconds since boot, and the
+    1-minute load average below one per core. 2026-11-23: after a restart the terminal app reopened nine agent sessions
+    at once and the recovery pass started its work beside them; the 5-minute load was 78 on 12 cores. A load that
+    cannot be read does not hold it; nor does anything past CALM_LONGEST. Returns what it waited for."""
+    if boot is None:
+        from .restore import boot_time
+        boot = boot_time()
+    load = load or os.getloadavg
+    cores = cores or os.cpu_count() or 1
+    start = clock()
+    while True:
+        now = clock()
+        try:
+            one = float(load()[0])
+        except (OSError, ValueError, TypeError, IndexError):
+            one = None
+        settled = boot is None or now - boot >= CALM_AFTER_BOOT
+        calm = one is None or one / cores < CALM_LOAD
+        if settled and calm:
+            outcome = 'calm'
+            break
+        if now - start >= CALM_LONGEST:
+            outcome = 'waited_longest'
+            break
+        sleep(CALM_POLL)
+    record = {'recovery_pass': outcome, 'waited_seconds': round(clock() - start), 'load_1m': one, 'cores': cores,
+              'since_boot_seconds': round(clock() - boot) if boot else None}
+    (say or (lambda text: print(text, flush=True)))(json.dumps(record))
+    return record
+
+
 def ensure_worker(store, idle_exit=None):
     """Starting the app resumes authorised queued work; read-only observers never call this.
 

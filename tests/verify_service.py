@@ -164,7 +164,7 @@ try:
           dash['ProgramArguments'][-8:] == ['--home', str(store_a), 'dashboard', '--port', str(port), '--lang', 'ko', '--no-open'],
           dash['ProgramArguments'])
     check('the recovery pass is a transient worker on the same store',
-          recover['ProgramArguments'][-5:] == ['--home', str(store_a), 'worker', '--idle-exit', str(service.RECOVER_IDLE_EXIT)],
+          recover['ProgramArguments'][-6:-1] == ['--home', str(store_a), 'worker', '--idle-exit', str(service.RECOVER_IDLE_EXIT)],
           recover['ProgramArguments'])
     check('both carry the installing shell PATH (launchd starts with a bare one)',
           dash['EnvironmentVariables']['PATH'] == os.environ['PATH'] == recover['EnvironmentVariables']['PATH'])
@@ -294,6 +294,66 @@ try:
     store.close()
     check('exit 0 at once with "already running"', worker.returncode == 0 and 'already running' in worker.stdout
           and time.time() - started < 10, (worker.returncode, worker.stdout, worker.stderr))
+
+    print('⑬ the recovery pass at login waits until the machine has settled')
+    check('the launchd recovery pass waits (--when-calm); the dashboard does not',
+          recover['ProgramArguments'][-1] == '--when-calm' and '--when-calm' not in dash['ProgramArguments'],
+          recover['ProgramArguments'])
+    check('the systemd recovery pass waits too', '--when-calm' in recover_unit and '--when-calm' not in dash_unit,
+          recover_unit)
+    from harness import recovery
+    wait = getattr(recovery, 'wait_until_calm', None)   # before the change there is none: the checks below fail
+
+    def calm_run(boot, loads, cores=12, now=1_000_000.0):
+        clock = {'t': now}
+        looks = iter(loads + [loads[-1]] * 1000)
+        record = wait(boot=boot, load=lambda: (next(looks), 0, 0),
+                      cores=cores, clock=lambda: clock['t'], sleep=lambda s: clock.__setitem__('t', clock['t'] + s),
+                      say=lambda text: None) if wait else {}
+        return record
+
+    long_ago = 1_000_000.0 - 3600
+    record = calm_run(long_ago, [61, 40, 13, 11])
+    check('a high load holds it until the load per core is below one (61 → 40 → 13 → 11 on 12 cores: three looks)',
+          record.get('recovery_pass') == 'calm' and record.get('waited_seconds') == 3 * recovery.CALM_POLL
+          and record.get('load_1m') == 11, record)
+    record = calm_run(1_000_000.0 - 10, [2])
+    check('right after boot it waits CALM_AFTER_BOOT even when the load is low',
+          record.get('recovery_pass') == 'calm' and record.get('since_boot_seconds', 0) >= recovery.CALM_AFTER_BOOT
+          and record.get('waited_seconds', 0) >= recovery.CALM_AFTER_BOOT - 10 - recovery.CALM_POLL, record)
+    record = calm_run(long_ago, [78])
+    check('a load that never falls: it starts anyway after CALM_LONGEST and says so',
+          record.get('recovery_pass') == 'waited_longest' and record.get('waited_seconds', 0) >= recovery.CALM_LONGEST, record)
+    record = calm_run(long_ago, [3])
+    check('control: a settled machine is not held', record.get('recovery_pass') == 'calm' and record.get('waited_seconds') == 0,
+          record)
+
+    def unreadable():
+        raise OSError('no load average here')
+    record = wait(boot=long_ago, load=unreadable, cores=12, clock=lambda: 1_000_000.0, sleep=lambda s: None,
+                  say=lambda text: None) if wait else {}
+    check('control: a load that cannot be read does not hold it', record.get('recovery_pass') == 'calm', record)
+
+    from harness import cli as orbit_cli
+    calls = []
+    saved_wait = wait
+    if wait:
+        recovery.wait_until_calm = lambda **kw: calls.append('waited') or {}
+    try:
+        code = orbit_cli.main(['--home', str(store_a), 'worker', '--once', '--when-calm'])
+        check('worker --when-calm waits first, then runs', code == 0 and calls == ['waited'], (code, calls))
+        calls.clear()
+        store = Store(store_a)
+        with store.lock('worker'):
+            code = orbit_cli.main(['--home', str(store_a), 'worker', '--idle-exit', '30', '--when-calm'])
+        store.close()
+        check('control: a worker already running: it yields at once, without waiting', code == 0 and calls == [],
+              (code, calls))
+    except SystemExit as error:
+        check('worker --when-calm is accepted', False, error)
+    finally:
+        if saved_wait:
+            recovery.wait_until_calm = saved_wait
 
     print('⑫ install.sh')
     usage = subprocess.run(['sh', str(ROOT / 'install.sh'), '--bogus'], capture_output=True, text=True, timeout=30)
