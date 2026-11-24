@@ -645,6 +645,14 @@ additions, each with its own off switch:
   keep the work in its own conversation unless it cannot. `cosmos-orbit context subagents 5|off|reset`
   (settings.json `subagents.max`); without a value it shows the limit and this session's subagents. After updating,
   run `cosmos-orbit hooks install` once: an entry that hears only Bash is reported outdated.
+- **Subagents stopped at the usage limit (Claude Code).** At the limit every subagent of the session stops with it; its
+  transcript ends on the host's limit line. A subagent runs on its session's account, so once the session answers again
+  (another account, or the reset) it can go on there — but only when sent a message, and after an account switched from
+  outside the session or a restart its name no longer reaches it ("No agent named … is reachable") while its agent id
+  resumes it with its whole conversation (measured 2026-11-24). So each prompt that goes on carries the list — the
+  subagents whose transcript ends on that line and have not run since, none whose name was started again — with the call
+  that resumes each: `SendMessage({to: "<agentId>", …})`, at most 3 prompts per stop. `cosmos-orbit context subagents
+  --session` shows them (`stopped_at_limit`).
 
 | Scope | Set | Off | Show |
 |---|---|---|---|
