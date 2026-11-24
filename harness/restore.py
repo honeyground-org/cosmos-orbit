@@ -405,15 +405,21 @@ def _next(row):
     return ('latest' if value.strip().startswith(LATEST) else 'next'), _plain(value)
 
 
-GROUPS = (('interrupted', '재부팅으로 끊긴 세션', 'Cut off by the restart'),
-          ('closed', '닫힌 세션 (터미널이 닫혔거나 앱이 꺼짐)', 'Closed without ending'),
-          ('since_boot', '부팅 뒤에 쓴 세션', 'Active since this boot'),
-          ('open', '지금 열려 있는 세션 (번호를 고르면 그 탭으로 이동)', 'Open now (a number brings its tab forward)'))
+GROUPS = (('interrupted', '진행 중 · 재부팅으로 끊긴 세션', 'In progress — Cut off by the restart'),
+          ('closed', '진행 중 · 닫힌 세션 (터미널이 닫혔거나 앱이 꺼짐)', 'In progress — Closed without ending'),
+          ('since_boot', '진행 중 · 부팅 뒤에 쓴 세션', 'In progress — Active since this boot'),
+          ('open', '진행 중 · 지금 열려 있는 세션 (번호를 고르면 그 탭으로 이동)', 'In progress — Open now (a number brings its tab forward)'),
+          # Closed tasks (idle_close.ended_rows): work left behind, and work finished.
+          ('stopped', '멈춤 · 남은 일이 있는 채 정리됨 (번호를 고르면 핸드오프로 이어 감)',
+           'Stopped with work left (a number continues it by handoff)'),
+          ('completed', '완결 · 끝내고 닫힘', 'Complete'))
+TASK_STATES = ('stopped', 'completed')
 
 
 def offer_rows(found, current=None):
     """The listed sessions in the order they are numbered: the ones to reopen first, the open ones last."""
     rows = [r for r in found['sessions'] if r['state'] != 'followed' and r['session'] != current]
+    rows += [r for r in found.get('ended') or [] if r['session'] != current]
     return [r for state, _, _ in GROUPS for r in rows if r['state'] == state]
 
 
@@ -442,6 +448,8 @@ def offer_text(found, rows, korean, opens):
             number += 1
             where = _home(r['folder']) or ('폴더 모름' if korean else 'folder unknown')
             lines.append(' %2d  %s · %s%s' % (number, r['last_local'][5:], where, ' · Codex' if r['host'] == 'codex' else ''))
+            if state == 'stopped' and r.get('remaining') is not None:
+                lines.append('     %s %d' % ('남은 일:' if korean else 'open items:', r['remaining']))
             what = _what(r)
             if what:
                 lines.append('     %s %s' % ('하던 일:' if korean else 'doing:', what))
@@ -519,7 +527,9 @@ KO_RESULT = {'already open: its tab is in front now': '이미 열려 있어서 �
              'already open: its window is in front now': '이미 열려 있어서 그 창으로 옮겼습니다',
              'already open in another tab (not opened twice)': '이미 다른 탭에서 열려 있습니다 (두 번 열지 않음)',
              'opened in a new tab': '새 탭에서 열었습니다',
-             'opened in a new tmux window': '새 tmux 창에서 열었습니다'}
+             'opened in a new tmux window': '새 tmux 창에서 열었습니다',
+             'continued by handoff in a new tab': '핸드오프로 새 탭에서 이어 갑니다',
+             'continued by handoff in a new tmux window': '핸드오프로 새 tmux 창에서 이어 갑니다'}
 
 
 def _say(words, korean):
@@ -552,7 +562,11 @@ def on_prompt(store, payload, host, at=None, terminal=None, run=None, running=No
             korean = state.get('korean')
             lines = []
             for index, row in enumerate(picked):
-                done, words = reopen(row, terminal, focus=index == len(picked) - 1, run=run)
+                if row.get('state') in TASK_STATES:
+                    from .idle_close import take_up
+                    done, words = take_up(store, row, terminal, run=run)
+                else:
+                    done, words = reopen(row, terminal, focus=index == len(picked) - 1, run=run)
                 lines.append('  %d  %s · %s — %s' % (rows.index(row) + 1, row['last_local'][5:],
                                                      _home(row['folder']) or row['session'][:8], _say(words, korean)))
             head = 'Orbit: 세션 %d개를 열었습니다.' if korean else 'Orbit: %d sessions taken up.'
@@ -566,10 +580,16 @@ def on_prompt(store, payload, host, at=None, terminal=None, run=None, running=No
     if not asks(text):
         return None
     found = sessions(store, boot=boot, now=at, current=session, running=running)
+    try:
+        from .idle_close import ended_rows
+        found['ended'] = ended_rows(store, at=at)
+    except Exception:  # noqa: BLE001 - the session list is shown whatever the ledger's closed tasks hold
+        found['ended'] = []
     rows = offer_rows(found, session)
     korean = bool(HANGUL.search(text))
     terminal = _terminal() if terminal is None else terminal
-    keep = ('session', 'host', 'state', 'folder', 'pane', 'last_local', 'resume', 'goal', 'last_request', 'next')
+    keep = ('session', 'host', 'state', 'folder', 'pane', 'last_local', 'resume', 'goal', 'last_request', 'next', 'task',
+            'remaining')
     store.preference(key, json.dumps({'at': at, 'asked': text, 'korean': korean,
                                       'rows': [{k: r.get(k) for k in keep} for r in rows]}, ensure_ascii=False))
     return {'decision': 'block', 'reason': offer_text(found, rows, korean, bool(terminal))}

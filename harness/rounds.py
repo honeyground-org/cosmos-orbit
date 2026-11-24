@@ -178,7 +178,7 @@ def exit_steps(host, presses=0):
 
 
 def end(store, task_id, session, reason='ended', why_text='', terminal=None, spawn=None, host=None, presses=0,
-        state='completed', remaining=None):
+        state='completed', remaining=None, close_task=True):
     """End one session of a task in order: handoff (a checkpoint and the Markdown handoff), memory (when a brain is
     configured for the task), then /exit typed into its pane. The task closes (reason `reason`; `state` completed or
     stopped). Returns {'steps': [(name, outcome)], 'typed': bool}."""
@@ -191,7 +191,8 @@ def end(store, task_id, session, reason='ended', why_text='', terminal=None, spa
         next_step = 'Round %d is complete and verified; the session was ended (%s). A new request starts the next round.' % (
             this['n'], reason)
     else:
-        next_step = 'Stopped with work left (%s): %s' % (reason, remaining or 'see the open D items')
+        next_step = 'Stopped with work left (%s): %s open item%s - continue the open D items.' % (
+            reason, remaining if remaining is not None else 'some', '' if remaining == 1 else 's')
     try:
         continuity.record_checkpoint(store, task_id, next_step, notes=why_text or ('Written by Orbit when the session '
                                      'was ended (%s).' % reason), by='orbit', kind='end')
@@ -223,7 +224,9 @@ def end(store, task_id, session, reason='ended', why_text='', terminal=None, spa
             offer = data.get('completion')
             if offer and offer.get('state') == 'open':
                 offer.update(state='end', answered_at=record['at'], by=reason)
-            if task['status'] != 'closed':
+            if not close_task:                          # another live session still works on it
+                store.save(task, task['status'], 'session_closed', dict(record, layer='control'))
+            elif task['status'] != 'closed':
                 data['closed'] = record
                 data['closures'] = (data.get('closures') or [])[-9:] + [record]
                 data.update(reason_code='closed_' + reason, reason=(
@@ -232,7 +235,7 @@ def end(store, task_id, session, reason='ended', why_text='', terminal=None, spa
                 store.save(task, 'closed', 'task_closed', dict(record, layer='control'))
             else:
                 store.save(task, 'closed', 'session_closed', dict(record, layer='control'))
-        steps.append(('task', state, ''))
+        steps.append(('task', state if close_task else 'kept_open', ''))
     except (RuntimeError, ValueError) as error:
         steps.append(('task', 'failed', str(error)[:120]))
     typed = False
@@ -257,10 +260,11 @@ def end(store, task_id, session, reason='ended', why_text='', terminal=None, spa
 STEP_WORDS = {
     'ko': {'handoff': '핸드오프', 'memory': '기억', 'task': '장부', 'exit': '/exit', 'written': '저장', 'failed': '실패',
            'stored': '저장', 'queued': '대기열', 'kept': '이미 저장됨', 'skipped': '브레인 미연결로 건너뜀',
-           'completed': '완결로 닫음', 'stopped': '멈춤으로 닫음', 'typing': '입력 중', 'no_terminal': '입력할 터미널 없음'},
+           'completed': '완결로 닫음', 'stopped': '멈춤으로 닫음', 'kept_open': '다른 세션이 쓰는 중이라 열어 둠', 'typing': '입력 중', 'no_terminal': '입력할 터미널 없음'},
     'en': {'handoff': 'handoff', 'memory': 'memory', 'task': 'ledger', 'exit': '/exit', 'written': 'written',
            'failed': 'failed', 'stored': 'stored', 'queued': 'queued', 'kept': 'already stored',
            'skipped': 'skipped (no brain configured)', 'completed': 'closed as complete', 'stopped': 'closed as stopped',
+           'kept_open': 'kept open (another session works on it)',
            'typing': 'typing', 'no_terminal': 'no terminal to type into'},
 }
 

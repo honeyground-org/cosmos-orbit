@@ -73,6 +73,10 @@ def main(argv=None):
     sessions_cmd.add_argument('--days', type=int, default=7, help='Only sessions active in the last N days (0: all; default 7)')
     sessions_cmd.add_argument('--followed', action='store_true', help='Also sessions a newer session replaced in the same pane')
     sessions_cmd.add_argument('--json', action='store_true')
+    sessions_cmd.add_argument('--idle', action='store_true', help='Which live sessions the idle close would close now, '
+                              'and why the others stay (nothing is closed)')
+    sessions_cmd.add_argument('--keep', metavar='SESSION', help='Never close this session for being idle')
+    sessions_cmd.add_argument('--unkeep', metavar='SESSION', help='Let the idle close consider this session again')
     continue_cmd = sub.add_parser('continue', help='Take a closed (or verified) task back: this session works on it again, '
                                                     'or, from a plain shell, the next new session in its folder')
     continue_cmd.add_argument('id')
@@ -229,6 +233,8 @@ def main(argv=None):
                                                  'built in: the handoff point) · '
                                                  'subagents 5|off|reset (at most this many at once per Claude Code '
                                                  'session; built in: 5) · '
+                                                 'idle-close 3d|on|off|reset (close sessions with no prompt for that '
+                                                 'long; built in: on, 3 days) · '
                                                  'stored in <home>/settings.json, editable by hand')
     context_cmd.add_argument('value', nargs='?')
     context_cmd.add_argument('path', nargs='?')
@@ -692,6 +698,11 @@ def main(argv=None):
                                   'note': 'the background handoff needs the Claude Code mod loaded (README: Background handoff)'},
                                  ensure_ascii=False, indent=2))
                 return 0
+            if args.value == 'idle-close':
+                # `context idle-close [3d|on|off|reset]`: close sessions nobody used for days (idle_close)
+                from . import idle_close
+                print(json.dumps(idle_close.configure(store, args.path), ensure_ascii=False, indent=2))
+                return 0
             from .offload import here_session
             session, _, how = here_session(store, args.session or None)
             if args.value == 'subagents':
@@ -767,6 +778,16 @@ def main(argv=None):
                 result = closed_tasks(store, args.workspace)
             else:
                 result = store.list()
+        elif args.command == 'sessions' and (args.idle or args.keep or args.unkeep):
+            from . import idle_close
+            if args.keep or args.unkeep:
+                result = idle_close.keep(store, args.keep or args.unkeep, on=bool(args.keep))
+            else:
+                decisions = idle_close.sweep(store, apply=False)
+                if not args.json:
+                    print(idle_close.preview_text(store, decisions))
+                    return 0
+                result = {'settings': idle_close.settings(store), 'sessions': decisions}
         elif args.command == 'sessions':
             from . import restore
             here = os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CODEX_THREAD_ID') or None

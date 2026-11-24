@@ -178,6 +178,13 @@ def sweep(store, runner=None, at=None, desktop=None):
                     results.append((task_id, row['session'], nudge(store, task, row['session'], runner, at, desktop)))
         except Exception as error:  # noqa: BLE001 - one task's trouble never ends the round for the others
             results.append((task_id, None, 'error: ' + repr(error)[:160]))
+    try:                                                 # sessions nobody used for days (idle_close, every 10 min)
+        from . import idle_close
+        for decision in idle_close.sweep(store, runner, at):
+            if decision.get('result'):
+                results.append((decision['task'], decision['session'], 'idle_closed_' + decision['state']))
+    except Exception as error:  # noqa: BLE001 - the round goes on whatever the cleanup meets
+        results.append(('-', None, 'error: idle close ' + repr(error)[:160]))
     return results
 
 
@@ -191,7 +198,7 @@ def run_forever(home, interval=INTERVAL, sleep=time.sleep, rounds=None):
             with store.lock('patrol'):
                 for task_id, session, outcome in sweep(store):
                     if outcome in ('continued', 'told', 'gave_up', 'notify_only', 'send_failed') or \
-                            outcome.startswith(('told_', 'error')):
+                            outcome.startswith(('told_', 'error', 'idle_closed')):
                         print('%s patrol %s %s %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), task_id, session or '-', outcome),
                               file=sys.stderr, flush=True)
         except RuntimeError:
