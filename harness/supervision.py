@@ -55,9 +55,10 @@ def handoff_continues(store, task):
 
     A stop that waits for the user (a question, a decision) is not work going on: needs_work is False there, and the
     handoff keeps waiting for the user's answer, which it then carries (continuity.auto_handoff)."""
-    from .continuity import READY_STATES, handoff_mode
+    from .continuity import handoff_mode, handoff_ready
     data = task['data']
-    return (handoff_pending(task) and (data.get('handoff_state') or {}).get('state') in READY_STATES
+    # handoff_ready: a failed automatic /clear is tried again here too, a bounded number of times (continuity.retry_ready)
+    return (handoff_pending(task) and handoff_ready(data.get('handoff_state'))
             and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and needs_work(task))
 
 

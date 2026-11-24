@@ -391,16 +391,24 @@ def main():
               'HELD REQUEST' in brief and 'one row per item' in brief, brief[-500:])
         check('…served to the old session once', store.get(tid_n)['data']['carried_prompt'].get('served_to') == 'n1')
         end_turn(store, pay_n)
-        attach.handle(store, 'prompt', dict(pay_n, prompt='이어서 진행해'), 'claude')
+        count = len(typed)
+        again = attach.handle(store, 'prompt', dict(pay_n, prompt='이어서 진행해'), 'claude')
         check("…and that session's next request no longer holds it (the turn that did it is over)",
               not any(l.startswith('HELD') for l in continuity.handoff_lines(store.get(tid_n)['data'], 'cosmos-orbit', tid_n)))
+        state_n = store.get(tid_n)['data']['handoff_state']
+        # 2026-11-24: a failed attempt is tried again (RETRY_LIMIT) instead of waiting for the user's /clear for good
+        check('…that next request starts attempt 2 of the handoff (it used to wait for a manual /clear)',
+              (again or {}).get('decision') == 'block' and state_n.get('state') == 'auto' and state_n.get('attempts') == 2
+              and len(typed) == count + 1, (again, state_n, len(typed) - count))
         end_turn(store, pay_n)
         count = len(typed)
         start = attach.handle(store, 'session-start', {'cwd': str(root_n), 'session_id': 'n2', 'source': 'clear'}, 'claude')
         brief = start['hookSpecificOutput']['additionalContext'] if start else ''
-        check('…a fresh session after /clear takes the task but is not told to do it again (the 11:01 defect)',
-              (store.session_task('n2') or {}).get('task_id') == tid_n and 'CARRIED OVER' not in brief
-              and len(typed) == count, (brief[-300:], len(typed) - count))
+        carried_line = next((l for l in brief.split('\n') if l.startswith('CARRIED OVER')), '')
+        check('…a fresh session after /clear takes the task, gets the new request, and is not told to do the held one '
+              'again (the 11:01 defect)',
+              (store.session_task('n2') or {}).get('task_id') == tid_n and '이어서 진행해' in carried_line
+              and 'one row per item' not in carried_line and len(typed) == count, (brief[-300:], len(typed) - count))
         # (b) the user clears by hand after the failure: the fresh session takes it and starts by itself
         root_p = make_repo(base, 'repo-failed-clear')
         attach.set_switch(store, 'on', root_p)

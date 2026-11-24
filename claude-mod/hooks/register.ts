@@ -37,7 +37,14 @@ async function takenOver($: EngineInterface, task: string): Promise<boolean> {
   return false
 }
 
-async function handOff($: EngineInterface, task: string, carryLine: string): Promise<void> {
+// The handoff this session took did not take effect: Orbit records why now (not at its typist's 25 s timeout) and
+// tries again at the session's next stop, a bounded number of times. 2026-11-24 14:15 KST the ledger said only that
+// the takeover timed out, and nothing tried again until the session had grown past 750k tokens.
+async function failed($: EngineInterface, session: string, reason: string): Promise<void> {
+  await orbit($, ['handoff-claim', '--session', session, '--failed', reason.slice(0, 180)])
+}
+
+async function handOff($: EngineInterface, session: string, task: string, carryLine: string): Promise<void> {
   $.ui.toast('Orbit: handing off to a fresh session')
   try {
     // Claude Code puts a prompt a hook blocked back into the input (measured 2.1.318): left there, one Enter would
@@ -45,12 +52,14 @@ async function handOff($: EngineInterface, task: string, carryLine: string): Pro
     await $.prompt.fill({ text: '', mode: 'replace' })
     await $.command.run({ command: 'clear', args: '' })
   } catch (error) {
-    // Orbit's watcher sees no takeover and tells the user to type /clear; the request stays carried.
-    $.ui.toast('Orbit: the handoff did not start (' + String(error).slice(0, 80) + '); type /clear')
+    // The request stays carried; Orbit tries again at the next stop, then asks the user to type /clear.
+    await failed($, session, 'the /clear was refused: ' + String(error).slice(0, 120))
+    $.ui.toast('Orbit: the handoff did not start (' + String(error).slice(0, 80) + '); Orbit tries again at the next stop')
     return
   }
   if (!(await takenOver($, task))) {
     // Nothing is submitted: the request stays in Orbit's ledger (`cosmos-orbit brief <task>` shows it).
+    await failed($, session, 'no fresh session took the task over within ' + TAKEOVER_WAIT_MS / 1000 + ' s of the /clear')
     $.ui.toast('Orbit: the fresh session did not take the task over; the request stays carried (cosmos-orbit brief ' + task + ')')
     return
   }
@@ -83,7 +92,7 @@ export const register: Register = on => {
     const task = claim.out.task
     // Not here: a command run inside a hook the turn waits on is refused. Once this hook returned, the session is
     // idle (the request was blocked) and the clear runs.
-    $.clock.after(200, () => void handOff($, task, carryLine))
+    $.clock.after(200, () => void handOff($, session, task, carryLine))
     return result
   })
 }
