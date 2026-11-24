@@ -145,7 +145,10 @@ def reopen_verified(store, task_id, session, text):
             {'at': now(), 'from': 'verified', 'session': session, 'by': 'prompt', 'text': text[:200]}]
         data.update(reason='', reason_code='reopened', verification_pending=False)
         data['development']['phase'] = 'ready'
-        store.save(task, 'working', 'task_reopened', {'from': 'verified', 'session': session, 'by': 'prompt', 'layer': 'control'})
+        from .rounds import begin_next
+        opened = begin_next(data, text, session)         # the round before stays complete
+        store.save(task, 'working', 'task_reopened', {'from': 'verified', 'session': session, 'by': 'prompt',
+                                                      'round': opened['n'], 'layer': 'control'})
         _apply_prompt(store, task, text, session)        # records it and marks the goals to revise
     store.attach(task['workspace'], task_id)             # the folder's current task again
     return store.get(task_id)
@@ -257,6 +260,10 @@ def reopen(store, task_id, session=None, pane=None, host=None):
             data.update(reason='', verification_pending=False)
         data['reason_code'] = 'reopened'
         data['development']['phase'] = 'ready'
+        from .rounds import begin_next, completed, current
+        finished = completed(data)
+        if finished and finished[-1]['n'] == current(data, task)['n']:
+            begin_next(data, carried[0] if carried else '', session, by='continue')   # a complete round taken back
         if not session:
             data['handoff_state'] = {'session': None, 'state': 'told', 'at': now(), 'told_at': now(), 'pane': pane,
                                      'reopened': True}

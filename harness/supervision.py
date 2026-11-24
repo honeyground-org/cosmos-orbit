@@ -88,6 +88,9 @@ def outcome_text(task):
     from .manager import _short
     data = task['data']
     if task['status'] == 'verified':
+        from .rounds import offer_open, offer_text
+        if offer_open(task):
+            return offer_text(task)                      # the round, its verified goals and the three choices
         return 'Orbit: verified - task %s is complete: %s' % (task['id'], _short(data.get('goal') or task['prompt'], 120))
     return 'Orbit: your decision is needed - task %s: %s' % (task['id'], _short(data.get('reason') or 'see the brief', 160))
 

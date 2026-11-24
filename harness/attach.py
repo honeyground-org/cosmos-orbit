@@ -856,6 +856,9 @@ def _apply_prompt(store, task, text, session=None):
         if session not in sessions:
             sessions.append(session)
             del sessions[:-20]
+    opened = data.get('round')
+    if opened and not opened.get('goal') and kind in ('requirement', 'unsure'):
+        opened['goal'] = text[:600]                      # a round taken back with `continue`: its first request
     if kind in ('requirement', 'unsure') or task['status'] == 'needs_input':
         data.setdefault('feedback', []).append({'text': text[:4000], 'revision': task['revision'], 'message_id': None,
                                                  'at': now(), 'source': 'prompt', 'kind': kind})
@@ -1255,7 +1258,10 @@ def run_verification(engine, task_id, checks_only=False):
             if verdict['outcome'] == 'verified':
                 data.update(reason='', reason_code='')
                 data['objective_progress'] = {'remaining': [], 'next_action': '', 'source': 'runtime'}
-                store.save(task, 'verified', 'completion_verified', {'turn': data['turns']})
+                from .rounds import complete as complete_round
+                finished = complete_round(data, task)            # the round is fixed complete; an offer opens
+                store.save(task, 'verified', 'completion_verified', {'turn': data['turns'], 'round': finished['n'],
+                                                                     'items': finished['items']})
                 engine.notify('verified', task_id)
                 if data.get('memory', {}).get('mode') in ('brain', 'both'):
                     from .memory import enqueue_checkpoint, flush
@@ -1336,7 +1342,13 @@ def brief_text(store, task, event='prompt', for_digest=False):
     objective = (data.get('objective') or {}).get('text')
     from .consolidate import current as current_summary, brief_lines as summary_lines
     summary = current_summary(data, task) if task['status'] not in CLOSED else None
-    if objective:
+    from .rounds import goal_line as round_line, offer_line
+    by_round = round_line(data, task, _local)
+    if by_round:
+        # After a complete round the brief opens with the round being worked on: a fresh context reading the first
+        # request as the work to do redid finished work (2026-11-12, and again 11-24 with three verified rounds).
+        lines = [head, by_round + (' · OBJECTIVE: ' + _one_line(objective, 200) if objective else '')]
+    elif objective:
         lines = [head, 'GOAL (current, %s): %s · ORIGINAL REQUEST (still binds): %s' % (
             _local((data.get('objective') or {}).get('at'), False), _one_line(objective, 300),
             _one_line(data.get('goal') or task['prompt'], 200))]
@@ -1440,10 +1452,14 @@ def brief_text(store, task, event='prompt', for_digest=False):
         lines.append('REOPENED %s (was %s, by %s): the work goes on in this task — revise the goals for the new request '
                      '(%s done %s --add \'D… \' or --keep) before claiming.' % (
                          _local(reopened['at'], False), reopened.get('from'), reopened.get('by'), prefix, tid))
+    offered = offer_line(task, prefix)
+    if offered:
+        lines.append(offered)
     tail = []
     if task['status'] == 'verified':
-        tail.append('VERIFIED. A substantial request from the session that did this work reopens this task (working, goals '
-                    'to revise); a request from another terminal starts a new task. Untouched for 12 h, it closes.')
+        tail.append('VERIFIED. A substantial request from the session that did this work opens the next round of this task '
+                    '(working, new goals and a new review); a request from another terminal starts a new task. Untouched '
+                    'for 12 h, it closes.')
     elif task['status'] == 'closed':
         closed = data.get('closed') or {}
         tail.append('CLOSED %s (%s): %s A new request starts a new task. Only if the user asks to go on with this one: '
@@ -1919,6 +1935,18 @@ def _handle(store, event, payload, host):
                             'request was not run here. Type /clear (Claude Code) or /new (Codex); the fresh session takes it over.'})
         if text.startswith('/') or not text:
             return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
+        if task is not None and task['status'] == 'verified':
+            from . import rounds
+            picked = rounds.choice(text)
+            if picked and rounds.offer_open(task):
+                # The user answered the completion notice: end, go on or leave it. The line runs no turn.
+                try:
+                    said = rounds.answer(store, task, session, picked, host=host, typed_text=payload.get('prompt') or '')
+                except RuntimeError:
+                    said = None
+                    hook_log(store, 'completion choice not applied (task busy) ' + task['id'])
+                if said:
+                    return refused({'decision': 'block', 'reason': said})
         suggested, reopened = None, False
         from .lifecycle import continues_closed
         if task is not None and continues_closed(task, session, text):
@@ -2058,6 +2086,20 @@ def stop_decision(store, task, payload):
                 hook_log(store, 'worker start failed: ' + str(error))
         progress = verification_progress(store, task)
         return {'systemMessage': 'Orbit: ' + progress['reason'] + ' Task %s; inspect `%s status %s`.' % (task['id'], prefix, task['id'])}
+    from . import rounds
+    session = payload.get('session_id')
+    if rounds.offer_open(task) and session and session not in ((data.get('completion') or {}).get('told') or []):
+        try:
+            with store.lock('task:' + task['id']):
+                task = store.get(task['id'])
+                offer = task['data'].get('completion') or {}
+                if rounds.offer_open(task) and session not in (offer.get('told') or []):
+                    offer['told'] = (offer.get('told') or [])[-9:] + [session]
+                    store.save(task, task['status'], 'completion_offered', {'session': session, 'round': offer.get('round'),
+                                                                            'by': 'stop', 'layer': 'control'})
+                    return {'systemMessage': rounds.offer_text(task)}
+        except (RuntimeError, ValueError):
+            pass
     draft = data.get('draft')
     if draft and task['status'] not in CLOSED and not [d for d in data.get('done') or [] if d['id'].startswith('D')]:
         changed = workspace_marks(task['workspace']) != draft.get('marks')
@@ -2238,6 +2280,8 @@ def handoff_markdown(store, task):
              '| Updated | %s |' % _local(task['updated']),
              '| Claims | %s |' % data.get('turns', 0),
              '', '## Goal (verbatim)', '', goal.strip(), '']
+    from .rounds import handoff_lines as round_lines
+    lines += round_lines(data, task, _local)
     feedback = data.get('feedback') or []
     lines += ['## Corrections (%d)' % len(feedback), '']
     lines += ['- %s %s' % (_local(f.get('at')), f['text'].strip()) for f in feedback] or ['- none']

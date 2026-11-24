@@ -348,8 +348,10 @@ def brief_lines(data, task, summary):
     """NOW, KEEP and SHIFTS lines for the brief (the corrections line after them says where the rest is)."""
     if not summary:
         return []
-    lines = ['NOW (summary %s by %s · GOAL above is the first request): %s' % (
-        _stamp(summary.get('at')), 'the session' if summary.get('by') == 'session' else 'Orbit', summary['now'])]
+    lines = ['NOW (summary %s by %s · %s): %s' % (
+        _stamp(summary.get('at')), 'the session' if summary.get('by') == 'session' else 'Orbit',
+        'ROUND above is the request being worked on' if data.get('rounds') else 'GOAL above is the first request',
+        summary['now'])]
     if summary.get('keep'):
         lines.append('KEEP (still holds, whatever its age): ' + ' · '.join(
             'K%d %s' % (i + 1, k['text']) for i, k in enumerate(summary['keep'])))
