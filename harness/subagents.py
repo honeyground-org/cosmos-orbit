@@ -24,6 +24,24 @@ places taken in the second between an allowed call and its .meta.json. Agents st
 counted too, though only an Agent call can be refused. Codex has no Agent call here: nothing changes for it.
 
 The limit: settings.json "subagents": {"max": N} (`cosmos-orbit context subagents 5|off|reset`), else 5.
+
+Stopped at the usage limit (measured 2026-11-23/24, Claude Code 2.1.331): when the account hits its limit, every
+subagent of the session stops with it. Its own transcript then ends on the host's synthetic line (`isApiErrorMessage`,
+`error: rate_limit`, `apiError: usage_limit_reached`), and a teammate tells the lead it went idle with
+`failureReason`. The subagent runs inside the session's process, on the session's account, so once the session answers
+again (the user signed in to another account, or the limit reset) the subagent can go on there — but only when someone
+sends it a message, and the address matters:
+- /login inside the session keeps the process and its teammates: a message by name or agent id resumes them
+  (2026-11-18: 7 of 7 finished; 2026-11-23 13:58: 10 of 10 went on).
+- An account switched from outside the session, or a restart (`--resume`), starts the team again: the name is gone
+  ("No agent named 'lumi-d66-engine' is reachable", 10 of 10 on 2026-11-23; ListAgents empty on 2026-11-24 12:48, the
+  team's config.json created again at that second), while the agent id still resumes it from its transcript with its
+  whole conversation ("Teammate … was not running; resumed it as an in-process teammate with 13 prior messages";
+  "Resuming agent a6628b2"; both then skipped the step their transcript showed done and finished the rest).
+Left to itself, the lead forgot them (5 of 5 never ran again on 2026-11-23 23:16), tried the names, or started new
+agents and wrote each a handoff to replace the conversation it had lost. So at each prompt that goes on, the lead is
+given the list — the subagents whose transcript ends on that line and have not run since, none whose name was started
+again after — and the one call that resumes each: SendMessage to its agent id. At most STOPPED_TELLS prompts per stop.
 """
 import json
 import os
@@ -304,6 +322,141 @@ def guidance(store, payload, host):
     return guidance_text(at_most)
 
 
+# ---------------------------------------------------------------- stopped at the usage limit
+
+STOPPED_WITHIN = 24 * 3600    # a stop older than this is history, not work to resume
+STOPPED_TELLS = 3             # prompts that carry one stop's list, at most
+STOPPED_TAIL = 65536          # the end of a subagent's transcript, enough for its last line
+STOPPED_SHOWN = 12            # subagents named in the list, at most
+STOPPED_KEY = 'subagent-stopped:'  # + session: {stop id: prompts it was told at}
+
+
+def _last_message(path):
+    """The last user or assistant line of a transcript (other lines — queue operations, attachments — skipped)."""
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - STOPPED_TAIL))
+            lines = handle.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get('type') in ('user', 'assistant'):
+            return record
+    return None
+
+
+def stopped(transcript_path, now=None):
+    """The session's subagents whose own transcript ends on the host's usage-limit line, newest stop first: agent id,
+    name (a teammate) or description, when it stopped and that line's id. Not one whose name (a teammate) or
+    description (an anonymous subagent) was started again after its stop: that newer agent took its work."""
+    from .routes import LIMIT_ERRORS, _content_text, _stamp
+    from .teammates import _name, subagents_dir
+    now = time.time() if now is None else now
+    try:
+        files = [p for p in subagents_dir(transcript_path).iterdir()
+                 if p.name.startswith('agent-') and p.name.endswith('.jsonl')]
+    except OSError:
+        return []
+    every, found = [], []
+    for path in files:
+        try:
+            written = path.stat().st_mtime
+        except OSError:
+            continue
+        if now - written > STOPPED_WITHIN:
+            continue
+        stem = path.name[:-len('.jsonl')]
+        meta = _json_file(path.with_name(stem + '.meta.json')) or {}
+        row = {'agent_id': stem[len('agent-'):], 'name': _name(stem, meta), 'description': meta.get('description'),
+               'type': meta.get('agentType'), 'written': written, 'transcript': str(path)}
+        every.append(row)
+        last = _last_message(path)
+        if not (last and last.get('type') == 'assistant' and last.get('isApiErrorMessage')
+                and last.get('error') in LIMIT_ERRORS):
+            continue
+        at = _stamp(last.get('timestamp')) or written
+        if now - at > STOPPED_WITHIN:
+            continue
+        found.append(dict(row, stopped_at=at, stop=str(last.get('uuid') or '%s@%d' % (row['agent_id'], at)),
+                          text=str(_content_text(last.get('message')) or last.get('error'))[:160]))
+
+    def replaced(row):
+        field = 'name' if row['name'] else 'description'
+        return bool(row[field]) and any(
+            other['agent_id'] != row['agent_id'] and other[field] == row[field] and other['written'] > row['stopped_at']
+            and not (field == 'description' and other['name']) for other in every)
+
+    found = [r for r in found if not replaced(r)]
+    found.sort(key=lambda r: r['stopped_at'], reverse=True)
+    return found
+
+
+def _clock(stamp, now):
+    import datetime
+    when = datetime.datetime.fromtimestamp(stamp)
+    same_day = when.date() == datetime.datetime.fromtimestamp(now).date()
+    return when.strftime('%H:%M' if same_day else '%m-%d %H:%M')
+
+
+def stopped_text(rows, at_most, now=None):
+    now = time.time() if now is None else now
+    count = len(rows)
+    lines = ['[orbit] %d subagent%s of this session stopped at the usage limit and %s not run since:'
+             % (count, '' if count == 1 else 's', 'has' if count == 1 else 'have')]
+    for row in rows[:STOPPED_SHOWN]:
+        label = row['name'] or '"%s"' % str(row['description'] or row['type'] or 'subagent')[:60]
+        lines.append('- %s · agentId %s · stopped %s' % (label, row['agent_id'], _clock(row['stopped_at'], now)))
+    if count > STOPPED_SHOWN:
+        lines.append('- and %d more: `cosmos-orbit context subagents` lists them' % (count - STOPPED_SHOWN))
+    lines.append(
+        "A subagent runs on its session's account. Once this session answers again (another account, or the limit "
+        'reset), resume each where it stopped instead of starting a new agent for its work: SendMessage({to: '
+        '"<its agentId>", message: "The usage limit is lifted: continue from where you stopped."}). Use the agentId, '
+        'not the name: after an account switch or a restart a name no longer reaches it ("No agent named … is '
+        'reachable"), while the agentId resumes it with its whole conversation (measured 2026-11-24).'
+        + (' At most %d run at a time: resume the rest as places free up.' % at_most if at_most else '')
+        + ' If the user said to leave them stopped, leave them.')
+    return '\n'.join(lines)
+
+
+def stopped_reply(store, payload, host, now=None):
+    """The prompt's note, or None: Claude Code only, where Orbit is on, when subagents of this session stopped at the
+    usage limit and have not run since. A stop is told at STOPPED_TELLS prompts at most; it leaves the list by itself
+    once its subagent runs again (its transcript no longer ends on the limit line)."""
+    if host != 'claude' or not isinstance(payload, dict) or payload.get('agent_id'):
+        return None
+    session, transcript = payload.get('session_id'), payload.get('transcript_path')
+    if not session or not transcript:
+        return None
+    now = time.time() if now is None else now
+    rows = stopped(transcript, now)
+    if not rows:
+        return None
+    from .attach import hook_root, resolve
+    cwd = payload.get('cwd') or os.getcwd()
+    if resolve(store, cwd)[0] != 'on' and hook_root(store, cwd, session, 'pre-tool') is None:
+        return None                                    # Orbit is off for this session
+    try:
+        told = json.loads(store.preference(STOPPED_KEY + session) or '{}')
+    except ValueError:
+        told = {}
+    told = told if isinstance(told, dict) else {}
+    if not any(int(told.get(r['stop']) or 0) < STOPPED_TELLS for r in rows):
+        return None                                    # told often enough; the user may have meant them to stay
+    store.preference(STOPPED_KEY + session, json.dumps({r['stop']: int(told.get(r['stop']) or 0) + 1 for r in rows},
+                                                       sort_keys=True))
+    _record(store, session, 'subagents_stopped_told', {'agents': [
+        {'agent_id': r['agent_id'], 'name': r['name'], 'description': r['description'],
+         'stopped': _iso(r['stopped_at'])} for r in rows]})
+    return stopped_text(rows, limit(store.home)[0], now)
+
+
 # ---------------------------------------------------------------- showing
 
 def view(store, value, session, how, transcript=None, now=None):
@@ -333,7 +486,9 @@ def view(store, value, session, how, transcript=None, now=None):
                   recent=[{k: r[k] for k in ('description', 'kind', 'name', 'state', 'started', 'ended', 'why')}
                           for r in rows],
                   started=sum(1 for r in rows if r['state'] != 'refused'),
-                  refused=sum(1 for r in rows if r['state'] == 'refused'))
+                  refused=sum(1 for r in rows if r['state'] == 'refused'),
+                  stopped_at_limit=[{'label': _label(r), 'agent_id': r['agent_id'], 'stopped': _iso(r['stopped_at'])}
+                                    for r in (stopped(transcript, now) if transcript else [])])
     return result
 
 

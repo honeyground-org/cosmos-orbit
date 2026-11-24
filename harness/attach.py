@@ -1643,6 +1643,11 @@ def handle(store, event, payload, host):
                     notes.append(lead_reply(store, payload, host))
                 except Exception as error:  # noqa: BLE001 - never at the cost of the hook
                     hook_log(store, 'teammates skipped: ' + repr(error)[:200])
+                try:  # subagents the usage limit stopped: resumed by their agent id on the account now in use
+                    from .subagents import stopped_reply
+                    notes.append(stopped_reply(store, payload, host))
+                except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                    hook_log(store, 'stopped subagents skipped: ' + repr(error)[:200])
             notes = [n for n in notes if n]
             if notes:
                 context = ((output or {}).get('hookSpecificOutput') or {}).get('additionalContext')
