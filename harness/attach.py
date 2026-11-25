@@ -954,7 +954,7 @@ def cli_feedback(store, task_id, text):
 
 
 def set_done(store, task_id, texts, origin='executor', add=False, keep=False, checks=(), drop=(), replace=(), goal=None,
-             because=None):
+             because=None, rewrite=False):
     """Write a revision of the result goals (D items) and verification goals (fixed checks, append-only).
 
     drop: open IDs the user withdrew (allowed only while the user's change is pending) · replace: (ID, text) pairs
@@ -967,12 +967,12 @@ def set_done(store, task_id, texts, origin='executor', add=False, keep=False, ch
             raise ValueError('done applies to attached tasks; use feedback --done for managed tasks')
         if task['status'] in CLOSED:
             raise ValueError('This task is closed (' + task['status'] + '); attach a new request first')
-        _revise(store, task, texts, origin, add, keep, commands, drop, replace, goal, because)
+        _revise(store, task, texts, origin, add, keep, commands, drop, replace, goal, because, rewrite)
     return store.get(task_id)
 
 
 def _revise(store, task, texts, origin='executor', add=False, keep=False, commands=(), drop=(), replace=(), goal=None,
-            because=None):
+            because=None, rewrite=False):
     """The revision itself, for a caller that holds the task lock (set_done, and claim when it settles the list)."""
     from . import requirements
     task_id = task['id']
@@ -990,7 +990,7 @@ def _revise(store, task, texts, origin='executor', add=False, keep=False, comman
         row = requirements.replace(data, item_id, text, origin, because)
         changes.append('replaced %s by %s' % tuple(row['ids']))
     row = requirements.revise(data, list(texts), origin, add=add, keep=keep, checks=commands, because=because,
-                              changes=changes)
+                              changes=changes, rewrite=rewrite)
     if draft:
         remember_label(store, task_id, task['prompt'], 'change', origin)  # the executor confirmed the work
     if pending.get('unsure'):
@@ -2157,7 +2157,7 @@ def stop_decision(store, task, payload):
         return {'decision': 'block', 'reason': (
             'Orbit: the user changed the request at %s ("%s"). Before you continue, revise the result goals and, if it needs one, '
             'the verification: %s done %s --add \'<what the change requires>\' [--check \'["python3","-m","pytest","…"]\'] '
-            '(or the same command with your rewritten items, or with --keep if the current items already cover it). Fixed checks can only be added.'
+            '(or `done ID --keep --because \'…\'` if the current items already cover it — --keep takes no text; rewriting the whole list needs --rewrite). Fixed checks can only be added.'
             % (requirements_hhmm(pending['at']), pending['text'][:300], prefix, task['id']))}
     message = str(payload.get('last_assistant_message') or '')
     executor = data.get('executor_result') or {}

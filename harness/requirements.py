@@ -44,7 +44,7 @@ _INFO_NOUNS = {'결과', '이유', '원인', '상태', '상황', '진행', '진�
 _NEXT_STEP_KO = re.compile(r'^(?:다음(?:의)?|남은|앞으로(?:의)?|이후(?:의)?)\s+(?:작업|업무|단계|할\s?일)(?:은|는)(?:요)?\s*[?？]$')
 _AND_ELLIPSIS = re.compile(r'^and\s+(?!(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|how|what|why|'
                            r'when|where|who|which|whose|whom)\b)[^?]{1,60}\?\s*$')
-_SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
+_SYSTEM = re.compile(r'^\s*<(task-notification|agent-message|teammate-message|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
                      r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
 
 
@@ -491,7 +491,11 @@ def apply_verdict(data, verdict, tree, clean=True):
     return applied
 
 
-def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), because=None, changes=()):
+# A rewrite by the executor may drop a few items (merging, rewording); more than this needs --rewrite.
+REWRITE_GUARD = 3
+
+
+def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), because=None, changes=(), rewrite=False):
     """Write a new revision of the result goals (D items) and verification goals (fixed checks).
 
     add: append to the current items · keep: confirm they still cover the request · checks: argv lists appended
@@ -508,6 +512,11 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
             'added': [d['id'] for d in data.get('done') or [] if d['id'].startswith('D')], 'removed': [], 'checks_added': [],
             'items': len(current_texts(data)), 'checks': len(data['development']['checks'])})
     changes = list(changes or [])
+    if keep and texts and not add:
+        # 2026-11-05 · 11-23 · 11-24 ×2 · 11-25 ×2: '--keep "why"' read the reason as the new list and superseded every
+        # open item (up to 201 at once). --keep is a bare flag; the reason goes to --because.
+        raise ValueError("--keep takes no text: with text it would replace every open item by that text. Keep the list "
+                         "with --keep --because '…', append with --add '…'")
     if not texts and not keep and not checks and not changes:
         raise ValueError('Give completion definitions, --keep, or --check')
     keep = keep or bool(changes and not texts)
@@ -535,6 +544,12 @@ def revise(data, texts=(), origin='executor', add=False, keep=False, checks=(), 
     else:
         final, origins = texts, [origin] * len(texts)
         ids = _match_ids(existing, texts, issue) if numbered else None
+        if numbered and not rewrite and origin != 'user':
+            gone = [d['id'] for d in existing if d['id'] not in set(ids)]
+            if len(gone) > REWRITE_GUARD:
+                raise ValueError('This would supersede %d open items (%s) with %d new one(s). To append use --add; to '
+                                 'keep the list use --keep --because; to really rewrite the whole list pass --rewrite'
+                                 % (len(gone), ' '.join(gone[:8]) + (' …' if len(gone) > 8 else ''), len(texts)))
     met = last_met(data) if numbered else set()
     proven = orbit_proven(data) if numbered else set()
     counted = [i for i in (ids or [None] * len(final)) if i not in met and i not in proven]
@@ -607,7 +622,7 @@ def pending_line(data, prefix, tid):
                 % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid, prefix, tid))
     return ('REQUIREMENTS CHANGED (%s, after rev %s): "%s". Revise the result and verification goals before claiming: '
             "%s done %s --add 'D… what the change requires' [--check '[\"python3\",\"-m\",\"pytest\",\"…\"]'] "
-            "(or your rewritten items 'D1 …' 'D2 …') · or at claim time: %s claim %s --summary '…' --keep 'why they still cover it'"
+            "(or done --keep --because '…': no text after --keep) · or at claim time: %s claim %s --summary '…' --keep 'why they still cover it'"
             % (_hhmm(pending['at']), pending.get('rev') or 0, re.sub(r'\s+', ' ', pending['text'])[:300], prefix, tid, prefix, tid))
 
 

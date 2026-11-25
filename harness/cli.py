@@ -144,7 +144,10 @@ def main(argv=None):
     done_cmd.add_argument('id')
     done_cmd.add_argument('text', nargs='*')
     done_cmd.add_argument('--add', action='store_true', help='Append to the current items instead of replacing them')
-    done_cmd.add_argument('--keep', action='store_true', help='Confirm the current items still cover the changed request')
+    done_cmd.add_argument('--keep', action='store_true', help='Confirm the current items still cover the changed request (a bare flag: '
+                          'the reason goes to --because; text after --keep is refused)')
+    done_cmd.add_argument('--rewrite', action='store_true', help='Really replace the whole list (needed when a rewrite would '
+                          'supersede more than %d open items)' % 3)
     done_cmd.add_argument('--check', dest='checks', action='append', default=[], metavar='ARGV_JSON',
                           help='Add a fixed verification command (append-only; existing checks never change)')
     done_cmd.add_argument('--user', action='store_true', help='Record as fixed by the user')
@@ -528,7 +531,7 @@ def main(argv=None):
         elif args.command == 'done':
             from .attach import set_done
             task = set_done(store, args.id, args.text, 'user' if args.user else 'executor', args.add, args.keep, args.checks,
-                            args.drop, [tuple(r) for r in args.replace], args.goal, args.because)
+                            args.drop, [tuple(r) for r in args.replace], args.goal, args.because, args.rewrite)
             result = show(task)
             result['done_rev'] = task['data'].get('done_rev')
             result['revision'] = (task['data'].get('done_history') or [None])[-1]
