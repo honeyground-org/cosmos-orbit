@@ -310,7 +310,7 @@ def run(base, store, engine):
     claims = bundle['executor_evidence']['D1']
     check('control: its note and the hand-written note stay claims, without the output',
           claims[0].get('output') == 'see host_observations' and claims[1]['note'] == 'I checked by hand', claims)
-    attach.set_done(store, t5, ['the service answers'], keep=True)
+    attach.set_done(store, t5, [], keep=True)
     task = review(engine, store, t5, answer({}))
     entry = attach.record_evidence(store, t4, 'D1', note='closed items take evidence too')
     check('a closed item takes evidence (the argument for reopening it)', entry['note'].startswith('closed items'))

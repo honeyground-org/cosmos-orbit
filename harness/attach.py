@@ -1976,8 +1976,8 @@ def _handle(store, event, payload, host):
                     hook_log(store, 'verified task not reopened (busy) ' + task['id'])
         if task is None or task['status'] in CLOSED:
             kind = classify(text, learned(store))
-            if len(text) < MIN_TASK_PROMPT or kind in ('trivial', 'question'):
-                # A question or a go-ahead with no open task starts nothing.
+            if len(text) < MIN_TASK_PROMPT or kind in ('trivial', 'question', 'agent'):
+                # A question, a go-ahead or another agent's message with no open task starts nothing.
                 return _context('UserPromptSubmit', serve_brief(store, watched(task), 'prompt', session)) if task else None
             # The user's prompt is not ours to refuse: keep the ledger's first 24000 characters of a longer one.
             task = create(store, root, text[:24000], host, session, draft=kind == 'unsure',

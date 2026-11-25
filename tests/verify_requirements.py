@@ -447,8 +447,8 @@ def main():
 
     print('⑪ the list cannot be replaced by accident (2026-11-25: six times an open list of up to 201 items was superseded)')
     note = '<agent-message from="lumi-ledger21">\nledger updated · next W141\n</agent-message>'
-    check('a teammate message is not the user changing the request: system', requirements.classify(note) == 'system')
-    check('…a teammate-message too', requirements.classify('<teammate-message teammate_id="x">done</teammate-message>') == 'system')
+    check('a teammate message is not the user changing the request: agent', requirements.classify(note) == 'agent')
+    check('…a teammate-message too', requirements.classify('<teammate-message teammate_id="x">done</teammate-message>') == 'agent')
     check('…the user writing about an agent message is still a requirement (control)',
           requirements.classify('agent-message 도 무시하게 바꿔 줘') == 'requirement')
     task = attach.set_done(store, tid, ['Totals have a currency sign', 'Empty reports say so', 'Dates are ISO'], add=True)
@@ -481,6 +481,16 @@ def main():
     check('CLI `done ID --rewrite "…"` still rewrites on purpose (control)', ran.returncode == 0
           and [d['text'] for d in task['data']['done'] if d['id'][0] == 'D'][-1].endswith('A short report')
           and len([d for d in task['data']['done'] if d['id'][0] == 'D']) == 1, (ran.stderr or ran.stdout)[-300:])
+    task = attach.record_prompt(store, store.get(tid), note, 'sess-agent')
+    check('a teammate message on a defined task asks for no revision', not task['data'].get('requirements_pending')
+          and task['data']['prompts'][-1]['kind'] == 'agent', task['data'].get('requirements_pending'))
+    task = attach.record_prompt(store, store.get(tid), 'Also add a CSV export of the totals', 'sess-agent')
+    check('…the user stating new work still does (control)', bool(task['data'].get('requirements_pending')))
+    root9 = base / 'agent-only'
+    root9.mkdir()
+    check('a teammate message with no open task opens none', attach.handle(store, 'prompt', {'cwd': str(root9), 'session_id': 'a9',
+          'prompt': note + ' Refactor the notifier module into two files'}, 'claude') is None
+          and not [t for t in store.list() if t.get('root') == str(root9)])
     hint = (ROOT / 'harness' / 'requirements.py').read_text() + (ROOT / 'harness' / 'attach.py').read_text()
     check('the notices show --keep as a bare flag with --because', "--keep --because" in hint and "or with --keep if" not in hint)
 

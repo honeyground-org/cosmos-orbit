@@ -44,8 +44,12 @@ _INFO_NOUNS = {'결과', '이유', '원인', '상태', '상황', '진행', '진�
 _NEXT_STEP_KO = re.compile(r'^(?:다음(?:의)?|남은|앞으로(?:의)?|이후(?:의)?)\s+(?:작업|업무|단계|할\s?일)(?:은|는)(?:요)?\s*[?？]$')
 _AND_ELLIPSIS = re.compile(r'^and\s+(?!(?:is|are|was|were|do|does|did|has|have|had|can|could|will|would|should|how|what|why|'
                            r'when|where|who|which|whose|whom)\b)[^?]{1,60}\?\s*$')
-_SYSTEM = re.compile(r'^\s*<(task-notification|agent-message|teammate-message|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
+_SYSTEM = re.compile(r'^\s*<(task-notification|system-reminder|local-command-[a-z-]+|command-name|command-message|command-args|'
                      r'user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b', re.I)
+# Another session's message (a subagent, a teammate) delivered as a prompt: it runs a turn and travels with a handoff like
+# a request, but it is that agent's words, so it never changes the goal, reopens a task or opens one (2026-11-25: a
+# teammate's ledger report was recorded as the user changing the request, and the session was asked to revise).
+_AGENT = re.compile(r'^\s*<(agent-message|teammate-message)\b', re.I)
 
 
 # A go-ahead is any combination of these, ignoring spaces, punctuation and politeness endings.
@@ -157,7 +161,7 @@ def _context_kind(sentence):
 
 
 def classify(text, learned=None):
-    """'system' | 'trivial' | 'question' | 'requirement' | 'unsure'.
+    """'system' | 'agent' | 'trivial' | 'question' | 'requirement' | 'unsure'.
 
     Only a person's words can set or change a goal: host notifications arrive through the same hook and are
     ignored. A question or a go-ahead does not change what must be delivered. 'unsure' goes to the executor;
@@ -170,6 +174,8 @@ def classify(text, learned=None):
     stripped = (text or '').strip()
     if _SYSTEM.match(stripped):
         return 'system'
+    if _AGENT.match(stripped):
+        return 'agent'
     from .typist import CARRY_LINE
     from .wake import WAKE_LINE
     if stripped == CARRY_LINE:
