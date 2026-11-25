@@ -146,12 +146,17 @@ def folder_agents(transcript_path, now=None):
             except OSError:
                 continue
         name = _name(stem, meta)
+        try:
+            launched = meta_path.stat().st_mtime
+        except OSError:
+            launched = written
         row = {'agent_id': stem[len('agent-'):], 'call': meta.get('toolUseId'), 'description': meta.get('description'),
-               'type': meta.get('agentType'), 'name': name, 'written': written, 'transcript': str(transcript)}
+               'type': meta.get('agentType'), 'name': name, 'written': written, 'transcript': str(transcript),
+               'meta_written': launched}
         if name:
-            if teammates is None:
-                teammates = {r['agent_id']: r for r in teammate_rows(transcript_path, now)}
-            mate = teammates.get(row['agent_id'])
+            if teammates is None:   # by transcript: one agent id can have a transcript in an earlier folder too
+                teammates = {r['transcript']: r for r in teammate_rows(transcript_path, now)}
+            mate = teammates.get(str(transcript))
             row['running'] = bool(mate and mate['running'])
             row['why'] = mate['why'] if mate else 'not written for a day'
         elif meta.get('finished') is True:
@@ -165,16 +170,40 @@ def folder_agents(transcript_path, now=None):
     return rows
 
 
+LAUNCH_SLACK = 5             # seconds: a teammate's .meta.json written this long before its Agent call's hook still counts
+
+
+def _teammate_for(row, found, owned):
+    """The teammate an Agent call with a name started, or None. Measured 2026-11-25 (Claude Code 2.1.33x): a teammate's
+    .meta.json carries no toolUseId (only an anonymous subagent's does), so the call's row was never joined to the
+    teammate it started: for RESERVE_SECONDS both counted ("5 subagents already run … (orbit-idle1, …, orbit-idle1)"
+    with four running), then the row was recorded lost ("no subagent appeared") while the teammate worked. Joined here by
+    the name the call gave, to a teammate of that name launched since the call and not joined to another row."""
+    started = _seconds(row['started']) or 0
+    for mate in found:                                   # newest first
+        if (mate['name'] == row['name'] and mate['agent_id'] not in owned
+                and (mate.get('meta_written') or mate['written']) >= started - LAUNCH_SLACK):
+            return mate
+    return None
+
+
 def _settle(store, session, transcript, now):
     """Bring this session's rows up to date with its folder; return (running subagents, rows ended now). Runs inside the
     caller's transaction."""
     found = folder_agents(transcript, now) if transcript else []
     by_call = {r['call']: r for r in found if r['call']}
+    by_agent = {r['agent_id']: r for r in found}
+    owned = {r[0] for r in store.db.execute('SELECT agent FROM subagents WHERE session=? AND agent IS NOT NULL',
+                                            (session,)).fetchall()}
     ended = []
     for row in store.db.execute("SELECT * FROM subagents WHERE session=? AND state IN ('starting','running')",
                                 (session,)).fetchall():
         row = dict(row)
-        seen = by_call.get(row['call'])
+        seen = by_call.get(row['call']) or (by_agent.get(row['agent']) if row['agent'] else None)
+        if not seen and not row['agent'] and row['name']:
+            seen = _teammate_for(row, found, owned)      # a teammate: its .meta.json has no toolUseId
+            if seen:
+                owned.add(seen['agent_id'])
         if seen and not row['agent']:
             store.db.execute("UPDATE subagents SET agent=?, transcript=?, state='running' WHERE call=?",
                              (seen['agent_id'], seen['transcript'], row['call']))

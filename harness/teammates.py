@@ -176,7 +176,10 @@ def agents(transcript_path, now=None, also=()):
             if folder not in folders:
                 folders.append(folder)
                 rows += _scan(folder, now)
-    # A transcript without .meta.json (written after a handoff by a teammate started before it): its folder's team
+    # A transcript without .meta.json (written after a handoff by a teammate started before it): its folder's team. A
+    # .meta.json without teamName is another thing (measured 2026-11-25 22:49): a teammate resumed by its agent id after
+    # it left the team gets its .meta.json written again with no name and no team (spawnDepth 1, isBuiltIn), and the
+    # team's config.json does not list it again, though it works. It has no team to ask: recency decides.
     teams, by_folder = set(), {}
     for row in rows:
         if isinstance(row['meta'].get('teamName'), str):
@@ -190,7 +193,7 @@ def agents(transcript_path, now=None, also=()):
     for row in rows:
         meta, here = row.pop('meta'), by_folder.get(row.pop('folder')) or set()
         team = (meta.get('teamName') if isinstance(meta.get('teamName'), str)
-                else next(iter(here)) if len(here) == 1 else shared)
+                else None if meta else next(iter(here)) if len(here) == 1 else shared)
         members = _members(config, team, cache) if team else None
         if meta.get('finished') is True:
             row['running'], row['why'] = False, 'finished'
