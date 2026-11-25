@@ -151,10 +151,14 @@ def main():
         print('① an answer that ends by asking the user is recognised')
         check('the 15:51:23 answer (a table, a list, "… 진행할까요?" on its last line) asks the user', asks_user(QUESTION) is True)
         for text in ('결과를 확인해 주세요.', 'Shall I open the pull request?', 'Let me know if you want the CSV export too.',
-                     '두 방법 중 어느 쪽으로 하실래요?\n| A | B |'):
+                     '두 방법 중 어느 쪽으로 하실래요?\n| A | B |',
+                     '머지할지 알려 주세요.',                          # the review's counterexamples (2026-11-25)
+                     '원하시면 PR 까지 올리겠습니다.', "If you'd like, I can open the PR as well.",
+                     '필요하시면 다음 단계로 설치까지 진행하겠습니다.'):
             check('…%r asks the user (a closing period, English, a table row after the question)' % text[-28:],
                   asks_user(text) is True)
-        for text in (REPORT, 'PR #76 을 올렸습니다.', '왜 그랬을까요? 원인은 캐시였습니다.', '', 'Merged into main.\n\`\`\`'):
+        for text in (REPORT, 'PR #76 을 올렸습니다.', '왜 그랬을까요? 원인은 캐시였습니다.', '', 'Merged into main.\n\`\`\`',
+                     '원하시면 말씀해 달라고 했던 부분은 이미 반영했습니다.\n빌드는 30초 걸렸습니다.'):
             check('control: %r does not ask (a report, a question mid-answer, nothing)' % text[-28:], asks_user(text) is False)
         check('control: the claim rule is untouched ("완료했습니다. 확인해 주세요." still reads as a claim to record)',
               attach.claims_completion('구현을 완료했습니다. 확인해 주세요.'))
