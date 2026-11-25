@@ -1673,6 +1673,11 @@ def handle(store, event, payload, host):
                     notes.append(notice(store, payload.get('session_id')))
                 except Exception as error:  # noqa: BLE001 - never at the cost of the hook
                     hook_log(store, 'restore notice skipped: ' + repr(error)[:200])
+            try:  # teammates idle, with their state line, when one went idle or changed state (teammates.py)
+                from .teammates import idle_reply
+                notes.append(idle_reply(store, payload, host))
+            except Exception as error:  # noqa: BLE001 - never at the cost of the hook
+                hook_log(store, 'idle teammates skipped: ' + repr(error)[:200])
             if event == 'prompt':
                 notes.append(prompt_note(store, payload, host))   # its route: the way back, or its end day
                 try:  # a teammate past the handoff point, told to the lead once per crossing (teammates.py)
@@ -2073,25 +2078,44 @@ def _stop_reply(store, task, session, payload):
         except Exception as error:  # noqa: BLE001 - a monitor launch failure must not disable the synchronous Stop guard
             hook_log(store, name + ': ' + repr(error)[:200])
     task = store.get(task['id'])
+    # The lead's teammates: what they sent reaches the lead only once this turn ends (teammates.at_stop). An idle one
+    # waiting for the lead to act sends the turn back once; one still working, or a report not yet read, lets it end.
+    held = None
+    try:
+        from .teammates import at_stop
+        held = at_stop(store, session, payload.get('transcript_path'))
+    except Exception as error:  # noqa: BLE001 - never at the cost of the Stop guard
+        hook_log(store, 'teammates at stop skipped: ' + repr(error)[:200])
+    if (held or {}).get('block'):
+        return {'decision': 'block', 'reason': held['block']}
     if payload.get('stop_hook_active'):
-        continuation = supervision.stop_block(store, task, said)
+        continuation = None if held else supervision.stop_block(store, task, said)
         if continuation:
             return continuation
         # Never block twice in a row; a message to the user does not continue the turn, so it may go now
         # (this is the stop right after the checkpoint the executor was asked for).
-        return context_decision(store, task, settle=task['data'].get('verification_pending') or task['status'] in CLOSED,
-                                message_only=True)
+        return _with_line(context_decision(store, task, settle=task['data'].get('verification_pending')
+                                           or task['status'] in CLOSED, message_only=True), held)
     primary = stop_decision(store, task, payload)
     if primary and primary.get('decision') == 'block':
         return primary  # the context decision waits for the next stop
-    continuation = supervision.stop_block(store, store.get(task['id']), said)
+    continuation = None if held else supervision.stop_block(store, store.get(task['id']), said)
     if continuation:
         return continuation
     settle = bool(primary) or task['data'].get('verification_pending') or task['status'] in CLOSED
     secondary = context_decision(store, store.get(task['id']), settle=settle)
     if primary and secondary and 'systemMessage' in secondary:
-        return {'systemMessage': primary['systemMessage'] + '\n' + secondary['systemMessage']}
-    return primary or secondary
+        return _with_line({'systemMessage': primary['systemMessage'] + '\n' + secondary['systemMessage']}, held)
+    return _with_line(primary or secondary, held)
+
+
+def _with_line(reply, held):
+    """The Stop's reply with the teammates' line added for the user (teammates.at_stop allowed the stop)."""
+    line = (held or {}).get('allow')
+    if not line or (reply or {}).get('decision') == 'block':
+        return reply
+    shown = (reply or {}).get('systemMessage')
+    return dict(reply or {}, systemMessage=(shown + '\n' if shown else '') + line)
 
 
 def _context(name, text):
