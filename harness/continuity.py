@@ -932,7 +932,7 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
     if state.get('state') == 'auto' and not during_turn and _within(state.get('auto_at'), INFLIGHT_SECONDS):
         return carry_inflight(store, task, session, text)
     ceiling = past_ceiling(store, task['data'], session)
-    if kind not in ('requirement', 'trivial') and not (ceiling and kind in CEILING_KINDS):
+    if kind not in ('requirement', 'trivial', 'agent') and not (ceiling and kind in CEILING_KINDS):
         return None
     if not handoff_ready(state) and not (ceiling and state.get('state') in ASK_STATES):
         return None
