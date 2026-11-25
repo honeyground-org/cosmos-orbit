@@ -719,6 +719,24 @@ additions, each with its own off switch:
   `teams/<team>/config.json`), was started again under the same name, or, with no team to ask, wrote nothing for 30
   minutes is not counted; a size that cannot be read is unknown, never past anything. Advice only, nothing refused.
   `cosmos-orbit context teammates` shows the point and this session's teammates as measured.
+- **Idle teammates (Claude Code).** A teammate ends each turn idle, and only a message wakes it. What it sends the lead
+  ("Message sent to team-lead's inbox") reaches the lead only once the lead's own turn has ended. Measured 2026-11-25:
+  the lead tried to stop, the Stop guard sent it back ("stopped before the work was finished"), and it waited inside
+  its turn. The reports of five teammates (two handoff requests, two waiting for the user, one waiting for permission)
+  sat for three hours, and nothing had told the lead who was idle or why. Orbit now reads how each running teammate's
+  transcript ends. An answer with `stop_reason` end_turn, with nothing after it but hook attachments, means idle.
+  That answer's state line (the last line headed `State:` or the Korean `상태:`, else the first 120 characters of its
+  last line) is the reason. The lead's prompt, session start and shell calls carry one line, at most 700 characters, when a
+  teammate went idle or changed its state:
+  `[orbit] TEAMMATES idle: builder2 12m — State: handoff requested (…handoff-builder2.md) · fixer1 3h — State: waiting for the user (#12)`.
+  The line then says what to do. A handoff request: give a new teammate only that note. Done: read its report and shut
+  it down. Waiting: list them for the user. The same idle state is not told twice. After a handoff the lead's earlier
+  transcripts (the task's) and the folder of the session that made the team are read too, because a teammate that has
+  not run since still writes there. At the lead's Stop, a teammate still working, or idle with a report the lead has
+  not read (no `<teammate-message>` of its own in the lead's transcript since it went idle), lets the turn end. The
+  unfinished-work guard does not send it back, the user sees `teammates working: …`, and the supervisor types no
+  continuation. An idle teammate asking for a handoff, or done, sends the turn back once with what to do. With every
+  report read, the guard decides as before.
 - **Subagents (Claude Code): at most 5 at once per session.** A subagent is a new conversation: one asked only to reply
   "OK" used 26,314 tokens (Claude Code 2.1.331, 2026-11-24). Orbit's PreToolUse hook also takes the Agent call: it
   counts the session's running subagents from the folder Claude Code writes beside the transcript

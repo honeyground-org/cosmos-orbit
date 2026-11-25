@@ -404,6 +404,15 @@ def tick(store, task_id, session, runner=None):
     state = wake.read_state(screen) if code == 0 else 'unreadable'
     if state != 'empty':
         return state
+    try:
+        from .teammates import waits_on
+        if not handing_off and waits_on(store, session):
+            # A typed continuation starts a turn, and the teammates' reports reach the lead only after it ends
+            # (teammates.at_stop): their reports start the lead's next turn, and its Stop a supervisor again. A handoff
+            # still goes ahead: it moves the lead to a fresh conversation, which the reports then reach.
+            return 'teammates_working'
+    except Exception:  # noqa: BLE001 - the teammates are advice; supervision goes on without them
+        pass
     if mode(store) != 'auto':
         runner(wake.notify_command(terminal, 'Orbit: unfinished work is waiting; automatic continuation is disabled.'))
         return 'notify_only'
@@ -497,7 +506,8 @@ def main(home, task_id, session, close_workspace=False, sleep=time.sleep, clock=
     terminal_outcomes = {'disabled', 'settled', 'input_required', 'session_ended', 'no_terminal',
                          'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work',
                          'handed_off',        # the fresh session's own Stop starts its supervisor
-                         'awaiting_answer'}   # the user's reply starts the next turn (and the handoff) itself
+                         'awaiting_answer',   # the user's reply starts the next turn (and the handoff) itself
+                         'teammates_working'}  # their reports start the lead's next turn, and its Stop a supervisor
     try:
         with store.lock('supervisor:' + task_id + ':' + session):
             while True:

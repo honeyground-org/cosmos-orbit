@@ -18,6 +18,10 @@ used 26,314 tokens. Replayed here through the real hook command line, with the f
     reported outdated with the fix
   ⑥ the session is told at SessionStart (after the rest of the brief), not where the limit is off, not in Codex
   ⑦ the record: subagent_started, subagent_refused and subagent_ended on the session's task
+  ⑧ teammates as Claude Code writes them (measured 2026-11-25): a teammate's .meta.json has no toolUseId, so its call is
+    joined by name — counted once, not twice, and not recorded lost after 120 s; a teammate resumed by its agent id
+    (.meta.json written again without name or team, not listed by the team) counts while it writes; one stopped
+    (TaskStop: gone from the team) does not
 
 Nothing starts a model or touches the live Orbit home or host settings: the store and the Claude Code folder are
 temporary.
@@ -368,6 +372,95 @@ def record(store):
     check('an end says which, why and when', bool(ended) and all(p.get('why') and p.get('ended') for p in ended), ended[:2])
 
 
+MATE_TEAM = 'session-s8'
+
+
+def launch_mate(pay, name, hexid, resumed=False, age=0):
+    """A teammate's files as Claude Code 2.1.33x writes them (measured 2026-11-25): its .meta.json carries no toolUseId;
+    after a resume by agent id it is written again with no name and no team."""
+    sub = subagents_dir(pay['transcript_path'])
+    sub.mkdir(parents=True, exist_ok=True)
+    agent = 'a%s-%s' % (name, hexid)
+    if resumed:
+        meta = {'agentType': 'general-purpose', 'isBuiltIn': True, 'spawnDepth': 1, 'requestShape': 'background',
+                'requestNonInteractive': True}
+    else:
+        meta = {'agentType': name, 'isBuiltIn': False, 'description': name + ' work', 'name': name, 'spawnDepth': 0,
+                'requestShape': 'background', 'taskKind': 'in_process_teammate', 'teamName': MATE_TEAM}
+    transcript, meta_path = sub / ('agent-%s.jsonl' % agent), sub / ('agent-%s.meta.json' % agent)
+    transcript.write_text(json.dumps({'type': 'user', 'isSidechain': True, 'agentId': agent,
+                                      'message': {'role': 'user', 'content': 'go'}}) + '\n')
+    meta_path.write_text(json.dumps(meta))
+    if age:
+        for path in (transcript, meta_path):
+            os.utime(path, (time.time() - age, time.time() - age))
+    return agent
+
+
+def mates_team(base, names):
+    folder = base / 'claude' / 'teams' / MATE_TEAM
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'config.json').write_text(json.dumps({'name': MATE_TEAM, 'members': [{'name': 'team-lead'}] +
+                                                    [{'name': n} for n in names]}))
+
+
+def count(out):
+    text = spec(out).get('additionalContext') or ''
+    return int(text.split('subagent ')[1].split(' ')[0]) if 'subagent ' in text and ' of at most' in text else None
+
+
+def teammates_written(base, store):
+    print('⑧ teammates as Claude Code writes them')
+    home = store.home
+    pay, _ = session(base, store, 'S8')
+    mates_team(base, ['builder'])
+    out = hook(base, home, call(pay, 'toolu_m1', 'builder work', name='builder'))
+    check('a teammate\'s call starts (1 of 5)', count(out) == 1, spec(out))
+    builder = launch_mate(pay, 'builder', '0123456789abcdef')
+    out = hook(base, home, call(pay, 'toolu_m2', 'a survey'))
+    check('its .meta.json has no toolUseId: still counted once — this is 2 of 5, not 3 (the measured double count)',
+          count(out) == 2, spec(out))
+    joined = [r for r in rows(store, 'S8') if r['call'] == 'toolu_m1']
+    check('the call\'s row is joined to the teammate by name (running, its agent id)', bool(joined)
+          and joined[0]['state'] == 'running' and joined[0]['agent'] == builder, joined)
+    launch(pay, 'toolu_m2', '1' * 16, 'a survey', finished=True)
+    phone = launch_mate(pay, 'phone', '2222222222222222', resumed=True)
+    out = hook(base, home, call(pay, 'toolu_m3', 'beside a resumed one'))
+    check('a teammate resumed by its agent id (no name, no team in .meta.json; not listed by the team) counts while it '
+          'writes: builder and it, this is 3 of 5', count(out) == 3, spec(out))
+    seen = {r['name']: r for r in subagents.folder_agents(pay['transcript_path'])} if subagents else {}
+    check('… measured as running, not "no longer a member" of the folder\'s team', seen.get('phone', {}).get('running')
+          is True, seen.get('phone'))
+    launch(pay, 'toolu_m3', '3' * 16, 'beside a resumed one', finished=True)
+    mates_team(base, ['builder', 'scout'])
+    out = hook(base, home, call(pay, 'toolu_m4', 'scout work', name='scout'))
+    launch_mate(pay, 'scout', '4444444444444444')
+    check('a second teammate starts: 3 of 5', count(out) == 3, spec(out))
+    mates_team(base, ['builder'])                                    # TaskStop: it leaves the team
+    out = hook(base, home, call(pay, 'toolu_m5', 'after a stop'))
+    check('control: a teammate stopped (gone from its team) is not counted — builder and phone, this is 3 of 5',
+          count(out) == 3, spec(out))
+    stopped = [r for r in rows(store, 'S8') if r['call'] == 'toolu_m4']
+    check('… its row ended with why', bool(stopped) and stopped[0]['state'] == 'ended'
+          and 'no longer a member' in (stopped[0]['why'] or ''), stopped)
+    launch(pay, 'toolu_m5', '5' * 16, 'after a stop', finished=True)
+    for path in subagents_dir(pay['transcript_path']).glob('agent-aphone-*'):
+        os.utime(path, (time.time() - 3700, time.time() - 3700))
+    out = hook(base, home, call(pay, 'toolu_m6', 'after an hour'))
+    check('control: the resumed one silent for an hour is gone — builder only, this is 2 of 5', count(out) == 2, spec(out))
+    launch(pay, 'toolu_m6', '6' * 16, 'after an hour', finished=True)
+    if subagents:
+        later = time.time() + subagents.RESERVE_SECONDS + 5
+        out = subagents.gate(home, 'claude', call(pay, 'toolu_m7', 'two minutes on'), now=later)
+        joined = [r for r in rows(store, 'S8') if r['call'] == 'toolu_m1']
+        check('120 s on, the teammate\'s row is not recorded lost: it runs (2 of 5)', bool(joined)
+              and joined[0]['state'] == 'running' and count(out) == 2, (joined, spec(out)))
+    else:
+        check('120 s on, the teammate\'s row is not recorded lost: it runs (2 of 5)', False, 'no subagents module')
+    mine = [r for r in rows(store, 'S8') if r['agent'] == phone]
+    check('control: a resumed teammate takes no Agent call\'s row (no name to join by)', mine == [], mine)
+
+
 def main():
     base = Path(tempfile.mkdtemp(prefix='orbit-subagents-'))
     try:
@@ -379,6 +472,7 @@ def main():
         install(base)
         told(base, store)
         record(store)
+        teammates_written(base, store)
         store.close()
     finally:
         shutil.rmtree(base, ignore_errors=True)
