@@ -54,12 +54,58 @@ def handoff_continues(store, task):
     """The handoff is ready and the work goes on: the supervisor starts the fresh context itself (auto mode only).
 
     A stop that waits for the user (a question, a decision) is not work going on: needs_work is False there, and the
-    handoff keeps waiting for the user's answer, which it then carries (continuity.auto_handoff)."""
+    handoff keeps waiting for the user's answer, which it then carries (continuity.auto_handoff). The same for a stop
+    whose answer asks the user in its own words (answer_waits): the question recorded with a claim is not the only one."""
     from .continuity import handoff_mode, handoff_ready
     data = task['data']
     # handoff_ready: a failed automatic /clear is tried again here too, a bounded number of times (continuity.retry_ready)
     return (handoff_pending(task) and handoff_ready(data.get('handoff_state'))
-            and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and needs_work(task))
+            and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') and needs_work(task)
+            and not answer_waits(task))
+
+
+# The answer a turn ended with stays on screen this long before the supervisor's handoff clears it: in proportion to its
+# length, between the two bounds. Measured 2026-11-24 15:51 KST: a 1,160-character answer was cleared 1.2 s after it
+# was written. The fresh conversation shows the answer's end again (continuity.takeover_notice), so the bound is short.
+READ_MIN_SECONDS = 20
+READ_CHARS_PER_SECOND = 12     # about 700 characters a minute
+READ_MAX_SECONDS = 120
+
+
+def reading_seconds(chars):
+    """Seconds an answer of `chars` characters is left on screen before a handoff; 0 when the stop recorded none."""
+    if not chars:
+        return 0
+    return int(min(READ_MAX_SECONDS, max(READ_MIN_SECONDS, round(chars / READ_CHARS_PER_SECOND))))
+
+
+def stop_answer(task, session, stop_at=None):
+    """The answer of this session's stop at `stop_at` (its last recorded one by default): {'at', 'chars', 'asks'}, or {}
+    when that stop recorded none (a record from before answers were kept, or a stop recorded outside the task lock)."""
+    mark = (task['data'].get('supervision') or {}).get(session) or {}
+    answer = mark.get('answer') or {}
+    return answer if answer.get('at') and answer.get('at') == (stop_at or mark.get('stop_at')) else {}
+
+
+def answer_waits(task, session=None):
+    """The session's last turn ended by asking the user something or handing them a choice (attach.asks_user): the
+    stop is the user's to answer. Nothing continues or hands off over it; their reply does (continuity.auto_handoff),
+    and the end of the answer goes with it."""
+    session = session or (task['data'].get('context_live') or {}).get('session')
+    return bool(session) and bool(stop_answer(task, session).get('asks'))
+
+
+def reading_left(task, session, stop_at, at=None):
+    """Seconds still left to read the answer of the stop at `stop_at` before a handoff may clear it (0: none left)."""
+    from datetime import datetime, timezone
+    seconds = reading_seconds(stop_answer(task, session, stop_at).get('chars'))
+    if not seconds:
+        return 0
+    try:
+        elapsed = ((at or datetime.now(timezone.utc)) - datetime.fromisoformat(stop_at)).total_seconds()
+    except (TypeError, ValueError):
+        return 0
+    return max(0.0, seconds - elapsed)
 
 
 def _ended_key(task_id, session):
@@ -263,7 +309,10 @@ def stop_block(store, task, message=''):
     return {'decision': 'block', 'reason': manager.instruction(store, task, found)}
 
 
-def record_stop(store, task, session):
+def record_stop(store, task, session, said=None):
+    """Record that this session's turn stopped, and what its answer was when the Stop gave it (`said`): its length
+    and whether it asks the user (in the session's mark), and its end (the task's last_answer, one for the task, which
+    the conversation that takes over shows again: continuity.takeover_notice)."""
     if not session:
         return
     from .store import now
@@ -274,7 +323,19 @@ def record_stop(store, task, session):
             mark['stop_at'] = now()
             mark['stop_count'] = mark.get('stop_count', 0) + 1
             mark['turn_open'] = False  # until the Stop hook's reply sends the turn back (continue_turn)
-            store.save(task, task['status'], 'supervision_stop', {'session': session, 'layer': 'control'})
+            if said is None:
+                mark.pop('answer', None)                 # nothing known about this stop's answer: no older one stands in
+            else:
+                from .attach import asks_user
+                from .continuity import ANSWER_CHARS
+                text = str(said).strip()
+                mark['answer'] = {'at': mark['stop_at'], 'chars': len(text), 'asks': asks_user(text)}
+                if text:
+                    task['data']['last_answer'] = {'session': session, 'at': mark['stop_at'],
+                                                   'text': text if len(text) <= ANSWER_CHARS else '…' + text[-(ANSWER_CHARS - 1):]}
+            store.save(task, task['status'], 'supervision_stop',
+                       dict({'session': session, 'layer': 'control'},
+                            **({'chars': mark['answer']['chars'], 'asks': mark['answer']['asks']} if mark.get('answer') else {})))
     except RuntimeError:
         _end_outside(store, task['id'], session)
         raise
@@ -317,7 +378,8 @@ def tick(store, task_id, session, runner=None):
         return 'no_work'
     handing_off = handoff_continues(store, task)
     if handoff_pending(task) and not handing_off:
-        return 'awaiting_handoff'
+        # An answer that asks the user is theirs to answer: their reply starts the handoff (continuity.auto_handoff)
+        return 'awaiting_answer' if answer_waits(task, session) else 'awaiting_handoff'
     mark = task['data'].get('supervision', {}).get(session, {})
     stop_at = _stop_at(store, task_id, session, mark)
     if not stop_at or mark.get('sent_for') == stop_at:
@@ -327,6 +389,8 @@ def tick(store, task_id, session, runner=None):
     phase = store.db.execute('SELECT state,at FROM terminals WHERE session=?', (session,)).fetchone()
     if not phase or phase['state'] != 'idle' or phase['at'] > stop_at:
         return 'host_turn_active'
+    if handing_off and reading_left(task, session, stop_at) > 0:
+        return 'reading'                                 # the answer stays on screen a while; typing still cancels it
     recorded = terminal
     code, screen = runner(wake.screen_command(terminal))
     if code != 0:
@@ -429,7 +493,8 @@ def main(home, task_id, session, close_workspace=False, sleep=time.sleep, clock=
     last, since = None, clock()
     terminal_outcomes = {'disabled', 'settled', 'input_required', 'session_ended', 'no_terminal',
                          'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work',
-                         'handed_off'}  # the fresh session's own Stop starts its supervisor
+                         'handed_off',        # the fresh session's own Stop starts its supervisor
+                         'awaiting_answer'}   # the user's reply starts the next turn (and the handoff) itself
     try:
         with store.lock('supervisor:' + task_id + ':' + session):
             while True:
