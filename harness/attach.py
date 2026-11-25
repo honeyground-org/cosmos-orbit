@@ -54,6 +54,23 @@ def claims_completion(message):
     return any(CLAIM_WORDS.search(NEGATED_CLAIM.sub(' ', line)) for line in prose)
 
 
+# The end of a reply that hands the user a question or a choice: ASKS_USER, also before a closing period or bracket
+# ('확인해 주세요.'), plus proposal endings ('하실래요', 'let me know …') that wait for the user's word.
+ASKS_OR_OFFERS = re.compile(r"(\?|？|할까요|될까요|괜찮을까요|좋을까요|드릴까요|하시겠어요|하실래요|어떨까요|어떠세요|"
+                            r"해\s?주세요|해\s?주시겠어요|\blet me know\b[^\n]*)[\s*_`).!。]*$", re.I)
+
+
+def asks_user(message):
+    """True when a reply ends by asking the user something or handing them a choice: its last prose line (table rows
+    and code fences aside) ends with a question or a request for their word. Such a stop is the user's to answer, even
+    when the executor recorded no question (claim --question): measured 2026-11-24 15:51:23 KST (task 28d857f94be3), an
+    answer that ended "… 진행할까요?" (shall I go ahead?) was cleared by the supervisor's automatic handoff
+    1.2 s later, before the user could read it."""
+    lines = [line.strip() for line in str(message or '')[-1500:].splitlines() if line.strip()]
+    prose = [line for line in lines if not line.startswith('|') and not line.startswith('```')]
+    return bool(prose) and bool(ASKS_OR_OFFERS.search(prose[-1]))
+
+
 BRIEF_LIMIT = 2400
 MIN_TASK_PROMPT = 20
 
@@ -2045,7 +2062,7 @@ def _stop_reply(store, task, session, payload):
     # supervisor was never started either (2026-11-05 01:50, Codex: the session then waited, told nothing).
     # The supervisor starts after the reply is decided (_handle): see there.
     for name, step in (('waiting not restored', lambda: restore_waiting(store, store.get(task['id']))),
-                       ('stop not recorded', lambda: supervision.record_stop(store, task, session)),
+                       ('stop not recorded', lambda: supervision.record_stop(store, task, session, said)),
                        ('stop not diagnosed', lambda: manager.observe(store, store.get(task['id']), session, said))):
         try:
             step()
@@ -2225,16 +2242,21 @@ def context_decision(store, task, settle=False, message_only=False):
             _k(live.get('tokens')), _k(state.get('limit')), task['id'],
             'Checkpoint saved. ' if checkpointed else ('After the verdict arrives, ' if task['data'].get('verification_pending') else ''))
         from .continuity import mod_present
-        from .supervision import needs_work
+        from .supervision import answer_waits, needs_work, reading_seconds, stop_answer
+        asks = answer_waits(task)
         if checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') \
-                and detect() and needs_work(task):
-            body = ('Work remains, so Orbit starts a fresh context by itself once this turn ends and continues from the '
+                and detect() and needs_work(task) and not asks:
+            seconds = reading_seconds(stop_answer(task, live.get('session')).get('chars'))
+            body = ('Work remains, so Orbit starts a fresh context by itself once this turn ends%s and continues from the '
                     'checkpoint; there is nothing to type. A request you type first is carried over instead. '
-                    'Back to asking: cosmos-orbit context tell')
+                    'Back to asking: cosmos-orbit context tell'
+                    % (', after %d s to read this answer (the fresh conversation shows its end again)' % seconds
+                       if seconds else ''))
         elif checkpointed and not closed and handoff_mode(store) == 'auto' and data.get('host') in ('claude', 'codex') \
                 and (detect() or (data.get('host') == 'claude' and mod_present(store, live.get('session')))):
-            body = ('Your next request starts a fresh context by itself (auto handoff) and is carried over; a question is '
-                    'answered here first. Back to asking: cosmos-orbit context tell')
+            body = (('This answer asks you something, so nothing starts before you reply. ' if asks else '')
+                    + 'Your next request starts a fresh context by itself (auto handoff) and is carried over with the end '
+                    'of this answer; a question is answered here first. Back to asking: cosmos-orbit context tell')
         else:
             body = ('Orbit cannot clear this session itself: type /clear (Claude Code) or /new (Codex) now and the fresh '
                     'session takes the task over with %s. If you keep going, the next automatic compaction closes the '

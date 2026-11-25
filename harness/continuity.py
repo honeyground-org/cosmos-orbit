@@ -481,19 +481,55 @@ def last_answer(path, host, limit=ANSWER_CHARS):
     return None
 
 
+def previous_answer(data, session, transcript=None, host=None):
+    """The end of `session`'s last answer: from its transcript when one is given and readable, else the one its last
+    Stop recorded (supervision.record_stop), or None."""
+    found = last_answer(transcript, host) if transcript else None
+    if found:
+        return found
+    row = data.get('last_answer') or {}
+    return row.get('text') if session and row.get('session') == session and row.get('text') else None
+
+
+SCREEN_ANSWER_CHARS = 700   # the end of the previous answer shown again on screen in the conversation that took over
+
+
+def answer_end(text, limit=SCREEN_ANSWER_CHARS):
+    """The last `limit` characters of an answer, from the start of a line when one begins near the cut."""
+    text = str(text or '').strip()
+    if len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    newline = cut.find('\n')
+    if 0 <= newline < limit // 3:
+        cut = cut[newline + 1:]
+    return '…' + cut.lstrip()
+
+
 def carried_full(data, session):
     """The whole carried message and the end of the answer it follows, for the session that receives it, once. The
     brief's CARRIED OVER line is cut at 1200 characters and the brief holds 2400 (attach.BRIEF_LIMIT), so a question
-    carried past the ceiling travels beside the brief: the user's words must never be lost."""
+    carried past the ceiling travels beside the brief: the user's words must never be lost. Below the ceiling the end of
+    the last answer travels the same way: the user's reply ("네 진행해") or the supervisor's continuation follows it."""
     carried = data.get('carried_prompt') or {}
-    if not carried.get('ceiling') or not carried.get('text') or not session or carried.get('full_to'):
+    if not carried.get('text') or not session or carried.get('full_to'):
+        return None
+    if not carried.get('ceiling') and not carried.get('answer'):
         return None
     if session == carried.get('from_session') or carried.get('consumed_at') or carried.get('served_to') not in (None, session):
         return None
-    lines = ["[orbit] CARRIED OVER IN FULL - the user's message, word for word, sent just before this fresh context "
-             '(the previous one was past its handoff ceiling):', carried['text']]
+    if carried.get('ceiling'):
+        head = ("[orbit] CARRIED OVER IN FULL - the user's message, word for word, sent just before this fresh context "
+                '(the previous one was past its handoff ceiling):')
+    elif carried.get('by') == 'supervisor':
+        head = ('[orbit] CARRIED OVER - Orbit started this fresh context by itself to continue the work; the user asked '
+                'nothing new:')
+    else:
+        head = "[orbit] CARRIED OVER IN FULL - the user's message, word for word, sent just before this fresh context:"
+    lines = [head, carried['text']]
     if carried.get('answer'):
-        lines += ['The end of the previous context\'s last answer, which the message may refer to:', carried['answer']]
+        lines += ['The end of the previous context\'s last answer, which the user read last and the message may refer to:',
+                  carried['answer']]
     else:
         lines.append('(The previous answer could not be read from the transcript; the ledger and the checkpoint hold the work.)')
     return '\n'.join(lines)
@@ -954,7 +990,9 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         return None
     if ceiling and state.get('state') in ASK_STATES:
         task = ceiling_checkpoint(store, task, 'prompt')
-    answer = last_answer(transcript, host) if ceiling else None
+    # Below the ceiling too: the request may answer the last answer ("네 진행해" to "… 진행할까요?"), which the fresh
+    # session never saw (2026-11-24 15:51 KST: it took 4 minutes to work out the question again and asked it twice).
+    answer = previous_answer(task['data'], session, transcript, host)
     with store.lock('task:' + task['id']):
         task = store.get(task['id'])
         data = task['data']
@@ -962,6 +1000,8 @@ def auto_handoff(store, task, session, text, kind, host, closed=False, terminal=
         if state.get('session') != session or not handoff_ready(state):
             return None
         _carry(data, text, session)
+        if answer:
+            data['carried_prompt']['answer'] = answer
         if ceiling:
             data['carried_prompt'].update(ceiling=True, kind=kind, answer=answer)
         attempt = _start_attempt(state)
@@ -1083,11 +1123,14 @@ def continue_in_fresh_context(store, task, session, host, terminal, spawn=None):
         return False
     next_step = ((data.get('checkpoints') or [{}])[-1]).get('next')
     old = data.get('carried_prompt') or {}
+    answer = old.get('answer') if old.get('from_session') == session and old.get('answer') else previous_answer(data, session)
     if retry_ready(state) and old.get('text') and old.get('from_session') == session and not old.get('served_to'):
         _carry(data, '', session, by='supervisor')   # the request the failed attempt carried is still the one to do
     else:
         data['carried_prompt'] = {'text': (CONTINUE_TEXT + (' Next step from the checkpoint: ' + next_step if next_step else ''))[:4000],
                                   'at': now(), 'from_session': session, 'by': 'supervisor'}
+    if answer:
+        data['carried_prompt']['answer'] = answer        # the report the user was reading: shown again after the clear
     attempt = _start_attempt(state)
     state.update(state='auto', auto_at=now(), panel=terminal.get('target'), by='supervisor')
     store.save(task, task['status'], 'handoff_auto', dict({'terminal': terminal.get('kind'), 'mod': False, 'by': 'supervisor',
@@ -1410,6 +1453,13 @@ def takeover_notice(store, session, host):
                 lines.append('Carried over: ' + _one(carried['text'], 160))
             else:
                 lines.append('Nothing was carried over; the task goes on from the checkpoint.')
+            # The answer the user was reading when the screen cleared, often a question or a proposal at its end
+            # (2026-11-24 15:51 KST: "… 진행할까요?" cleared 1.2 s after it was written).
+            previous = state.get('session')
+            answer = (carried.get('answer') if carried.get('answer') and carried.get('from_session') == previous
+                      else previous_answer(data, previous))
+            if answer:
+                lines += ['The previous answer ended with:', answer_end(answer)]
             state['announced_to'] = session
             store.save(task, task['status'], 'takeover_announced', {'session': session, 'layer': 'context'})
             return '\n'.join(lines)
