@@ -55,9 +55,13 @@ def claims_completion(message):
 
 
 # The end of a reply that hands the user a question or a choice: ASKS_USER, also before a closing period or bracket
-# ('확인해 주세요.'), plus proposal endings ('하실래요', 'let me know …') that wait for the user's word.
+# ('확인해 주세요.'), plus request and proposal endings ('알려 주세요', '하실래요', 'let me know …') that wait for the
+# user's word.
 ASKS_OR_OFFERS = re.compile(r"(\?|？|할까요|될까요|괜찮을까요|좋을까요|드릴까요|하시겠어요|하실래요|어떨까요|어떠세요|"
-                            r"해\s?주세요|해\s?주시겠어요|\blet me know\b[^\n]*)[\s*_`).!。]*$", re.I)
+                            r"주세요|주시겠어요|주실래요|주시면\s?됩니다|\blet me know\b[^\n]*)[\s*_`).!。]*$", re.I)
+# An offer made on the user's word, anywhere in the last line: '원하시면 PR 까지 올리겠습니다.', 'If you'd like, I can …'.
+OFFERS_IF = re.compile(r"(원하시면|원하신다면|원하실\s?경우|필요하시면|필요하다면|괜찮으시면|괜찮다면|말씀해\s?주시면|"
+                       r"말씀하시면|알려\s?주시면|\bif you(?:'d| would)? (?:like|want|prefer)\b|\bshould you (?:want|wish)\b)", re.I)
 
 
 def asks_user(message):
@@ -68,7 +72,7 @@ def asks_user(message):
     1.2 s later, before the user could read it."""
     lines = [line.strip() for line in str(message or '')[-1500:].splitlines() if line.strip()]
     prose = [line for line in lines if not line.startswith('|') and not line.startswith('```')]
-    return bool(prose) and bool(ASKS_OR_OFFERS.search(prose[-1]))
+    return bool(prose) and bool(ASKS_OR_OFFERS.search(prose[-1]) or OFFERS_IF.search(prose[-1]))
 
 
 BRIEF_LIMIT = 2400
