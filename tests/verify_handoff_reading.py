@@ -202,6 +202,26 @@ def main():
         later = attach.handle(store, 'prompt', {'cwd': str(root_q), 'session_id': 'q2', 'prompt': 'Also show the weekly average'}, 'claude')
         check('…once: the next prompt shows nothing more', not (later or {}).get('systemMessage'), later)
 
+        root_c = make_repo(base, 'repo-continue')
+        attach.set_switch(store, 'on', root_c)
+        PANE['target'] = 'PANEL-c1'
+        pay_c = {'cwd': str(root_c), 'session_id': 'c1'}
+        attach.handle(store, 'prompt', dict(pay_c, prompt='Build the records tab with two charts and keep the old screens'), 'claude')
+        tid_c = attach.current_task(store, root_c)['id']
+        attach.set_done(store, tid_c, ['the records tab shows both charts'])
+        for _ in range(4):                               # past the Stop guard's own blocks: the supervisor's turn
+            attach.handle(store, 'stop', dict(pay_c, stop_hook_active=True, last_assistant_message=QUESTION), 'claude')
+        count = len(typed)
+        check('below the handoff point too: no continuation line typed over a question (measured live: typed twice)',
+              tick(tid_c, 'c1') == 'awaiting_answer' and not [a for a in typed[count:] if supervision.RESUME_LINE in ' '.join(a)],
+              typed[count:])
+        from harness import patrol
+        check('…nor a patrol nudge an hour later', patrol.nudge(store, store.get(tid_c), 'c1', runner, at=__import__('time').time() + 3600)
+              == 'awaiting_answer')
+        attach.handle(store, 'stop', dict(pay_c, stop_hook_active=True, last_assistant_message=REPORT), 'claude')
+        check('control: after a report the continuation is typed as before',
+              tick(tid_c, 'c1') == 'continued' and [a for a in typed[count:] if supervision.RESUME_LINE in ' '.join(a)])
+
         print('③ after a report the supervisor hands off after a reading time; typing cancels it')
         check('reading time grows with the answer and is bounded (100 → 20 s, 1,160 → 97 s, 5,000 → %d s, none → 0)' % READ_MAX,
               [reading_seconds(n) for n in (100, 1160, 5000, 0)] == [20, 97, READ_MAX, 0],

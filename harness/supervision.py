@@ -376,10 +376,13 @@ def tick(store, task_id, session, runner=None):
         return 'reviewing'
     if not needs_work(task):
         return 'no_work'
+    if answer_waits(task, session):
+        # The last answer asks the user: their reply decides. Nothing is typed over it, neither the continuation line
+        # (measured in a real session: typed twice over "… 추가할까요?") nor a handoff, whose reply carries it.
+        return 'awaiting_answer'
     handing_off = handoff_continues(store, task)
     if handoff_pending(task) and not handing_off:
-        # An answer that asks the user is theirs to answer: their reply starts the handoff (continuity.auto_handoff)
-        return 'awaiting_answer' if answer_waits(task, session) else 'awaiting_handoff'
+        return 'awaiting_handoff'
     mark = task['data'].get('supervision', {}).get(session, {})
     stop_at = _stop_at(store, task_id, session, mark)
     if not stop_at or mark.get('sent_for') == stop_at:

@@ -88,6 +88,8 @@ def nudge(store, task, session, runner=None, at=None, desktop=None):
         return 'unknown_session'
     if phase['state'] != 'idle':
         return 'host_turn_active'
+    if supervision.answer_waits(task, session):
+        return 'awaiting_answer'                         # its last answer asks the user: their reply, not a nudge
     idle = _age(phase['at'], at)
     if idle is None or idle < IDLE_BEFORE:
         return 'recent'
