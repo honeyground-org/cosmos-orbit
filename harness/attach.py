@@ -1240,11 +1240,13 @@ def run_verification(engine, task_id, checks_only=False):
                     # or it changed them after the checks, before the review began: no review ran, nothing to ask.
                     if data.get('executor_result'):
                         data['executor_result']['finished'] = False
-                    data.update(reason=('This task\'s session changed files after the checks ran, before the review began; '
-                                        'claim again so the current state is reviewed.') if why == 'own_files_before' else
-                                       ('The review passed on the state you claimed, but this task\'s session changed files '
-                                        'during it; claim again so the current state is reviewed.'), reason_code='changed_during_review')
-                    store.save(task, 'working', 'resumed', {'because': 'changed_during_review', 'turn': data.get('turns', 0)})
+                    said = (('This task\'s session changed files after the checks ran, before the review began; '
+                             'claim again so the current state is reviewed.') if why == 'own_files_before' else
+                            ('The review passed on the state you claimed, but this task\'s session changed files '
+                             'during it; claim again so the current state is reviewed.'))
+                    data.update(reason=said + verifier.blame_text(found), reason_code='changed_during_review')
+                    store.save(task, 'working', 'resumed', dict({'because': 'changed_during_review', 'turn': data.get('turns', 0)},
+                               **{key: found[key] for key in ('moved_paths', 'blamed_on') if found.get(key)}))
                     return task
                 if data.get('requirements_pending') or 'changed during verification' in str(error):
                     # The binding moved under the review (a new requirement or correction): back to work, not a question.

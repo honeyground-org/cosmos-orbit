@@ -304,7 +304,21 @@ def _names(text, path):
     return re.search(r'(?<![\w.-])' + re.escape(path) + r'(?![\w.-])', text) is not None
 
 
-def paths_moved_by(transcript, since, moved, root, excused=(), blamed=None):
+def _reach(run, how):
+    """What a review records of the call it took a moved path for: enough to tell later why it blamed this task.
+    The command is what the call ran (a shell command, a script's code, a patch), not its whole input as JSON."""
+    call = run.get('call') if isinstance(run.get('call'), dict) else {}
+    given = call.get('input')
+    if isinstance(given, dict):
+        given = next((given[key] for key in ('command', 'cmd', 'code', 'file_path', 'path') if given.get(key)), None)
+    command = given if isinstance(given, str) else ' '.join(map(str, given)) if isinstance(given, list) else run.get('text')
+    return {'call': run.get('id'), 'tool': call.get('name') or run.get('provider'), 'how': how,
+            'command': str(command or '')[:160], 'cwd': run.get('cwd'),
+            'started': run['start'].isoformat() if run.get('start') else None,
+            'ended': run['end'].isoformat() if run.get('end') else None}
+
+
+def paths_moved_by(transcript, since, moved, root, excused=(), blamed=None, reasons=None):
     """Of `moved` (paths in the workspace `root` that changed since `since`), those a session's own tool calls moved.
     None when that cannot be told.
 
@@ -366,20 +380,27 @@ def paths_moved_by(transcript, since, moved, root, excused=(), blamed=None):
         alone = []                                       # jobs left running before the window that reach this path
         for run, opened, closed, folder, kind in writers:
             if kind == 'named':
-                reached = _names(run['text'], clean)
-            else:
-                reached = (folder == top or _names(run['text'], clean) or _names(run['text'], top) or changed is None
-                           or opened - RUN_SLACK <= changed <= closed + RUN_SLACK)
+                reached = 'named' if _names(run['text'], clean) else None
+            else:                                        # `reasons` keeps which of these reached it (_reach)
+                reached = ('folder' if folder == top
+                           else 'named' if _names(run['text'], clean) or _names(run['text'], top)
+                           else 'deleted' if changed is None
+                           else 'changed_while_running' if opened - RUN_SLACK <= changed <= closed + RUN_SLACK
+                           else None)
             if reached and kind == 'lingering':
-                alone.append(run['id'])
+                alone.append((run, reached))
             elif reached:
                 named.add(path)
+                if reasons is not None:
+                    reasons[path] = _reach(run, reached)
                 break
         else:
             if alone:
                 named.add(path)
                 if blamed is not None:
-                    blamed.update(call for call in alone if call)
+                    blamed.update(run['id'] for run, _ in alone if run['id'])
+                if reasons is not None:
+                    reasons[path] = dict(_reach(*alone[0]), lingering=True)
     return named
 
 
@@ -391,7 +412,7 @@ def excuse_background(data, calls):
         data[EXCUSED_KEY] = (known + added)[-50:]
 
 
-def executor_moved(store, task, since, moved=None, blamed=None):
+def executor_moved(store, task, since, moved=None, blamed=None, why=None):
     """Whether this task's own sessions worked since `since` (the review's start). A review holds the task lock, so
     the records that still get written while it runs are: a hook (a prompt or a Stop means a turn ran), a turn end
     recorded outside the lock, a message waiting in its inbox. A hook alone is not work when the session's
@@ -402,7 +423,9 @@ def executor_moved(store, task, since, moved=None, blamed=None):
     calls that may write reaches one of them (paths_moved_by), with or without a hook yet; without a readable
     transcript any hook still counts. `blamed` receives the background jobs left running before `since` that alone
     moved a path (paths_moved_by); the caller records them (excuse_background) so the next review holds them to names."""
+    note = why if why is not None else {}              # `why`: what it was taken for (blame_text reads it)
     if not since:
+        note.update(by='no_check_time')
         return True                                      # unknown: assume it did
     sessions = {r['session'] for r in store.task_sessions(task['id'])} | set(task['data'].get('session_ids') or [])
     for session in sessions:
@@ -411,13 +434,54 @@ def executor_moved(store, task, since, moved=None, blamed=None):
         transcript = store.preference(TRANSCRIPT_KEY + session)
         if moved is None:
             if hooked and tool_calls_since(transcript, since) != 0:
+                note.update(session=session, by='hook_and_tool_calls')
                 return True
             continue
+        reasons = {}
         named = paths_moved_by(transcript, since, moved, task['workspace'],
-                               task['data'].get(EXCUSED_KEY) or (), blamed)
-        if named or (named is None and hooked):
+                               task['data'].get(EXCUSED_KEY) or (), blamed, reasons)
+        if named:
+            shown = sorted(named)[:5]
+            note.update(session=session, by='tool_calls', count=len(named),
+                        calls=[dict(reasons[path], path=path) for path in shown if path in reasons])
             return True
-    return bool(store.db.execute('SELECT 1 FROM inbox WHERE task_id=? AND at>?', (task['id'], since)).fetchone())
+        if named is None and hooked:
+            note.update(session=session, by='hook', transcript=transcript or None)
+            return True
+    row = store.db.execute('SELECT text, at FROM inbox WHERE task_id=? AND at>? ORDER BY at LIMIT 1',
+                           (task['id'], since)).fetchone()
+    if row:
+        note.update(by='inbox', at=row['at'], text=(row['text'] or '')[:120])
+        return True
+    return False
+
+
+BLAME_BY = {'tool_calls': 'a tool call of session %s that may write reached it',
+            'hook': 'session %s ran a turn and its transcript could not be read',
+            'hook_and_tool_calls': 'session %s ran tool calls',
+            'inbox': 'a message waited in the task inbox',
+            'no_check_time': 'the checks recorded no time'}
+
+
+def blame_text(found):
+    """One line for the session sent back to claim again: what moved, and why it was taken for its own change.
+    Measured 2026-11-26: a review was sent back as "this session changed files" with no path and no call recorded;
+    replayed afterwards, no session of the task had called a tool in that window, and nothing told what had moved."""
+    moved = (found or {}).get('moved_paths') or {}
+    on = (found or {}).get('blamed_on') or {}
+    parts = []
+    paths = moved.get('paths') or []
+    if paths:
+        more = (moved.get('count') or len(paths)) - min(len(paths), 5)
+        parts.append('moved: ' + ', '.join(paths[:5]) + (' and %d more' % more if more > 0 else ''))
+    text = BLAME_BY.get(on.get('by'))
+    if text:
+        text = text % (on.get('session') or '?')[:8] if '%s' in text else text
+        call = (on.get('calls') or [{}])[0]
+        if call.get('command'):
+            text += ' (%s, %s: %s)' % (call.get('path'), call.get('how'), call['command'][:80])
+        parts.append('taken for its own because ' + text)
+    return (' ' + '; '.join(parts) + '.') if parts else ''
 
 
 def _rounds_view(data, task):
@@ -448,9 +512,10 @@ def evaluate(engine, task, lease_fds=()):
         if not attached or not dev.get('verified_tree') or checked is None:
             raise ValueError('Verifier requires all current fixed checks to pass')
         moved_before = moved_entries(checked, entries)
-        blamed = set()
-        if executor_moved(store, task, dev.get('verified_at'), moved_before, blamed):
-            raise ChangedDuringReview('own_files_before', excuse=blamed)   # no save here: the caller records it
+        blamed, blame = set(), {}
+        if executor_moved(store, task, dev.get('verified_at'), moved_before, blamed, why=blame):
+            raise ChangedDuringReview('own_files_before', {'moved_paths': {'paths': moved_before[:10], 'count': len(moved_before)},
+                                      'blamed_on': blame}, excuse=blamed)   # no save here: the caller records it
     done = copy.deepcopy(requirements.review_items(data) if attached else data.get('done', []))
     binding = {'goal': data.get('goal', task['prompt']),
                'context': data.get('context_prompts', []),
@@ -587,14 +652,17 @@ def evaluate(engine, task, lease_fds=()):
     # Who moved them is told by the paths that moved (executor_moved with `moved`), not by any tool call at all.
     if moved_before:
         verdict['changed_before_review'] = {'by': 'other_sessions', 'paths': moved_before[:10], 'count': len(moved_before)}
-    blamed = set()
-    own = why == 'files' and executor_moved(store, task, started, moved, blamed)
+    blamed, blame = set(), {}
+    own = why == 'files' and executor_moved(store, task, started, moved, blamed, why=blame)
     excuse_background(task['data'], blamed)              # saved with the verdict below, superseded or not
+    if why == 'files':
+        verdict['moved_paths'] = {'paths': moved[:10], 'count': len(moved)}
+        if own:
+            verdict['blamed_on'] = blame                 # what it was taken for: kept whether superseded or not
     if why == 'files' and own and outcome == 'verified':
         why = 'own_files'
     elif why == 'files':
         verdict['changed_during_review'] = 'own_session' if own else 'other_sessions'
-        verdict['moved_paths'] = {'paths': moved[:10], 'count': len(moved)}
         why = None
     task['data'].pop('active_call', None)
     if why:
