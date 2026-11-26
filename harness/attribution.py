@@ -41,7 +41,12 @@ READ_TOOLS = frozenset('''
     Read Grep Glob LS WebFetch WebSearch TodoWrite TodoRead ToolSearch Skill AskUserQuestion ListAgents SendMessage
     ScheduleWakeup Monitor TaskStop TaskOutput BashOutput KillShell KillBash ExitPlanMode EnterPlanMode TaskList TaskGet
     TaskCreate TaskUpdate sleep wait update_plan view_image clock__curr_time clock__sleep web__run web_search
+    Poll searchTools describeTool
 '''.split())
+# Poll (Claude Code's REPL harness, 2.1.330): waits for the events of scripts already dispatched and returns them; it
+# runs no command. Measured 2026-11-26: a session waited for its review with REPL scripts and Poll, Poll counted as
+# a write for the whole wait, and every file other sessions wrote in that time was held to the task (two passing
+# reviews set aside as its own change). What a script does is in its own records (verifier._repl_scripts).
 BACKGROUND_TOOLS = frozenset(('Agent', 'Task', 'Workflow'))  # subagents work on after the call returns
 # An MCP tool (mcp__server__tool, from Claude Code; tools.mcp__server__tool( from a Codex exec script) is told by the
 # words of its last part. A read verb and no write verb: it reads. Anything else may write, unknown words included
@@ -292,6 +297,198 @@ def _codex_script(script, output):
     return writes, background, workdir
 
 
+# Claude Code's REPL tool runs one JavaScript script per call. The script reaches the machine only through its
+# globals: `$` (a shell command, as a template `$\`…\`` whose ${…} parts go in as quoted words, or as `$(text)`),
+# write and edit (a file), tools.<Name>(…) and the same tools as bare globals; file(…), sleep and the rest read. A
+# script reads when every call in it is known to read: a command the shell classifier reads, a tool that reads, a
+# JavaScript builtin, a method of a value, a function the script defines itself. Anything else may write — a helper
+# an earlier script defined (the REPL keeps its context) is not in the code and is not guessed.
+REPL_READ_CALLS = frozenset('''
+    file sleep preview log running searchTools describeTool atob btoa setTimeout clearTimeout setInterval
+    clearInterval JSON Object Array Math String Number Boolean Date RegExp Promise Set Map WeakMap WeakSet Symbol
+    Error TypeError RangeError SyntaxError parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent
+    encodeURI decodeURI structuredClone BigInt Intl TextEncoder TextDecoder URL URLSearchParams
+'''.split())
+JS_KEYWORDS = frozenset('''
+    if for while switch catch function return typeof await async new do else try finally throw yield void delete
+    in of instanceof case default with class extends super this let const var import export
+'''.split())
+JS_IDENT = re.compile(r'[A-Za-z_$][\w$]*')
+JS_DEFINED = re.compile(r'\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*'
+                        r'(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)')
+JS_REGEX_BEFORE = frozenset('(,=:[!&|?{};+-*%<>~^')
+JS_REGEX_WORDS = frozenset('return typeof case do else in of yield await void delete instanceof new'.split())
+JS_THEN = re.compile(r'\.\s*then\s*\(')
+
+
+def _js_scan(code):
+    """(blanked, shells, tags) of a script, or None when it cannot be read to its end. `blanked`: the code with
+    every string, template, comment and regular expression replaced by `0` (a template's ${…} parts stay: they
+    are code); `shells`: each `$` template as (command, raw), its ${…} parts written ARG, raw when one splices
+    its value unquoted (${{raw: …}}); `tags`: the tags of other tagged templates."""
+    n, out, shells, tags = len(code), [], [], []
+
+    def tail():
+        return ''.join(out[-80:]).rstrip()
+
+    def regex_allowed():
+        text = tail()
+        if not text or text[-1] in JS_REGEX_BEFORE:
+            return True
+        word = re.search(r'([A-Za-z_$][\w$]*)$', text)
+        return bool(word and word.group(1) in JS_REGEX_WORDS)
+
+    def string(i, quote):
+        j = i + 1
+        while j < n:
+            if code[j] == '\\':
+                j += 2
+            elif code[j] == quote:
+                return j + 1
+            elif code[j] == '\n':
+                return None
+            else:
+                j += 1
+        return None
+
+    def regex(i):
+        j, within = i + 1, False
+        while j < n:
+            c = code[j]
+            if c == '\\':
+                j += 2
+                continue
+            if c == '\n':
+                return None
+            if within:
+                within = c != ']'
+            elif c == '[':
+                within = True
+            elif c == '/':
+                j += 1
+                while j < n and (code[j].isalnum() or code[j] == '_'):
+                    j += 1
+                return j
+            j += 1
+        return None
+
+    def template(i):
+        j, text, raw = i + 1, [], False
+        while j < n:
+            c = code[j]
+            if c == '\\':
+                text.append(code[j:j + 2])
+                j += 2
+            elif c == '`':
+                return j + 1, ''.join(text), raw
+            elif code.startswith('${', j):
+                raw = raw or re.match(r'\$\{\s*\{\s*raw\s*:', code[j:]) is not None
+                out.append(' ')
+                j = scan(j + 2, True)
+                if j is None:
+                    return None
+                out.append(' ')
+                text.append('ARG')
+            else:
+                text.append(c)
+                j += 1
+        return None
+
+    def scan(i, inner):
+        depth = 0
+        while i < n:
+            c = code[i]
+            if c in '"\'':
+                j = string(i, c)
+                if j is None:
+                    return None
+                out.append(' 0 ')
+                i = j
+            elif c == '`':
+                tag = re.search(r'([A-Za-z_$][\w$.]*)$', tail())
+                tag = tag.group(1) if tag else ''
+                found = template(i)
+                if found is None:
+                    return None
+                i, text, raw = found
+                if tag == '$':
+                    shells.append((text, raw))
+                elif tag and tag not in JS_KEYWORDS and not tag.endswith('String.raw'):
+                    tags.append(tag)
+                out.append(' 0 ')
+            elif code.startswith('//', i):
+                j = code.find('\n', i)
+                i = n if j < 0 else j
+            elif code.startswith('/*', i):
+                j = code.find('*/', i + 2)
+                if j < 0:
+                    return None
+                out.append(' ')
+                i = j + 2
+            elif c == '/' and regex_allowed():
+                j = regex(i)
+                if j is None:
+                    return None
+                out.append(' 0 ')
+                i = j
+            else:
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    if inner and depth == 0:
+                        return i + 1
+                    depth -= 1
+                out.append(c)
+                i += 1
+        return None if inner else n
+
+    try:
+        if scan(0, False) is None:
+            return None
+    except RecursionError:
+        return None
+    return ''.join(out), shells, tags
+
+
+def repl_effect(code):
+    """(writes, background) of a Claude Code REPL script (see REPL_READ_CALLS); a script that cannot be read may
+    write. background: it leaves work running (a shell job, a subagent, work chained with .then and not awaited)."""
+    scanned = _js_scan(str(code or ''))
+    if scanned is None:
+        return True, False
+    blanked, shells, tags = scanned
+    writes, background = bool(tags) or re.search(r'\btools\s*\[', blanked) is not None, False
+    for text, raw in shells:
+        command_writes, command_background = (True, False) if raw else shell_effect(text)
+        writes, background = writes or command_writes, background or command_background
+    defined = {first or second for first, second in JS_DEFINED.findall(blanked)}
+    for match in JS_IDENT.finditer(blanked):
+        name, start, end = match.group(), match.start(), match.end()
+        if not blanked[end:].lstrip().startswith('('):
+            continue
+        before = blanked[:start].rstrip()
+        if before.endswith('.'):
+            owner = re.search(r'(?<![\w$.])([A-Za-z_$][\w$]*)\s*\??\.$', before)
+            if owner and owner.group(1) == 'tools':
+                writes = writes or tool_writes(name)
+                background = background or name in BACKGROUND_TOOLS
+            continue                                     # a method of a value
+        if name in JS_KEYWORDS or name in defined or name in REPL_READ_CALLS:
+            continue
+        if name in ('$', 'write', 'edit'):
+            writes = True                                # a command built at run time, or a file written
+            continue
+        writes = writes or tool_writes(name)             # a tool as a bare global, or a helper not defined here
+        background = background or name in BACKGROUND_TOOLS
+    return writes, background or (writes and repl_leaves_work(blanked))
+
+
+def repl_leaves_work(code):
+    """Whether a REPL script chains work with .then: it may still run after the script has ended."""
+    scanned = _js_scan(str(code or ''))
+    return JS_THEN.search(scanned[0] if scanned else str(code or '')) is not None
+
+
 def call_effect(provider, call, output=''):
     """(writes, background, folder it ran in or None) for one tool call from a transcript.
 
@@ -303,6 +500,9 @@ def call_effect(provider, call, output=''):
             return writes, background or bool(data.get('run_in_background')), None
         if name in BACKGROUND_TOOLS:
             return True, True, None
+        if name == 'REPL':
+            writes, background = repl_effect(data.get('code') or '')
+            return writes, background, None
         return tool_writes(name), False, None
     kind, name = call.get('type'), call.get('name')
     if kind == 'local_shell_call':

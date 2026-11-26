@@ -11,7 +11,10 @@ at its input line with nobody telling it (or the user) what the review had found
 ② a Stop recorded outside the lock still counts: the supervisor types the continuation; the Stop starts it
 ③ a decided outcome is shown in the waiting session's terminal; unfinished work gets a supervisor
 ④ the instruction a stopped session receives says where each item stands
+⑤ Claude Code's REPL tool (2.1.330, measured 2026-11-26): a script runs from its call to its end event and each
+  command it ran is given that whole stretch; Poll only waits; a script still running is judged by its code
 """
+
 import datetime
 import json
 import os
@@ -530,9 +533,42 @@ def run(base, store, engine):
         background]]) and ('result', id) for Claude Code · ('tool', id, name) another Claude Code tool · ('notify', id,
         status) Claude Code's notice that a background job ended, as a user message (the session idle) · ('queued', id,
         status) the same notice queued while a turn runs · ('codex', id, exec script) and ('codex_out', id, text) for
-        Codex · ('write', fn) · ('pause', seconds)."""
+        Codex · ('write', fn) · ('pause', seconds). Claude Code's REPL, as 2.1.330 writes it: ('repl', id, code) its
+        call, ('dispatched', id, n) the result that comes at once, ('settled', n[, status]) the script's end event (a
+        queued event), ('inner', id, command[, cwd[, job]]) a command the script ran, recorded at its end as a
+        virtual call (job: moved to the background), ('poll', id) and ('polled', id) the call that waits for events."""
         import time
         for step in steps:
+            if step[0] == 'repl':
+                append(log, {'timestamp': stamp(), 'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': step[1], 'name': 'REPL', 'input': {'code': step[2]}}]}})
+                continue
+            if step[0] in ('dispatched', 'polled'):
+                text = '(dispatched #%s)' % step[2] if step[0] == 'dispatched' else 'events'
+                append(log, {'timestamp': stamp(), 'type': 'user', 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': step[1], 'content': text}]}})
+                continue
+            if step[0] == 'poll':
+                append(log, {'timestamp': stamp(), 'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': step[1], 'name': 'Poll', 'input': {}}]}})
+                continue
+            if step[0] == 'settled':
+                moment = stamp()
+                append(log, {'timestamp': moment, 'type': 'queue-operation', 'operation': 'enqueue', 'content':
+                             '<event kind="repl-eval" at="%s" eval="%s" ms="1" status="%s">\n<result>ok</result>\n'
+                             '</event>' % (moment, step[1], step[2] if len(step) > 2 else 'settled')})
+                continue
+            if step[0] == 'inner':
+                event = {'timestamp': stamp(), 'type': 'assistant', 'isVirtual': True, 'message': {'content': [
+                    {'type': 'tool_use', 'id': step[1], 'name': 'Bash', 'input': {'command': step[2]}}]}}
+                if len(step) > 3 and step[3]:
+                    event['cwd'] = str(step[3])
+                result = {'timestamp': stamp(), 'type': 'user', 'isVirtual': True, 'message': {'content': [
+                    {'type': 'tool_result', 'tool_use_id': step[1], 'content': ''}]}}
+                if len(step) > 4 and step[4]:
+                    result['toolUseResult'] = {'backgroundTaskId': 'b' + step[1], 'timedOutAfterMs': 1500}
+                append(log, event, result)
+                continue
             if step[0] in ('notify', 'queued'):
                 notice = ('<task-notification>\n<task-id>b%s</task-id>\n<tool-use-id>%s</tool-use-id>\n<output-file>/tmp/'
                           'b%s.output</output-file>\n<status>%s</status>\n<summary>Background command "a step" %s (exit '
@@ -784,6 +820,44 @@ def run(base, store, engine):
     check('a Workflow works on after its call returns, like a subagent',
           attribution.call_effect('claude', {'name': 'Workflow', 'input': {}})[:2] == (True, True),
           attribution.call_effect('claude', {'name': 'Workflow', 'input': {}}))
+
+    print("⑤ Claude Code's REPL tool: scripts, their commands and Poll (2.1.330, measured 2026-11-26)")
+    poll_loop = ('for (let i = 0; i < 30; i++) {\n  const s = await $`cosmos-orbit status S`.nothrow();\n'
+                 '  if (!/checking|verifying/.test(s.stdout)) break;\n  await sleep(30000);\n}')
+    task = timeline('S-X1', 'Build the Prolog export and make it robust',
+                    [('repl', 'x1', poll_loop), ('dispatched', 'x1', 1), ('poll', 'p1'), ('pause', gap),
+                     ('write', other('notes-x1.md'))])
+    check('incident 2026-11-26: the session waits for its review with a REPL script that polls `cosmos-orbit status` '
+          'and a Poll, another session writes a file: verified (was: Poll counted as a write for the whole wait, its '
+          'own change, two passing reviews set aside)', others(task), seen(task))
+    task = timeline('S-X2', 'Build the Lisp export and make it robust',
+                    [('repl', 'x2', 'await $`make`'), ('dispatched', 'x2', 2), ('pause', gap),
+                     ('write', dist('dist-x2'))])
+    check("control: a REPL script still running whose code runs `make` at the root, dist-x2/app.bin written: its own "
+          "change (was: the call looked like 0.07 s, the change was filed under other sessions)", own(task), seen(task))
+    task = timeline('S-X3', 'Build the Scheme export and make it robust',
+                    [('repl', 'x3', 'await $`make`'), ('dispatched', 'x3', 3), ('pause', gap),
+                     ('write', dist('dist-x3')), ('pause', gap), ('settled', 3), ('inner', 'repl_x3', 'make', root)])
+    check('an ended REPL script ran `make`, recorded at its end; dist-x3/app.bin was written mid-script: its own '
+          'change (was: the command looked like an instant at the end and the change went to other sessions)',
+          own(task), seen(task))
+    task = timeline('S-X4', 'Build the Ada export and make it robust',
+                    [('repl', 'x4', poll_loop), ('dispatched', 'x4', 4), ('pause', gap),
+                     ('write', other('notes-x4.md')), ('pause', gap), ('settled', 4),
+                     ('inner', 'repl_x4', 'cosmos-orbit status S-X4', root), ('poll', 'p4'), ('polled', 'p4')])
+    check('control: an ended REPL script that only read, another session wrote during it: verified',
+          others(task), seen(task))
+    task = timeline('S-X5', 'Build the COBOL export and make it robust',
+                    [('repl', 'x5', 'await $`make`.timeout(1000)'), ('dispatched', 'x5', 5), ('settled', 5),
+                     ('inner', 'repl_x5', 'make', root, True), ('pause', gap), ('write', dist('dist-x5'))])
+    check('a command the script moved to the background (`.timeout`) runs on after the script ended: dist-x5 '
+          'written later is its own change', own(task), seen(task))
+    task = timeline('S-X6', 'Build the BASIC export and make it robust',
+                    [('repl', 'x6', 'await $`make`.timeout(1000)'), ('dispatched', 'x6', 6), ('settled', 6),
+                     ('inner', 'repl_x6', 'make', root, True), ('notify', 'repl_x6', 'completed'), ('pause', gap),
+                     ('write', other('notes-x6.md'))])
+    check("…control: Claude Code's notice says that job completed before another session wrote: verified",
+          others(task), seen(task))
 
     own_log = base / 'S-P3.jsonl'
     append(own_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-P3'}})

@@ -126,7 +126,7 @@ def tool_calls_since(path, since):
     01:04:20, its Stop came 01:04:37, and the verdict was filed under the session's own changes while only another
     process had written a file)."""
     found = _tool_runs(path, since)
-    return None if found is None else sum(1 for run in found[0] if run['start'] >= found[1])
+    return None if found is None else sum(1 for run in found[0] if max(run['start'], run['recorded']) >= found[1])
 
 
 CODEX_TOOL_OUTPUTS = ('function_call_output', 'custom_tool_call_output')
@@ -140,6 +140,17 @@ NOTIFIED_CALL = re.compile(r'<tool-use-id>\s*([^<\s]+)\s*</tool-use-id>')
 NOTIFIED_STATUS = re.compile(r'<status>\s*([^<]*?)\s*</status>')
 JOB_ENDED = frozenset(('completed', 'failed', 'killed', 'stopped'))
 EXCUSED_KEY = 'background_excused'   # task data: background jobs already held to what they changed once
+# Claude Code's REPL tool (2.1.330; measured 2026-11-26 over this machine's last 60 transcripts). A REPL call returns
+# "(dispatched #N)" at once and its script runs on; the script's end is a queued event `<event kind="repl-eval" …
+# eval="N" … status="settled">` (2,305 of 2,307 scripts; status "late" when work it left running prints afterwards,
+# 78 times). Each call the script made is recorded at the script's end as a call of its own (isVirtual, id repl_…),
+# with no length: 13,336 calls, 99.2% within 2 s before and 5 s after their script's end. Read as they are, a script
+# looked like a 0.07 s call and its commands like instants at its end: a `make` the script ran a minute before its
+# end was never seen, while the Poll that waited for it counted as a write for the whole wait.
+REPL_DISPATCHED = re.compile(r'^\s*\(dispatched #(\d+)\)')
+REPL_EVENT = re.compile(r'^<event kind="repl-eval" at="[^"]*" eval="(\d+)"[^>]*\bstatus="([a-z]+)"')
+REPL_BEFORE = datetime.timedelta(seconds=2.5)        # a call recorded this long before its script's end is its own
+REPL_AFTER = datetime.timedelta(seconds=6.0)         # …and this long after it
 
 
 def _output_text(value):
@@ -176,7 +187,7 @@ def _tool_runs(path, since):
     Claude Code's completion notice; None while it runs or when nothing tells), its input as text, the folder it ran
     in, whether it may write and whether it leaves a process running; start is `since` to the millisecond. None when
     that cannot be told (no file, no timestamps, or the readable tail starts after `since`)."""
-    from .attribution import call_effect
+    from .attribution import call_effect, repl_leaves_work
     from .continuity import tail_lines
     start = _stamp(since)
     if not path or start is None:
@@ -188,7 +199,7 @@ def _tool_runs(path, since):
         lines = tail_lines(path)
     except OSError:
         return None
-    runs, by_id, earliest = [], {}, None
+    runs, by_id, earliest, evals = [], {}, None, {}
     for line in lines:
         try:
             event = json.loads(line)
@@ -213,13 +224,32 @@ def _tool_runs(path, since):
             for part in content:
                 if isinstance(part, dict) and part.get('type') == 'tool_use':
                     run = {'id': part.get('id'), 'start': at, 'end': None, 'finished': None, 'provider': 'claude',
-                           'call': part, 'cwd': event.get('cwd'), 'output': ''}
+                           'call': part, 'cwd': event.get('cwd'), 'output': '',
+                           'virtual': bool(event.get('isVirtual')) and str(part.get('id') or '').startswith('repl_')}
                     runs.append(run)
                     by_id[part.get('id') or id(run)] = run
+        elif event.get('type') == 'queue-operation':
+            ended = REPL_EVENT.match(str(event.get('content') or ''))
+            if ended:
+                settled, late = evals.get(ended.group(1), (None, None))
+                if ended.group(2) == 'late':
+                    late = at if late is None else max(late, at)
+                elif settled is None:
+                    settled = at
+                evals[ended.group(1)] = (settled, late)
         elif event.get('type') in ('user', 'attachment'):
             for part in content if event.get('type') == 'user' and isinstance(content, list) else ():
                 if isinstance(part, dict) and part.get('type') == 'tool_result' and part.get('tool_use_id') in by_id:
-                    by_id[part['tool_use_id']]['end'] = at
+                    run = by_id[part['tool_use_id']]
+                    dispatched = (REPL_DISPATCHED.match(_output_text(part.get('content')))
+                                  if run['call'].get('name') == 'REPL' else None)
+                    if dispatched:
+                        run['eval'] = dispatched.group(1)  # the script runs on until its end event
+                    else:
+                        run['end'] = at
+                    outcome = event.get('toolUseResult')
+                    if event.get('isVirtual') and isinstance(outcome, dict) and outcome.get('backgroundTaskId'):
+                        run['job'] = True                # a command the script moved to the background
             for call, status in _notified(event):
                 if call in by_id and status in JOB_ENDED:
                     # The latest notice: a subagent resumed by a message notifies again when it stops again.
@@ -227,11 +257,46 @@ def _tool_runs(path, since):
     if earliest is None or earliest > start:
         return None                                      # the tail does not reach back to the review's start
     for run in runs:
+        run['recorded'] = run['start']
+    _repl_scripts(runs, evals)
+    for run in runs:
         call = run['call']
         run['writes'], run['background'], workdir = call_effect(run['provider'], call, run['output'])
+        if run['provider'] == 'claude' and call.get('name') == 'REPL' and run.get('eval') and run['end']:
+            # An ended script: what it did is in its own calls. Only work it chained with .then may still run.
+            code = (call.get('input') or {}).get('code') if isinstance(call.get('input'), dict) else ''
+            if run['writes'] and repl_leaves_work(code):
+                run['background'], run['finished'] = True, run.get('late')
+            else:
+                run['writes'] = run['background'] = False
+        if run.get('job'):
+            run['background'] = True                     # it runs until Claude Code's notice names it
         run['cwd'] = run['cwd'] or workdir
         run['text'] = json.dumps(call.get('input') if run['provider'] == 'claude' else call, ensure_ascii=False)
     return runs, start
+
+
+def _repl_scripts(runs, evals):
+    """Give REPL scripts and the calls they made their real stretch (see REPL_DISPATCHED): a script runs from its call
+    to its end event (None while it runs: it counts until now); each call recorded at a script's end ran somewhere in
+    that script, so it starts where the script started. A call no ended script accounts for is held to every script
+    still open when it was recorded, the earliest start (the safe side: a longer stretch)."""
+    scripts = [run for run in runs if run['provider'] == 'claude' and run['call'].get('name') == 'REPL']
+    for script in scripts:
+        if script.get('eval'):
+            settled, late = evals.get(script['eval'], (None, None))
+            script['end'] = settled
+            script['late'] = late if late and settled and late > settled else None
+    for run in runs:
+        if not run.get('virtual'):
+            continue
+        at = run['start']
+        owners = [script for script in scripts if script['end'] and script['start'] <= at
+                  and script['end'] - REPL_BEFORE <= at <= script['end'] + REPL_AFTER]
+        owners = owners or [script for script in scripts if script['start'] <= at
+                            and (script['end'] is None or script['end'] + REPL_AFTER >= at)]
+        if owners:
+            run['start'] = min(script['start'] for script in owners)
 
 
 def _names(text, path):
