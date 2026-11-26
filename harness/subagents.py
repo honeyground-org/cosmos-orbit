@@ -14,7 +14,9 @@ What Claude Code tells a hook (measured 2026-11-24, three Agent calls in one mes
 - Beside its transcript (`<session transcript without .jsonl>/subagents/agent-<agent_id>.jsonl`) Claude Code writes
   `agent-<agent_id>.meta.json` at launch: the Agent call's `toolUseId`, `description`, `agentType`, and
   `"finished": true` once an anonymous subagent has returned. A teammate (started with a name) never finishes: it goes
-  idle and leaves its team (teammates.py).
+  idle and leaves its team (teammates.py). A teammate's .meta.json carries no toolUseId (2026-11-26, Claude Code
+  2.1.332: 8 of 8 in one lead's folder), so the place its call took is matched by its name instead; before that, a new
+  teammate counted twice for 120 s (its folder entry and its unmatched place) and its row ended "lost" while it ran.
 - Claude Code's own helpers (the prompt suggestion) run as agents too: they fire SubagentStop with no agent_type, make
   no Agent call and write no file here, so they are never counted.
 
@@ -53,6 +55,8 @@ SETTING = 'subagents'         # settings.json section: {"max": N}; 0 = off
 AGENT_TOOLS = ('Agent', 'Task')   # Task: the Agent tool's earlier name
 RESERVE_SECONDS = 120         # an allowed call whose .meta.json never appears did not launch (refused elsewhere, failed)
 QUIET_SECONDS = 60 * 60       # an anonymous subagent not finished but silent this long is gone (its session died)
+MATCH_SLACK = 5               # a teammate's place matches a folder entry of its name written no earlier than this before it
+SHOWN = 8                     # subagents named in a refusal, at most (each counted one, up to this many)
 KEEP_SECONDS = 30 * 86400     # rows older than this are dropped
 MEASURED_COST = 26_314        # tokens, a subagent that only replied "OK" (2026-11-24, Claude Code 2.1.331)
 LINE_CHARS = 600
@@ -170,11 +174,24 @@ def _settle(store, session, transcript, now):
     caller's transaction."""
     found = folder_agents(transcript, now) if transcript else []
     by_call = {r['call']: r for r in found if r['call']}
+    by_agent = {r['agent_id']: r for r in found}
+    by_name = {}                                   # a teammate's .meta.json has no toolUseId: the newest of each name
+    for r in found:
+        if r['name'] and not r['call'] and r['name'] not in by_name:
+            by_name[r['name']] = r
+    claimed = {r['agent'] for r in store.db.execute('SELECT agent FROM subagents WHERE session=? AND agent IS NOT NULL',
+                                                    (session,)).fetchall()}
     ended = []
     for row in store.db.execute("SELECT * FROM subagents WHERE session=? AND state IN ('starting','running')",
                                 (session,)).fetchall():
         row = dict(row)
-        seen = by_call.get(row['call'])
+        seen = by_call.get(row['call']) or (by_agent.get(row['agent']) if row['agent'] else None)
+        if not seen and not row['agent'] and row['name']:
+            mate = by_name.get(row['name'])
+            if mate and mate['agent_id'] not in claimed and \
+                    mate['written'] >= (_seconds(row['started']) or now) - MATCH_SLACK:
+                seen = mate
+                claimed.add(mate['agent_id'])
         if seen and not row['agent']:
             store.db.execute("UPDATE subagents SET agent=?, transcript=?, state='running' WHERE call=?",
                              (seen['agent_id'], seen['transcript'], row['call']))
@@ -219,7 +236,8 @@ def _measure(row):
 # ---------------------------------------------------------------- the gate
 
 def refusal_text(running, at_most):
-    names = ', '.join(_label(r) for r in running[:at_most])
+    names = ', '.join(_label(r) for r in running[:SHOWN]) + (' and %d more' % (len(running) - SHOWN)
+                                                              if len(running) > SHOWN else '')
     return ('Orbit: not started — %d subagents already run in this session (%s), at most %d at a time. Wait until one '
             'finishes, or do this step yourself in this conversation; a subagent is a new conversation that costs about '
             '%dk tokens before it does any work.' % (len(running), names, at_most, round(MEASURED_COST / 1000)))[:LINE_CHARS]
