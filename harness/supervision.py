@@ -341,7 +341,7 @@ def record_stop(store, task, session, said=None):
         raise
 
 
-def tick(store, task_id, session, runner=None):
+def tick(store, task_id, session, runner=None, sleep=time.sleep):
     """One observation. No typing on busy/unknown/user input; at most once per stopped turn."""
     from . import attach, continuity, typist, wake
     runner = runner or wake._run
@@ -438,11 +438,32 @@ def tick(store, task_id, session, runner=None):
         store.save(latest, latest['status'], 'continuation_attempted',
                    dict({'session': session, 'layer': 'control'},
                         **({'located': terminal['target'], 'named': recorded['target']} if terminal != recorded else {})))
-        for argv in (typist.command(terminal, text=RESUME_LINE), typist.command(terminal, key='enter')):
-            if runner(argv)[0]:
-                return 'send_failed'
+        if runner(typist.command(terminal, text=RESUME_LINE))[0]:
+            return 'send_failed'
         wake.record_wake(store.home, terminal['target'])
-    return 'continued'
+    return press_continuation(store, task_id, session, terminal, runner, sleep)
+
+
+NOT_SENT = 'Orbit: the continuation line is still in your input; press Enter to send it.'
+
+
+def press_continuation(store, task_id, session, terminal, runner, sleep=time.sleep, by='supervisor'):
+    """Send the continuation line typed a moment ago (wake.press_enter), outside the task lock: the prompt hook that
+    the sent line runs takes that lock. 'continued' only when the line left the input.
+
+    Measured 2026-11-26 15:32 (Codex 0.166): the line was typed and Enter pressed at once; Codex took it as a paste
+    and kept it in the input, the ledger said continued, and the session sat idle until the user pressed Enter."""
+    from . import wake
+    outcome, _ = wake.press_enter(terminal, RESUME_LINE, runner, sleep)
+    if outcome == 'submitted':
+        return 'continued'
+    if outcome == 'typing_failed':
+        return 'send_failed'
+    runner(wake.notify_command(terminal, NOT_SENT))      # the line stays: it is the user's to send or erase
+    with store.db:
+        store._event(task_id, 'continuation_not_submitted', {'session': session, 'by': by,
+                     'target': terminal['target'], 'layer': 'control'})
+    return 'not_submitted'
 
 
 def ensure(store, task, session):
@@ -496,6 +517,7 @@ def main(home, task_id, session, close_workspace=False, sleep=time.sleep, clock=
     last, since = None, clock()
     terminal_outcomes = {'disabled', 'settled', 'input_required', 'session_ended', 'no_terminal',
                          'unknown_session', 'replaced', 'notify_only', 'send_failed', 'no_work',
+                         'not_submitted',     # the line sits in the input; its Enter, by the user, starts the turn
                          'handed_off',        # the fresh session's own Stop starts its supervisor
                          'awaiting_answer'}   # the user's reply starts the next turn (and the handoff) itself
     try:

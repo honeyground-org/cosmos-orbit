@@ -192,13 +192,47 @@ def _run(argv):
         return 1, str(error)
 
 
+def press_enter(terminal, line, runner=None, sleep=time.sleep):
+    """Send a line typed into the input a moment ago. Returns (outcome, the Enter argv list): 'submitted',
+    'not_submitted' (still in the input after two Enters) or 'typing_failed'.
+
+    Codex 0.166 takes text and an Enter that follows at once as a paste and keeps the line in its input (measured
+    2026-11-05); Enter after a pause submits it. One more Enter if it still sits there. Every line Orbit types goes
+    through here: the continuation line once pressed Enter at once, and on 2026-11-26 it sat in a Codex input,
+    recorded as continued, until the user pressed Enter."""
+    from . import typist
+    runner = runner or _run
+    pressed = []
+    for _ in range(2):
+        sleep(PASTE_GAP)
+        enter = typist.command(terminal, key='enter')
+        pressed.append(enter)
+        if runner(enter)[0] != 0:
+            return 'typing_failed', pressed
+        sleep(1.5)
+        code, after = runner(screen_command(terminal))
+        if not (code == 0 and line[:40] in after and read_state(after) == 'typing'):
+            return 'submitted', pressed
+    return 'not_submitted', pressed
+
+
+def submit(terminal, line, runner=None, sleep=time.sleep):
+    """Type `line` into an empty input and send it (press_enter). Returns (outcome, typed argv list)."""
+    from . import typist
+    runner = runner or _run
+    typed = [typist.command(terminal, text=line)]
+    if runner(typed[0])[0] != 0:
+        return 'typing_failed', typed
+    outcome, pressed = press_enter(terminal, line, runner, sleep)
+    return outcome, typed + pressed
+
+
 def deliver(terminal, sender='', when_busy='wait', wait=WAIT, runner=None, sleep=time.sleep, clock=time.monotonic,
             allowed=lambda: True, line=WAKE_LINE):
     """Look at the screen until the line can be typed, then type it once. Returns (outcome, typed argv list).
 
     `allowed()` is asked right before typing (the hourly bound and the gap between wakes). `line` is the wake line,
     or the carry line a fresh session needs when no typist is waiting for it (continuity.resume_carried)."""
-    from . import typist
     runner = runner or _run
     deadline = clock() + wait
     notified = False
@@ -212,22 +246,8 @@ def deliver(terminal, sender='', when_busy='wait', wait=WAIT, runner=None, sleep
             if not allowed():
                 runner(notify_command(terminal, 'A message%s is waiting (wake limit reached).' % who))
                 return 'throttled', []
-            typed = [typist.command(terminal, text=line)]
-            if runner(typed[0])[0] != 0:
-                return 'typing_failed', typed
-            for _ in range(2):
-                # Codex 0.166 takes text and an Enter that follows at once as a paste and keeps the line in its
-                # input (measured 2026-11-05); Enter after a pause submits it. One more Enter if it still sits there.
-                sleep(PASTE_GAP)
-                enter = typist.command(terminal, key='enter')
-                typed.append(enter)
-                if runner(enter)[0] != 0:
-                    return 'typing_failed', typed
-                sleep(1.5)
-                code, after = runner(screen_command(terminal))
-                if not (code == 0 and line[:40] in after and read_state(after) == 'typing'):
-                    return 'woken', typed
-            return 'not_submitted', typed
+            outcome, typed = submit(terminal, line, runner, sleep)
+            return ('woken' if outcome == 'submitted' else outcome), typed
         if state in ('typing', 'unknown', 'unreadable') and not notified:
             text = ('A message%s is waiting; it is delivered when your input line is empty.' % who if state == 'typing'
                     else 'A message%s is waiting for this session.' % who)
