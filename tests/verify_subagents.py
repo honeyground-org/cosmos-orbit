@@ -18,6 +18,9 @@ used 26,314 tokens. Replayed here through the real hook command line, with the f
     reported outdated with the fix
   ⑥ the session is told at SessionStart (after the rest of the brief), not where the limit is off, not in Codex
   ⑦ the record: subagent_started, subagent_refused and subagent_ended on the session's task
+  ⑧ after a lead's /clear handoff (measured 2026-11-26): its old team is gone and its teammates go on in the new
+    folder; one whose turn ended waits and is not counted (one waiting on a tool call is); a teammate's .meta.json has
+    no toolUseId, so its place is matched by name and counted once; a refusal names every subagent it counted
 
 Nothing starts a model or touches the live Orbit home or host settings: the store and the Claude Code folder are
 temporary.
@@ -368,6 +371,78 @@ def record(store):
     check('an end says which, why and when', bool(ended) and all(p.get('why') and p.get('ended') for p in ended), ended[:2])
 
 
+def turn(path, tool=False):
+    """The model's last line in a teammate's transcript: an answer that ends its turn, or a tool call it waits on; then a
+    line that is not a message (Claude Code writes such lines after an answer)."""
+    content = ([{'type': 'tool_use', 'id': 'toolu_w', 'name': 'Bash', 'input': {'command': 'make'}}] if tool
+               else [{'type': 'text', 'text': 'Done: merged, and the result is sent to team-lead.'}])
+    with open(path, 'a') as stream:
+        stream.write(json.dumps({'type': 'assistant', 'isSidechain': True, 'message': {
+            'role': 'assistant', 'content': content, 'stop_reason': 'tool_use' if tool else 'end_turn'}}) + '\n')
+        stream.write(json.dumps({'type': 'attachment', 'isSidechain': True}) + '\n')
+
+
+def teammate(pay, name, hexid, team_name, age=0, last=None):
+    """A teammate as Claude Code 2.1.332 writes it: .meta.json with its name and team and no toolUseId. last: None (a
+    message to it is the last line: working), 'answer' (its turn ended) or 'tool' (waiting on a tool call)."""
+    sub = subagents_dir(pay['transcript_path'])
+    sub.mkdir(parents=True, exist_ok=True)
+    agent = 'a%s-%s' % (name, hexid)
+    transcript, meta = sub / ('agent-%s.jsonl' % agent), sub / ('agent-%s.meta.json' % agent)
+    transcript.write_text(json.dumps({'type': 'user', 'isSidechain': True, 'agentId': agent,
+                                      'message': {'role': 'user', 'content': 'go'}}) + '\n')
+    if last:
+        turn(transcript, tool=last == 'tool')
+    meta.write_text(json.dumps({'agentType': name, 'description': 'teammate ' + name, 'name': name,
+                                'taskKind': 'in_process_teammate', 'teamName': team_name}))
+    if age:
+        for path in (transcript, meta):
+            os.utime(path, (time.time() - age, time.time() - age))
+    return agent
+
+
+def handoff(base, store):
+    print('⑧ after a /clear handoff (measured 2026-11-26): the old team gone, teammate places, every name in a refusal')
+    home = store.home
+    pay, _ = session(base, store, 'S8')
+    for i, name in enumerate(('rec16', 'rich4', 'ledger24', 'loop1', 'shopcat5', 'noti3')):
+        teammate(pay, name, '%016x' % (0xa0 + i), 'session-gone', age=300 + 240 * i, last='answer')
+    out = hook(base, home, call(pay, 'repl_n1', 'notice fix and merge', name='noti4'))
+    check('six teammates of a team that is gone, each turn ended 5-25 min ago, wait: none counted, this is 1 of 5',
+          started(out) and 'subagent 1 of at most 5' in spec(out).get('additionalContext', ''), spec(out))
+    team(base, ['noti4'])
+    noti4 = teammate(pay, 'noti4', '7ef008d0dca64565', TEAM)
+    out = hook(base, home, call(pay, 'repl_n2', 'feedback loop', name='loop2'))
+    check("a teammate's .meta.json has no toolUseId: its place is matched by its name, counted once (this is 2 of 5)",
+          started(out) and 'subagent 2 of at most 5' in spec(out).get('additionalContext', ''), spec(out))
+    teammate(pay, 'mid1', '%016x' % 0xb1, 'session-gone', age=60, last='tool')
+    out = hook(base, home, call(pay, 'repl_n3', 'beside a busy one'))
+    check('control: a teammate of the gone team still waiting on a tool call (1 min ago) counts: noti4, mid1 and loop2 '
+          '(its place still being taken): this is 4 of 5', started(out)
+          and 'subagent 4 of at most 5' in spec(out).get('additionalContext', ''), spec(out))
+    teammate(pay, 'mid2', '%016x' % 0xb2, 'session-gone', age=30, last='tool')
+    teammate(pay, 'mid3', '%016x' % 0xb3, 'session-gone', age=10)
+    out = hook(base, home, call(pay, 'repl_n4', 'one too many'))
+    reason = spec(out).get('permissionDecisionReason', '')
+    names = ('noti4', 'mid1', 'mid2', 'mid3', 'loop2', 'beside a busy one')
+    check('six counted, the seventh refused: the refusal names all six it counted', refused(out)
+          and '6 subagents already run' in reason and all(n in reason for n in names), reason)
+    quiet = teammate(pay, 'mid4', '%016x' % 0xb4, 'session-gone', age=2400, last='tool')
+    view = context(base, home, 'subagents', '--session', 'S8')
+    labels = [r.get('label') for r in view.get('running') or []]
+    check('control: one of the gone team silent for 40 min (its last line a tool call) is not counted', 'mid4' not in labels
+          and 'mid1' in labels, labels)
+    if subagents:
+        later = time.time() + subagents.RESERVE_SECONDS + 5
+        subagents.gate(home, 'claude', call(pay, 'repl_n5', 'two minutes on'), now=later)
+        row = [r for r in rows(store, 'S8') if r['call'] == 'repl_n1']
+        check("noti4's row carries its agent id and runs (not lost after 120 s while it ran)", bool(row)
+              and row[0]['state'] == 'running' and row[0]['agent'] == noti4, row)
+    else:
+        check("noti4's row carries its agent id and runs (not lost after 120 s while it ran)", False, 'no subagents module')
+    return quiet
+
+
 def main():
     base = Path(tempfile.mkdtemp(prefix='orbit-subagents-'))
     try:
@@ -379,6 +454,7 @@ def main():
         install(base)
         told(base, store)
         record(store)
+        handoff(base, store)
         store.close()
     finally:
         shutil.rmtree(base, ignore_errors=True)

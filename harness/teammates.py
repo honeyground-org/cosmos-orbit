@@ -15,7 +15,12 @@ model):
   once it returned. A teammate's never does: it goes idle between messages (SubagentStop fires at every idle) and ends
   by leaving its team, whose `<config>/teams/<team>/config.json` lists the members still running (on 2026-11-23
   exactly the running list Claude Code's ListAgents showed). A name started again writes a new transcript; the older
-  one was replaced. Without a team to ask, a transcript written in the last 30 minutes counts as running.
+  one was replaced. Without a team to ask, a transcript written in the last 30 minutes counts as running, unless it
+  ends on the end of the teammate's turn: then it waits for a message and does no work. That is the state after a
+  lead's /clear handoff (measured 2026-11-26, Claude Code 2.1.332): the old conversation's team folder is deleted, its
+  teammates go on in the new conversation's subagents folder with the old team still named in their .meta.json, and
+  6 of them that had answered and fallen idle 5-30 minutes earlier counted as running and kept the lead's next start
+  refused for 6 minutes.
 - The PreToolUse hook fires for a teammate's shell calls too. Its input carries `agent_id` (the transcript's name) and
   `agent_type` (a teammate's name); its `transcript_path` is the main session's.
 
@@ -32,6 +37,7 @@ import time
 RENOTIFY = 100_000            # told again after this much growth (the teammate, and the lead about it)
 QUIET_SECONDS = 30 * 60       # no team to ask: a transcript written this recently still runs
 STALE_SECONDS = 24 * 3600     # a transcript not written for this long is not looked at
+TURN_TAIL = 65_536            # the end of a transcript, enough for its last message
 TAIL_FIRST = 262_144          # the newest request ends the transcript; the 4 MB tail is read only if it is not here
 SETTING = 'teammates'         # settings.json, section "handoff"
 NOTICE_KEY = 'teammate-notice:'   # + agent id: the last notice that teammate got ({tokens, at})
@@ -99,6 +105,33 @@ def _members(config, team, cache):
     return cache[team]
 
 
+def turn_ended(path):
+    """True when a transcript ends on the end of a turn: its last user or assistant line is the model's answer with
+    stop_reason end_turn (or stop_sequence) and no tool call. A teammate there waits for a message; one whose last
+    line is a tool call, a tool result or a message to it is working. Lines that are not messages are skipped."""
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - TURN_TAIL))
+            lines = handle.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get('type') not in ('user', 'assistant'):
+            continue
+        message = record.get('message') if isinstance(record.get('message'), dict) else {}
+        content = message.get('content')
+        if record['type'] != 'assistant' or (isinstance(content, list) and any(
+                isinstance(block, dict) and block.get('type') == 'tool_use' for block in content)):
+            return False
+        return message.get('stop_reason') in ('end_turn', 'stop_sequence')
+    return False
+
+
 def agents(transcript_path, now=None):
     """The teammates (named subagents) of the session whose transcript this is, newest first: name, agent id,
     transcript, last write, whether it still runs and why, and its size when it runs (None: unknown). An anonymous
@@ -141,6 +174,10 @@ def agents(transcript_path, now=None):
         elif members is not None:
             row['running'] = row['name'] in members
             row['why'] = ('a member of team ' if row['running'] else 'no longer a member of team ') + team
+        elif turn_ended(row['transcript']):
+            row['running'] = False
+            row['why'] = '%s; its turn ended %d min ago' % ('its team %s is gone' % team if team else 'no team to ask',
+                                                            (now - row['written']) // 60)
         else:
             row['running'] = now - row['written'] <= QUIET_SECONDS
             row['why'] = 'no team to ask; last written %d min ago' % ((now - row['written']) // 60)
