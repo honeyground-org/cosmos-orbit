@@ -892,6 +892,89 @@ def run(base, store, engine):
           task['status'] == 'verified' and (last_of(task).get('changed_before_review') or {}).get('by') == 'other_sessions',
           (task['status'], task['data'].get('reason_code'), last_of(task).get('changed_before_review')))
 
+    print('⑧ a review sent back as the session\'s own change says what moved and why it was taken for the session\'s')
+    # Measured 2026-11-26: a review was sent back as "this task's session changed files after the checks" with no path
+    # and no call recorded; replayed afterwards, no session of the task had called a tool in that window, and nothing
+    # in the ledger told what had moved or what it had been blamed on.
+
+    def resumed(tid_):
+        rows = [row['payload'] for row in store.events(tid_) if row['kind'] == 'resumed'
+                and row['payload'].get('because') == 'changed_during_review']
+        return rows[-1] if rows else {}
+
+    def first_call(found):
+        return ((found.get('blamed_on') or {}).get('calls') or [{}])[0]
+
+    own_log = base / 'S-W1.jsonl'
+    append(own_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-W1'}})
+    tid = claimed(store, root, 'S-W1', 'Build the Ada export and make it robust')
+    store.preference(verifier.TRANSCRIPT_KEY + 'S-W1', str(own_log))
+
+    def own_patch():
+        (root / 'export.py').write_text('def export(rows):\n    return [row for row in rows]  # S-W1\n')
+        append(own_log, codex_item('tool', 'apply_patch export.py'))
+    with patch.object(development, 'check', side_effect=then(own_patch)):
+        task = review(engine, tid, verdict('met'))
+    event = resumed(tid)
+    check('before the review, its own apply_patch names export.py: the resumed event records the path that moved '
+          '(was: only "because" and "turn")', (event.get('moved_paths') or {}).get('paths') == ['export.py'],
+          (task['status'], task['data'].get('reason_code'), task['data'].get('reason'), event,
+           [row['kind'] for row in store.events(tid)][-6:]))
+    check('…and the session it was blamed on, by which call and how that call reached the path',
+          (event.get('blamed_on') or {}).get('session') == 'S-W1' and (event.get('blamed_on') or {}).get('by') == 'tool_calls'
+          and first_call(event).get('path') == 'export.py' and first_call(event).get('how') == 'named'
+          and 'apply_patch export.py' in (first_call(event).get('command') or ''), event.get('blamed_on'))
+    check('…the session sent back is told the same in its reason',
+          'moved: export.py' in (task['data'].get('reason') or '') and 'S-W1' in (task['data'].get('reason') or '')
+          and 'apply_patch export.py' in (task['data'].get('reason') or ''), task['data'].get('reason'))
+
+    own_log = base / 'S-W2.jsonl'
+    append(own_log, {'timestamp': stamp(-30), 'type': 'session_meta', 'payload': {'id': 'S-W2'}})
+    tid = claimed(store, root, 'S-W2', 'Build the Pascal export and make it robust')
+    store.preference(verifier.TRANSCRIPT_KEY + 'S-W2', str(own_log))
+    with patch.object(development, 'check', side_effect=then(lambda: play(own_log, [
+            ('call', 'w2', 'make', root), ('write', dist('dist-w2')), ('result', 'w2')]))):
+        task = review(engine, tid, verdict('met'))
+    event = resumed(tid)
+    check('before the review, its own `make` at the root wrote dist-w2/app.bin, naming nothing: recorded as changed '
+          'while that call ran', (event.get('moved_paths') or {}).get('paths') == ['dist-w2/app.bin']
+          and first_call(event).get('how') == 'changed_while_running' and first_call(event).get('command') == 'make'
+          and first_call(event).get('call') == 'w2', event)
+
+    tid = claimed(store, root, 'S-W3', 'Build the Cobol export and make it robust')
+    unread = base / 'S-W3-gone.jsonl'                    # the hook reports a transcript that cannot be read
+
+    def hook_only():
+        other('notes-w3.md')()
+        stop_hook('S-W3', unread)
+    with patch.object(development, 'check', side_effect=then(hook_only)):
+        task = review(engine, tid, verdict('met'))
+    event = resumed(tid)
+    check('before the review, only a Stop hook and no readable transcript: recorded as taken for a turn whose '
+          'transcript could not be read, with what moved', (event.get('blamed_on') or {}).get('by') == 'hook'
+          and (event.get('blamed_on') or {}).get('session') == 'S-W3'
+          and (event.get('moved_paths') or {}).get('paths') == ['notes-w3.md']
+          and 'could not be read' in (task['data'].get('reason') or ''), (event, task['data'].get('reason')))
+
+    task = timeline('S-W4', 'Build the Prolog export and make it robust',
+                    [('call', 'w4', 'make', root), ('write', dist('dist-w4')), ('result', 'w4')])
+    found = last_of(task)
+    check('during the review, its own `make` wrote dist-w4/app.bin: the superseded verdict records what moved and '
+          'what it was blamed on', found.get('superseded') == 'own_files'
+          and (found.get('moved_paths') or {}).get('paths') == ['dist-w4/app.bin']
+          and (found.get('blamed_on') or {}).get('session') == 'S-W4' and first_call(found).get('call') == 'w4',
+          (found.get('superseded'), found.get('moved_paths'), found.get('blamed_on')))
+    event = resumed(task['id'])
+    check('…the resumed event and the reason carry it too', (event.get('blamed_on') or {}).get('session') == 'S-W4'
+          and 'moved: dist-w4/app.bin' in (task['data'].get('reason') or ''), (event, task['data'].get('reason')))
+
+    task = timeline('S-W5', 'Build the Scheme export and make it robust',
+                    [('call', 'w5', 'cat export.py'), ('result', 'w5'), ('pause', gap), ('write', other('notes-w5.md'))])
+    found = last_of(task)
+    check('control: another session wrote during the review: verified, the verdict names what moved and blames no '
+          'session', others(task) and (found.get('moved_paths') or {}).get('paths') == ['notes-w5.md']
+          and not found.get('blamed_on'), (seen(task), found.get('moved_paths'), found.get('blamed_on')))
+
 
 if __name__ == '__main__':
     sys.exit(main())
