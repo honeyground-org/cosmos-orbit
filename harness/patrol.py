@@ -143,13 +143,12 @@ def nudge(store, task, session, runner=None, at=None, desktop=None):
                 store._event(tid, 'patrol_continued', {'session': session, 'nudge': state['sent'],
                                                        'idle_seconds': int(idle), 'target': terminal['target'],
                                                        'layer': 'control'})
-            for argv in (typist.command(terminal, text=supervision.RESUME_LINE), typist.command(terminal, key='enter')):
-                if run(argv)[0]:
-                    return 'send_failed'
+            if run(typist.command(terminal, text=supervision.RESUME_LINE))[0]:
+                return 'send_failed'
             wake.record_wake(store.home, terminal['target'])
     except RuntimeError:
         return 'task_busy'                               # a review holds the task: the next round decides again
-    return 'continued'
+    return supervision.press_continuation(store, tid, session, terminal, run, by='patrol')
 
 
 def sweep(store, runner=None, at=None, desktop=None):
@@ -199,7 +198,7 @@ def run_forever(home, interval=INTERVAL, sleep=time.sleep, rounds=None):
         try:
             with store.lock('patrol'):
                 for task_id, session, outcome in sweep(store):
-                    if outcome in ('continued', 'told', 'gave_up', 'notify_only', 'send_failed') or \
+                    if outcome in ('continued', 'told', 'gave_up', 'notify_only', 'send_failed', 'not_submitted') or \
                             outcome.startswith(('told_', 'error', 'idle_closed')):
                         print('%s patrol %s %s %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), task_id, session or '-', outcome),
                               file=sys.stderr, flush=True)
